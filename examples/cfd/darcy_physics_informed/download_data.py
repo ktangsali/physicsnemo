@@ -25,7 +25,8 @@ output_filenames = [
     "datasets/Darcy_241/validation.hdf5",
 ]
 
-split_percentage = 80
+#split_percentage = [80, 20]
+split_percentage = [10, 10]
 
 with h5py.File(output_filenames[0], "w") as f_part1, h5py.File(
     output_filenames[1], "w"
@@ -36,10 +37,12 @@ with h5py.File(output_filenames[0], "w") as f_part1, h5py.File(
             data = f[key][:]  # Load current dataset to memory
 
             # Calculate the split index based on the percentage
-            split_idx = int(len(data) * split_percentage / 100)
+            split_idx = []
+            for split in split_percentage:
+                split_idx.append(int(len(data) * split / 100))
 
             # Split the data into two parts based on the calculated index
-            data_part1, data_part2 = data[:split_idx], data[split_idx:]
+            data_part1, data_part2 = data[:split_idx[0]], data[split_idx[0]:split_idx[0]+split_idx[1]]
 
             # Save the data parts to the new files
             f_part1.create_dataset(key, data=data_part1)

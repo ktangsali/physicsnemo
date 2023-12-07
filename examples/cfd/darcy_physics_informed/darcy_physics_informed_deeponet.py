@@ -14,112 +14,21 @@
 
 import hydra
 from omegaconf import DictConfig
-import h5py
 import torch
 import numpy as np
-from sympy import Symbol, Function
 import matplotlib.pyplot as plt
 from hydra.utils import to_absolute_path
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
+from itertools import chain
 
-from typing import Union
 from modulus.models.mlp import FullyConnected
 from modulus.models.fno import FNO
-from modulus.launch.logging import PythonLogger, LaunchLogger
+from modulus.launch.logging import LaunchLogger
 from modulus.launch.utils.checkpoint import save_checkpoint
 
-from modulus.sym.eq.pde import PDE
-
-
-class Darcy(PDE):
-    """Darcy PDE using Modulus Sym"""
-
-    name = "Darcy"
-
-    def __init__(self):
-
-        # time
-        x, y = Symbol("x"), Symbol("y")
-
-        # make input variables
-        input_variables = {"x": x, "y": y}
-
-        # make sol function
-        u = Function("sol")(*input_variables)
-        k = Function("K")(*input_variables)
-        f = 1.0
-
-        # set equation
-        self.equations = {}
-        self.equations["darcy"] = (
-            f
-            + k.diff(x) * u.diff(x)
-            + k * u.diff(x).diff(x)
-            + k.diff(y) * u.diff(y)
-            + k * u.diff(y).diff(y)
-        )
-
-
-class HDF5MapStyleDataset(Dataset):
-    """Simple map-style HDF5 dataset"""
-
-    def __init__(
-        self,
-        file_path,
-        device: Union[str, torch.device] = "cuda",
-    ):
-        self.file_path = file_path
-        with h5py.File(file_path, "r") as f:
-            self.keys = list(f.keys())
-
-        # Set up device, needed for pipeline
-        if isinstance(device, str):
-            device = torch.device(device)
-        # Need a index id if cuda
-        if device.type == "cuda" and device.index == None:
-            device = torch.device("cuda:0")
-        self.device = device
-
-    def __len__(self):
-        with h5py.File(self.file_path, "r") as f:
-            return len(f[self.keys[0]])
-
-    def __getitem__(self, idx):
-        data = {}
-        with h5py.File(self.file_path, "r") as f:
-            for key in self.keys:
-                data[key] = np.array(f[key][idx])
-
-        invar = torch.cat(
-            [
-                torch.from_numpy(
-                    (data["Kcoeff"][:, :240, :240] - 7.48360e00) / 4.49996e00
-                ),
-                torch.from_numpy(data["Kcoeff_x"][:, :240, :240]),
-                torch.from_numpy(data["Kcoeff_y"][:, :240, :240]),
-            ]
-        )
-        outvar = torch.from_numpy(
-            (data["sol"][:, :240, :240] - 5.74634e-03) / 3.88433e-03
-        )
-
-        x = np.linspace(0, 1, 240)
-        y = np.linspace(0, 1, 240)
-
-        xx, yy = np.meshgrid(x, y)
-        x_invar = torch.from_numpy(xx.astype(np.float32)).reshape(-1, 1)
-        y_invar = torch.from_numpy(yy.astype(np.float32)).reshape(-1, 1)
-
-        if self.device.type == "cuda":
-            # Move tensors to GPU
-            invar = invar.cuda()
-            outvar = outvar.cuda()
-            x_invar = x_invar.cuda()
-            y_invar = y_invar.cuda()
-
-        return invar, outvar, x_invar, y_invar
-
+from utils import HDF5MapStyleDataset
+from darcy_pde import Darcy
 
 def validation_step(model_branch, model_trunk, dataloader, epoch):
     """Validation Step"""
@@ -134,7 +43,7 @@ def validation_step(model_branch, model_trunk, dataloader, epoch):
                 (x_invar.squeeze(dim=2), y_invar.squeeze(dim=2)), dim=0
             ).reshape(-1, 2)
 
-            branch_out = model_branch(invar)
+            branch_out = model_branch(invar[:, 0].unsqueeze(dim=1))
             trunk_out = model_trunk(coords)
             branch_out = branch_out.reshape(-1, 240 * 240)
             trunk_out = trunk_out.reshape(-1, 240 * 240)
@@ -142,13 +51,11 @@ def validation_step(model_branch, model_trunk, dataloader, epoch):
             deepo_out = deepo_out.reshape(-1, 1, 240, 240)
             loss_epoch += F.mse_loss(outvar, deepo_out)
 
+
         # convert data to numpy
         outvar = outvar.detach().cpu().numpy()
         predvar = deepo_out.detach().cpu().numpy()
-        x_invar = x_invar.detach().cpu().numpy()
-        y_invar = y_invar.detach().cpu().numpy()
-        invar = invar.detach().cpu().numpy()
-
+        
         # plotting
         fig, ax = plt.subplots(1, 3, figsize=(25, 5))
 
@@ -168,14 +75,12 @@ def validation_step(model_branch, model_trunk, dataloader, epoch):
 
         fig.savefig(f"results_{epoch}.png")
         plt.close()
-
         return loss_epoch / len(dataloader)
 
 
 @hydra.main(version_base="1.3", config_path="conf", config_name="config.yaml")
 def main(cfg: DictConfig):
 
-    logger = PythonLogger("main")  # General python logger
     LaunchLogger.initialize()
 
     darcy = Darcy()
@@ -193,7 +98,7 @@ def main(cfg: DictConfig):
     validation_dataloader = DataLoader(validation_dataset, batch_size=1, shuffle=False)
 
     model_branch = FNO(
-        in_channels=3,
+        in_channels=1,
         out_channels=1,
         decoder_layers=1,
         decoder_layer_size=32,
@@ -211,7 +116,6 @@ def main(cfg: DictConfig):
         num_layers=3,
     ).to("cuda")
 
-    from itertools import chain
 
     optimizer = torch.optim.Adam(
         chain(model_branch.parameters(), model_trunk.parameters()),
@@ -220,9 +124,9 @@ def main(cfg: DictConfig):
         weight_decay=0.0,
     )
 
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.999948708)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99948708)
 
-    for epoch in range(20):
+    for epoch in range(50):
         # wrap epoch in launch logger for console logs
         with LaunchLogger(
             "train",
@@ -234,15 +138,15 @@ def main(cfg: DictConfig):
                 optimizer.zero_grad()
                 invar = data[0]
                 outvar = data[1]
-                x_invar = data[2].squeeze(dim=2).requires_grad_(True)
-                y_invar = data[3].squeeze(dim=2).requires_grad_(True)
-                coords = torch.cat((x_invar, y_invar), dim=0).reshape(-1, 2)
+                x_invar = data[2].squeeze(dim=2).reshape(-1, 1).requires_grad_(True)
+                y_invar = data[3].squeeze(dim=2).reshape(-1, 1).requires_grad_(True)
+                coords = torch.cat((x_invar, y_invar), dim=1)
 
                 # compute forward pass
-                branch_out = model_branch(invar)
+                branch_out = model_branch(invar[:, 0].unsqueeze(dim=1))
                 trunk_out = model_trunk(coords)
-                branch_out = branch_out.reshape(-1, 240 * 240)
-                trunk_out = trunk_out.reshape(-1, 240 * 240)
+                branch_out = branch_out.reshape(-1, 1)
+                trunk_out = trunk_out.reshape(-1, 1)
                 deepo_out = trunk_out * branch_out
 
                 # Compute physics loss
@@ -251,22 +155,22 @@ def main(cfg: DictConfig):
                 # torch.autograd. This example will soon be updated to use the graph and
                 # autograd computation from Modulus Sym.
                 grad_sol = torch.autograd.grad(
-                    deepo_out.sum(), [x_invar, y_invar], create_graph=True
+                    deepo_out.sum(), [x_invar, y_invar], create_graph=True, #grad_outputs=torch.ones_like(deepo_out)
                 )
                 sol_x = grad_sol[0]
                 sol_y = grad_sol[1]
 
                 sol_x_x = torch.autograd.grad(
-                    sol_x.sum(), [x_invar], create_graph=True
+                    sol_x.sum(), [x_invar], create_graph=True, #grad_outputs=torch.ones_like(sol_x)
                 )[0]
                 sol_y_y = torch.autograd.grad(
-                    sol_y.sum(), [y_invar], create_graph=True
+                    sol_y.sum(), [y_invar], create_graph=True, #grad_outputs=torch.ones_like(sol_y)
                 )[0]
 
                 k, k_x, k_y = (
-                    invar[:, 0].reshape(-1, 240 * 240),
-                    invar[:, 1].reshape(-1, 240 * 240),
-                    invar[:, 2].reshape(-1, 240 * 240),
+                    invar[:, 0].reshape(-1, 1),
+                    invar[:, 1].reshape(-1, 1),
+                    invar[:, 2].reshape(-1, 1),
                 )
 
                 pde_out = darcy_node[0].evaluate(
@@ -283,20 +187,15 @@ def main(cfg: DictConfig):
 
                 pde_out_arr = pde_out["darcy"]
                 pde_out_arr = pde_out_arr.reshape(-1, 240, 240)
-                (
-                    pde_out_arr[:, :2, :],
-                    pde_out_arr[:, -2:, :],
-                    pde_out_arr[:, :, :2],
-                    pde_out_arr[:, :, -2:],
-                ) = (0, 0, 0, 0)
-                loss_pde = pde_out_arr.pow(2).mean()
+                pde_out_arr = F.pad(pde_out_arr[:, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
+                loss_pde = F.l1_loss(pde_out_arr, torch.zeros_like(pde_out_arr)) #pde_out_arr.pow(2).mean()
 
                 # Compute data loss
                 deepo_out = deepo_out.reshape(-1, 1, 240, 240)
                 loss_data = F.mse_loss(outvar, deepo_out)
 
                 # Compute total loss
-                loss = loss_data + 0.01 * loss_pde
+                loss = loss_data + cfg.phy_wt * loss_pde
 
                 # Backward pass and optimizer and learning rate update
                 loss.backward()

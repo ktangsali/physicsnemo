@@ -23,7 +23,9 @@ except:
 import scipy.io
 import numpy as np
 import h5py
-
+from typing import Union
+import torch
+from torch.utils.data import Dataset
 from modulus.sym.hydra import to_absolute_path
 
 # list of FNO dataset url ids on drive: https://drive.google.com/drive/folders/1UnbQh2WWc6knEHbLn-ZaXrKUZhp7pjt-
@@ -182,3 +184,62 @@ def preprocess_FNO_mat(path):
             f.create_dataset(
                 k, data=x, dtype="float32"
             )  # note h5 files larger than .mat because no compression used
+
+class HDF5MapStyleDataset(Dataset):
+    """Simple map-style HDF5 dataset"""
+
+    def __init__(
+        self,
+        file_path,
+        device: Union[str, torch.device] = "cuda",
+    ):
+        self.file_path = file_path
+        with h5py.File(file_path, "r") as f:
+            self.keys = list(f.keys())
+
+        # Set up device, needed for pipeline
+        if isinstance(device, str):
+            device = torch.device(device)
+        # Need a index id if cuda
+        if device.type == "cuda" and device.index == None:
+            device = torch.device("cuda:0")
+        self.device = device
+
+    def __len__(self):
+        with h5py.File(self.file_path, "r") as f:
+            return len(f[self.keys[0]])
+
+    def __getitem__(self, idx):
+        data = {}
+        with h5py.File(self.file_path, "r") as f:
+            for key in self.keys:
+                data[key] = np.array(f[key][idx])
+
+        invar = torch.cat(
+            [
+                torch.from_numpy(
+                    (data["Kcoeff"][:, :240, :240] - 7.48360e00) / 4.49996e00
+                ),
+                torch.from_numpy(data["Kcoeff_x"][:, :240, :240]),
+                torch.from_numpy(data["Kcoeff_y"][:, :240, :240]),
+            ]
+        )
+        outvar = torch.from_numpy(
+            (data["sol"][:, :240, :240] - 5.74634e-03) / 3.88433e-03
+        )
+
+        x = np.linspace(0, 1, 240)
+        y = np.linspace(0, 1, 240)
+
+        xx, yy = np.meshgrid(x, y)
+        x_invar = torch.from_numpy(xx.astype(np.float32)).reshape(-1, 1)
+        y_invar = torch.from_numpy(yy.astype(np.float32)).reshape(-1, 1)
+
+        if self.device.type == "cuda":
+            # Move tensors to GPU
+            invar = invar.cuda()
+            outvar = outvar.cuda()
+            x_invar = x_invar.cuda()
+            y_invar = y_invar.cuda()
+
+        return invar, outvar, x_invar, y_invar

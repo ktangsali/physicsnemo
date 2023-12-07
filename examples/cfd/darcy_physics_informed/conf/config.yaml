@@ -17,3 +17,5 @@ hydra:
     chdir: True
   run:
     dir: ./outputs_phy_deepo
+
+phy_wt: 0.1
