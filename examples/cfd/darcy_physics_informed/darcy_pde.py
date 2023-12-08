@@ -1,6 +1,7 @@
 from modulus.sym.eq.pde import PDE
 from sympy import Symbol, Function
 
+
 class Darcy(PDE):
     """Darcy PDE using Modulus Sym"""
 

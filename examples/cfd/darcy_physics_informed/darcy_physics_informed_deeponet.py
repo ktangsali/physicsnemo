@@ -30,6 +30,7 @@ from modulus.launch.utils.checkpoint import save_checkpoint
 from utils import HDF5MapStyleDataset
 from darcy_pde import Darcy
 
+
 def validation_step(model_branch, model_trunk, dataloader, epoch):
     """Validation Step"""
     model_branch.eval()
@@ -51,11 +52,10 @@ def validation_step(model_branch, model_trunk, dataloader, epoch):
             deepo_out = deepo_out.reshape(-1, 1, 240, 240)
             loss_epoch += F.mse_loss(outvar, deepo_out)
 
-
         # convert data to numpy
         outvar = outvar.detach().cpu().numpy()
         predvar = deepo_out.detach().cpu().numpy()
-        
+
         # plotting
         fig, ax = plt.subplots(1, 3, figsize=(25, 5))
 
@@ -116,7 +116,6 @@ def main(cfg: DictConfig):
         num_layers=3,
     ).to("cuda")
 
-
     optimizer = torch.optim.Adam(
         chain(model_branch.parameters(), model_trunk.parameters()),
         betas=(0.9, 0.999),
@@ -155,16 +154,22 @@ def main(cfg: DictConfig):
                 # torch.autograd. This example will soon be updated to use the graph and
                 # autograd computation from Modulus Sym.
                 grad_sol = torch.autograd.grad(
-                    deepo_out.sum(), [x_invar, y_invar], create_graph=True, #grad_outputs=torch.ones_like(deepo_out)
+                    deepo_out.sum(),
+                    [x_invar, y_invar],
+                    create_graph=True,  # grad_outputs=torch.ones_like(deepo_out)
                 )
                 sol_x = grad_sol[0]
                 sol_y = grad_sol[1]
 
                 sol_x_x = torch.autograd.grad(
-                    sol_x.sum(), [x_invar], create_graph=True, #grad_outputs=torch.ones_like(sol_x)
+                    sol_x.sum(),
+                    [x_invar],
+                    create_graph=True,  # grad_outputs=torch.ones_like(sol_x)
                 )[0]
                 sol_y_y = torch.autograd.grad(
-                    sol_y.sum(), [y_invar], create_graph=True, #grad_outputs=torch.ones_like(sol_y)
+                    sol_y.sum(),
+                    [y_invar],
+                    create_graph=True,  # grad_outputs=torch.ones_like(sol_y)
                 )[0]
 
                 k, k_x, k_y = (
@@ -187,8 +192,12 @@ def main(cfg: DictConfig):
 
                 pde_out_arr = pde_out["darcy"]
                 pde_out_arr = pde_out_arr.reshape(-1, 240, 240)
-                pde_out_arr = F.pad(pde_out_arr[:, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
-                loss_pde = F.l1_loss(pde_out_arr, torch.zeros_like(pde_out_arr)) #pde_out_arr.pow(2).mean()
+                pde_out_arr = F.pad(
+                    pde_out_arr[:, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
+                )
+                loss_pde = F.l1_loss(
+                    pde_out_arr, torch.zeros_like(pde_out_arr)
+                )  # pde_out_arr.pow(2).mean()
 
                 # Compute data loss
                 deepo_out = deepo_out.reshape(-1, 1, 240, 240)

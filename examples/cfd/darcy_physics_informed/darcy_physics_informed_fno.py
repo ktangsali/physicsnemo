@@ -31,6 +31,7 @@ from utils import HDF5MapStyleDataset
 from ops import dx, ddx
 from darcy_pde import Darcy
 
+
 def validation_step(model, dataloader, epoch):
     """Validation Step"""
     model.eval()
@@ -40,7 +41,7 @@ def validation_step(model, dataloader, epoch):
         for data in dataloader:
             invar, outvar, _, _ = data
             out = model(invar[:, 0].unsqueeze(dim=1))
-           
+
             loss_epoch += F.mse_loss(outvar, out)
 
         # convert data to numpy
@@ -63,7 +64,6 @@ def validation_step(model, dataloader, epoch):
         ax[0].set_title("True")
         ax[1].set_title("Pred")
         ax[2].set_title("Difference")
-        
 
         fig.savefig(f"results_{epoch}.png")
         plt.close()
@@ -122,21 +122,20 @@ def main(cfg: DictConfig):
                 optimizer.zero_grad()
                 invar = data[0]
                 outvar = data[1]
-                
+
                 # compute forward pass
                 out = model(invar[:, 0].unsqueeze(dim=1))
 
                 dxf = 1.0 / out.shape[-2]
                 dyf = 1.0 / out.shape[-1]
-                
+
                 sol_x = dx(out, dx=dxf, channel=0, dim=1, order=1, padding="zeros")
                 sol_y = dx(out, dx=dyf, channel=0, dim=0, order=1, padding="zeros")
                 sol_x_x = ddx(out, dx=dxf, channel=0, dim=1, order=1, padding="zeros")
                 sol_y_y = ddx(out, dx=dyf, channel=0, dim=0, order=1, padding="zeros")
-                
+
                 k_x = dx(invar, dx=dxf, channel=0, dim=1, order=1, padding="zeros")
                 k_y = dx(invar, dx=dxf, channel=0, dim=0, order=1, padding="zeros")
-
 
                 k, _, _ = (
                     invar[:, 0],
@@ -157,14 +156,16 @@ def main(cfg: DictConfig):
                 )
 
                 pde_out_arr = pde_out["darcy"]
-                pde_out_arr = F.pad(pde_out_arr[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0)
+                pde_out_arr = F.pad(
+                    pde_out_arr[:, :, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
+                )
                 loss_pde = F.l1_loss(pde_out_arr, torch.zeros_like(pde_out_arr))
 
                 # Compute data loss
                 loss_data = F.mse_loss(outvar, out)
 
                 # Compute total loss
-                loss = loss_data + 1/240 * cfg.phy_wt * loss_pde
+                loss = loss_data + 1 / 240 * cfg.phy_wt * loss_pde
 
                 # Backward pass and optimizer and learning rate update
                 loss.backward()
@@ -177,9 +178,7 @@ def main(cfg: DictConfig):
             log.log_epoch({"Learning Rate": optimizer.param_groups[0]["lr"]})
 
         with LaunchLogger("valid", epoch=epoch) as log:
-            error = validation_step(
-                model, validation_dataloader, epoch
-            )
+            error = validation_step(model, validation_dataloader, epoch)
             log.log_epoch({"Validation error": error})
 
         save_checkpoint(

@@ -185,6 +185,7 @@ def preprocess_FNO_mat(path):
                 k, data=x, dtype="float32"
             )  # note h5 files larger than .mat because no compression used
 
+
 class HDF5MapStyleDataset(Dataset):
     """Simple map-style HDF5 dataset"""
 
