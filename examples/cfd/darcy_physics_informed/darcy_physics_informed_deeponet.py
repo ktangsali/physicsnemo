@@ -195,9 +195,7 @@ def main(cfg: DictConfig):
                 pde_out_arr = F.pad(
                     pde_out_arr[:, 2:-2, 2:-2], [2, 2, 2, 2], "constant", 0
                 )
-                loss_pde = F.l1_loss(
-                    pde_out_arr, torch.zeros_like(pde_out_arr)
-                )  # pde_out_arr.pow(2).mean()
+                loss_pde = F.l1_loss(pde_out_arr, torch.zeros_like(pde_out_arr))
 
                 # Compute data loss
                 deepo_out = deepo_out.reshape(-1, 1, 240, 240)
