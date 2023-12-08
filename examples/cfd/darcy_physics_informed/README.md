@@ -50,12 +50,13 @@ the loss function and the use of one over the other can change from case-to-case
 With this example, we intend to demonstrate both such cases so that the users can compare
 and contrast the two approaches.
 
-In this example we will also use the `PDE` class from Modulus-Sym to symbolically define the
-PDEs. This is very convinient and most natural way to define these PDEs and allows us to
-print the equations to check for correctness. This also abstracts out the complexity of
-converting the equation into a pytorch representation. Modulus Sym also provides several
-complex, well tested PDEs like 3D Navier-Stokes, Linear elasticity, Electromagnetics, etc.
-pre-defined which can be used directly in physics-informing applications.  
+In this example we will also use the `PDE` class from Modulus-Sym to symbolically define
+the PDEs. This is very convinient and most natural way to define these PDEs and allows
+us to print the equations to check for correctness. This also abstracts out the
+complexity of converting the equation into a pytorch representation. Modulus Sym also
+provides several complex, well tested PDEs like 3D Navier-Stokes, Linear elasticity,
+Electromagnetics, etc. pre-defined which can be used directly in physics-informing
+applications.  
 
 ## Getting Started
 
