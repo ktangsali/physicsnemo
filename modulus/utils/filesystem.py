@@ -33,7 +33,11 @@ logger = logging.getLogger(__name__)
 try:
     LOCAL_CACHE = os.environ["LOCAL_CACHE"]
 except KeyError:
-    LOCAL_CACHE = os.environ["HOME"] + "/.cache/modulus"
+    home_dir = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+    if home_dir:
+        LOCAL_CACHE = os.path.join(home_dir, ".cache", "modulus")
+    else:
+        raise EnvironmentError("Unable to determine cache directory. Please set LOCAL_CACHE or HOME/USERPROFILE environment variable.")
 
 
 def _cache_fs(fs):
