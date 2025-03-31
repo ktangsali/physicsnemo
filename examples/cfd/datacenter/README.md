@@ -25,8 +25,8 @@ deviation statistics of the dataset. The normalized dataset, along with a sample
 OpenFOAM configuration, can be downloaded from NGC link
 [here](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/physicsnemo/resources/physicsnemo_datacenter_cfd_dataset)
 
-Once downloaded, place the `datasets` directory in this directory. Running
-below commands should setup the directory structure required to run the
+After downloading, place the datasets directory into the current directory.
+Running below commands should setup the directory structure required to run the
 training
 ([Requires NGC CLI](https://docs.ngc.nvidia.com/cli/index.html)).
 
