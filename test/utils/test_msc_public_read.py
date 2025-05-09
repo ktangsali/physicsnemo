@@ -17,9 +17,9 @@
 
 import os
 from pathlib import Path
-from pytest_utils import import_or_fail
 
 import zarr
+from pytest_utils import import_or_fail
 
 
 # Verifies that a Zarr file in a publicly accessible S3 bucket can be read using MSC (Multi-Storage Client).

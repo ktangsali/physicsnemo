@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# ruff: noqa: F401
 
 import os
 import shutil
@@ -28,7 +29,8 @@ from pytest_utils import import_or_fail
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.models.mlp import FullyConnected
 
-mock_aws = pytest.importorskip("moto.mock_aws")    
+mock_aws = pytest.importorskip("moto.mock_aws")
+
 
 @pytest.fixture(params=["./checkpoints", "msc://checkpoint-test/checkpoints"])
 def checkpoint_folder(request) -> str:
@@ -75,6 +77,7 @@ def test_model_checkpointing(
 
     import boto3
     from moto import mock_aws
+
     from physicsnemo.launch.utils import load_checkpoint, save_checkpoint
 
     # Set up the mock with IAM credentials for access. These should match those in
