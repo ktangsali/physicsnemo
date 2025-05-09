@@ -19,17 +19,16 @@ import shutil
 from pathlib import Path
 from typing import Callable
 
-import boto3
 import fsspec
 import pytest
 import torch
 import torch.nn as nn
-from moto import mock_aws
 from pytest_utils import import_or_fail
 
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.models.mlp import FullyConnected
 
+mock_aws = pytest.importorskip("moto.mock_aws")    
 
 @pytest.fixture(params=["./checkpoints", "msc://checkpoint-test/checkpoints"])
 def checkpoint_folder(request) -> str:
@@ -62,7 +61,7 @@ def model_generator(request) -> Callable:
 
 
 @mock_aws
-@import_or_fail(["wandb", "mlflow"])
+@import_or_fail(["wandb", "mlflow", "boto3"])
 @pytest.mark.parametrize("device", ["cuda:0", "cpu"])
 def test_model_checkpointing(
     device,
@@ -74,6 +73,8 @@ def test_model_checkpointing(
 ):
     """Test checkpointing util for model"""
 
+    import boto3
+    from moto import mock_aws
     from physicsnemo.launch.utils import load_checkpoint, save_checkpoint
 
     # Set up the mock with IAM credentials for access. These should match those in
