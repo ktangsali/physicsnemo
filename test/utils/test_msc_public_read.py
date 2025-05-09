@@ -24,7 +24,7 @@ from pytest_utils import import_or_fail
 
 # Verifies that a Zarr file in a publicly accessible S3 bucket can be read using MSC (Multi-Storage Client).
 # See the [Multi-Storage Client README](/examples/multi_storage_client/README.md) for further information.
-@import_or_fail(["multi-storage-client"])
+@import_or_fail(["multistorageclient"])
 def test_msc_read(pytestconfig):
 
     # Point at the MSC config file which specifies access information for the S3 bucket
