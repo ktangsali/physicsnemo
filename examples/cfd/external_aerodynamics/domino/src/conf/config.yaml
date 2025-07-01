@@ -38,9 +38,9 @@ resume_dir: ${output}/models
 # └───────────────────────────────────────────┘  
 data_processor: # Data processor configurable parameters
   kind: drivaer_aws # must be either drivesim or drivaer_aws
-  output_dir: /lustre/rranade/aws_data_all/
-  input_dir: /lustre/datasets/drivaer_aws/drivaer_data_full/
-  cached_dir: /lustre/cached/drivaer_aws/drivaer_data_full/
+  output_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/aws_data_all/
+  input_dir: /data/drivaer_aws/drivaer_data_full/
+  cached_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/cached/drivaer_aws/drivaer_data_full/
   use_cache: false
   num_processors: 12
 
@@ -64,8 +64,8 @@ variables:
 # │          Training Data Configs            │
 # └───────────────────────────────────────────┘  
 data: # Input directory for training and validation data
-  input_dir: /lustre/rranade/aws_data_all/
-  input_dir_val: /lustre/rranade/aws_data_all_val/
+  input_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/aws_data_all/
+  input_dir_val: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/aws_data_val/
   bounding_box: # Bounding box dimensions for computational domain
     min: [-3.5, -2.25 , -0.32]
     max: [8.5 , 2.25  , 3.00]
@@ -99,6 +99,7 @@ model:
   surface_sampling_algorithm: area_weighted # random or area_weighted
   geom_points_sample: 300_000 # Number of points to sample on STL per epoch
   surface_neighbors: true # Pre-compute surface neighborhood from input data
+  volume_neighbors: true # Pre-compute volume neighborhood from input data  # TODO: This is new parameter. 
   num_surface_neighbors: 7 # How many neighbors?
   use_surface_normals: true # Use surface normals and surface areas for surface computation?
   use_surface_area: true # Use only surface normals and not surface area
@@ -155,7 +156,7 @@ train: # Training configurable parameters
   sampler:
     shuffle: true
     drop_last: false
-  checkpoint_dir: /lustre/rranade/models/ # Use only for retraining
+  checkpoint_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/models/ # Use only for retraining
   
 # ┌───────────────────────────────────────────┐
 # │          Validation Configs               │
@@ -172,9 +173,9 @@ val: # Validation configurable parameters
 # │          Testing data Configs             │
 # └───────────────────────────────────────────┘  
 eval: # Testing configurable parameters
-  test_path: /lustre/rranade/testing_data # Dir for testing data in raw format (vtp, vtu ,stls)
-  save_path: /lustre/rranade/predicted_data # Dir to save predicted results in raw format (vtp, vtu)
-  checkpoint_name: DoMINO.0.455.pt # Name of checkpoint to select from saved checkpoints
-  scaling_param_path: /lustre/rranade/scaling_params
+  test_path: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/testing_data # Dir for testing data in raw format (vtp, vtu ,stls)
+  save_path: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/predicted_data/baseline_200 # Dir to save predicted results in raw format (vtp, vtu)
+  checkpoint_name: DoMINOPhy.0.185.pt # DoMINO.0.199.pt # Name of checkpoint to select from saved checkpoints
+  scaling_param_path: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/src/outputs/AWS_Dataset/
   refine_stl: False # Automatically refine STL during inference
   stencil_size: 7 # Stencil size for evaluating surface and volume model

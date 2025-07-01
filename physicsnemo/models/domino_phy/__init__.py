@@ -14,22 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-defaults:
-  - config
-  - _self_
-
-exp_tag: cached
-
-data: # Input directory for training and validation data
-  input_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/cached/drivaer_aws/drivaer_data_full/train/
-  input_dir_val: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/cached/drivaer_aws/drivaer_data_full/val/
-data_processor:
-  use_cache: true
-
-train: # Training configurable parameters
-  dataloader:
-    num_workers: 12
-
-val: # Validation configurable parameters
-  dataloader:
-    num_workers: 6
+from .model import DoMINOPhy

@@ -52,6 +52,7 @@ from vtk.util import numpy_support
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.datapipes.cae.domino_datapipe import DoMINODataPipe
 from physicsnemo.models.domino.model import DoMINO
+from physicsnemo.models.domino_phy.model import DoMINOPhy
 from physicsnemo.utils.domino.utils import *
 from physicsnemo.utils.sdf import signed_distance_field
 
@@ -173,7 +174,7 @@ def test_step(data_dict, model, device, cfg, vol_factors, surf_factors):
                     pos_encoding = model.position_encoder(
                         pos_encoding, eval_mode="volume"
                     )
-                    tpredictions_batch = model.calculate_solution(
+                    tpredictions_batch, _, _, _, _, = model.calculate_solution(
                         volume_mesh_centers_batch,
                         geo_encoding_local,
                         pos_encoding,
@@ -353,7 +354,7 @@ def main(cfg: DictConfig):
     print("Vol factors:", vol_factors)
     print("Surf factors:", surf_factors)
 
-    model = DoMINO(
+    model = DoMINOPhy(
         input_features=3,
         output_features_vol=num_vol_vars,
         output_features_surf=num_surf_vars,
