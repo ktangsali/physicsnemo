@@ -1270,7 +1270,8 @@ class DoMINOPhy(nn.Module):
 
         radii = torch.pow(torch.rand(size=(num_points, 1), device=center.device) * (r_outer ** 3 - r_inner ** 3) + r_inner ** 3, 1/3)    # Uniform samping inside a shell
         return center.unsqueeze(2) + directions + radii[None, None, :, :].expand(-1, center.shape[1], num_points, -1)
-    
+   
+ 
     def compute_ls_grads(self, dv, du):
         """Given du and dv, compute the grads (batched)"""
         
@@ -1283,7 +1284,7 @@ class DoMINOPhy(nn.Module):
         # print(f"A shape: {A.shape}")
         B = torch.matmul(torch.matmul(dv.transpose(-2, -1), W), du)   # Should be [1, batch_size, 3, 5]
         # print(f"A dtype: {A.dtype}, B dtype: {B.dtype}")
-        grad_u, _, _, _ = torch.linalg.lstsq(A, B, rcond=-1) # Should be [1, batchsize, 3, 5]
+        grad_u, _, _, _ = torch.linalg.lstsq(A, B) # Should be [1, batchsize, 3, 5]
         # print(f"Grad shape: {grad_u.shape}")
 
         return grad_u
@@ -1298,6 +1299,7 @@ class DoMINOPhy(nn.Module):
         eval_mode,
         num_sample_points=8,
         noise_intensity=50,
+        compute_gradients=False
     ):
         """Function to approximate solution sampling the neighborhood information"""
         if eval_mode == "volume":
@@ -1588,110 +1590,120 @@ class DoMINOPhy(nn.Module):
             # grad_u, _, _, _ = torch.linalg.lstsq(A, B, rcond=-1) # Should be [1, batchsize, 3, 1]
             # print(f"Grad u shape: {grad_u.shape}")
             
-            field_neighbors = torch.cat([u_neighbors, v_neighbors, w_neighbors, p_neighbors, nut_neighbors], dim=3) # concatenate along the channel dimension
-            dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
-            du = field_neighbors - output_all.unsqueeze(2)    # choose u
+            if compute_gradients:
+                field_neighbors = torch.cat([u_neighbors, v_neighbors, w_neighbors, p_neighbors, nut_neighbors], dim=3) # concatenate along the channel dimension
+                dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
+                du = field_neighbors - output_all.unsqueeze(2)    # choose u
             
-            # Compute grads on the original point
-            dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-            du = du[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-            grad = []
-            grad.append(self.compute_ls_grads(dv, du))
-
-            # Compute the 1st order grads on 1 hop neighbors
-            for i in range(num_hop1):
-                indices_to_select = torch.tensor(neighbors[1+i], dtype=torch.int, device=volume_mesh_centers.device)
-                dv = volume_m_c_perturbed[:,:,1+i,:].unsqueeze(2) - torch.index_select(volume_m_c_perturbed, dim=2, index=indices_to_select) # collect 2 hop neighbors
-                du = field_neighbors[:,:,1+i,:].unsqueeze(2) - torch.index_select(field_neighbors, dim=2, index=indices_to_select)
+                # Compute grads on the original point
+                dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
+                du = du[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
+                grad = []
                 grad.append(self.compute_ls_grads(dv, du))
+
+                # Compute the 1st order grads on 1 hop neighbors
+                for i in range(num_hop1):
+                    indices_to_select = torch.tensor(neighbors[1+i], dtype=torch.int, device=volume_mesh_centers.device)
+                    dv = volume_m_c_perturbed[:,:,1+i,:].unsqueeze(2) - torch.index_select(volume_m_c_perturbed, dim=2, index=indices_to_select) # collect 2 hop neighbors
+                    du = field_neighbors[:,:,1+i,:].unsqueeze(2) - torch.index_select(field_neighbors, dim=2, index=indices_to_select)
+                    grad.append(self.compute_ls_grads(dv, du))
             
-            grad = torch.stack(grad, dim=2)
-            # print(f"Grad for all 1 hop neighbors (including center): {grad.shape}")
-            # get gradients at the center
-            grad_c = grad[:,:,0,:,:]  # Shape [1, batch_size, 3, num_variables]
-            # print(f"Grad at center shape: {grad_c.shape}")
+                grad = torch.stack(grad, dim=2)
+                # print(f"Grad for all 1 hop neighbors (including center): {grad.shape}")
+                # get gradients at the center
+                grad_c = grad[:,:,0,:,:]  # Shape [1, batch_size, 3, num_variables]
+                # print(f"Grad at center shape: {grad_c.shape}")
 
-            # compute gradients for shear stresss tensor
-            rho = 1.226
-            nu = 1.507 * 1e-5
-            mu = rho * nu
+                # compute gradients for shear stresss tensor
+                # TODO: Remove! Cannot compute stress tensor's grads here, because the quantities are normalized
+                # rho = 1.226
+                # nu = 1.507 * 1e-5
+                # mu = rho * nu
 
-            tau_xx = 2 * mu * grad[:,:,0:1,0:1,0:1]    # x component of u grad
-            tau_yy = 2 * mu * grad[:,:,0:1,1:2,1:2]
-            tau_zz = 2 * mu * grad[:,:,0:1,2:3,2:3]
-            tau_xy = mu * (grad[:,:,0:1,1:2,0:1] + grad[:,:,0:1,0:1,1:2])
-            tau_xz = mu * (grad[:,:,0:1,2:3,0:1] + grad[:,:,0:1,0:1,2:3])
-            tau_yz = mu * (grad[:,:,0:1,2:3,1:2] + grad[:,:,0:1,1:2,2:3])
+                # tau_xx = 2 * mu * grad[:,:,0:1,0:1,0:1]    # x component of u grad
+                # tau_yy = 2 * mu * grad[:,:,0:1,1:2,1:2]
+                # tau_zz = 2 * mu * grad[:,:,0:1,2:3,2:3]
+                # tau_xy = mu * (grad[:,:,0:1,1:2,0:1] + grad[:,:,0:1,0:1,1:2])
+                # tau_xz = mu * (grad[:,:,0:1,2:3,0:1] + grad[:,:,0:1,0:1,2:3])
+                # tau_yz = mu * (grad[:,:,0:1,2:3,1:2] + grad[:,:,0:1,1:2,2:3])
 
-            tau = torch.cat([tau_xx, tau_yy, tau_zz, tau_xy, tau_xz, tau_yz], dim=4)    # concat along the field dimension
-            tau = tau.squeeze(3)    # Scalars
-            tau_xx_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,0:1,0:1]    # x component of u grad
-            tau_yy_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,1:2,1:2]
-            tau_zz_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,2:3,2:3]
-            tau_xy_neighbors = mu * (grad[:,:,1:num_hop1+1,1:2,0:1] + grad[:,:,1:num_hop1+1,0:1,1:2])
-            tau_xz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,0:1] + grad[:,:,1:num_hop1+1,0:1,2:3])
-            tau_yz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,1:2] + grad[:,:,1:num_hop1+1,1:2,2:3])
+                # tau = torch.cat([tau_xx, tau_yy, tau_zz, tau_xy, tau_xz, tau_yz], dim=4)    # concat along the field dimension
+                # tau = tau.squeeze(3)    # Scalars
+                # tau_xx_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,0:1,0:1]    # x component of u grad
+                # tau_yy_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,1:2,1:2]
+                # tau_zz_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,2:3,2:3]
+                # tau_xy_neighbors = mu * (grad[:,:,1:num_hop1+1,1:2,0:1] + grad[:,:,1:num_hop1+1,0:1,1:2])
+                # tau_xz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,0:1] + grad[:,:,1:num_hop1+1,0:1,2:3])
+                # tau_yz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,1:2] + grad[:,:,1:num_hop1+1,1:2,2:3])
 
-            tau_neighbors = torch.cat([tau_xx_neighbors, tau_yy_neighbors, tau_zz_neighbors, tau_xy_neighbors, tau_xz_neighbors, tau_yz_neighbors], dim=4)
-            tau_neighbors = tau_neighbors.squeeze(3)
-            dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
-            dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-            # grad_uvw = grad[:,:,1:num_hop1+1,:,0:3]   # First 3 variables are velocity
-            # dgrad_uvw = grad_uvw - grad[:,:,0:1,:,0:3]
-            # dgrad_uvw = dgrad_uvw.reshape(dgrad_uvw.shape[0], dgrad_uvw.shape[1], dgrad_uvw.shape[2], 9)    # Stack all gradients along last dimension
-            dtau = tau - tau_neighbors
-            # print(f"dtau shape: {dtau.shape}")
-            tau_grad = self.compute_ls_grads(dv, dtau)
+                # tau_neighbors = torch.cat([tau_xx_neighbors, tau_yy_neighbors, tau_zz_neighbors, tau_xy_neighbors, tau_xz_neighbors, tau_yz_neighbors], dim=4)
+                # tau_neighbors = tau_neighbors.squeeze(3)
+                dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
+                dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
+            
+                # Gradients of velocity are only needed for second order
+                grad_uvw = grad[:,:,0:1,:,0:3]   # First 3 variables are velocity
+                grad_uvw_neighbors = grad[:,:,1:num_hop1+1,:,0:3]   # First 3 variables are velocity
+                dgrad_uvw = grad_uvw_neighbors - grad_uvw
+                dgrad_uvw = dgrad_uvw.reshape(dgrad_uvw.shape[0], dgrad_uvw.shape[1], dgrad_uvw.shape[2], 9)    # Stack all gradients along last dimension. First 3 will be u grads, next 3 will be v and finally w. 
+                # dtau = tau - tau_neighbors
+                # print(f"dtau shape: {dtau.shape}")
+                # tau_grad = self.compute_ls_grads(dv, dtau)
+                grad_grad_uvw = self.compute_ls_grads(dv, dgrad_uvw)
+                # print(f"tau grad at center: {tau_grad.shape}")
 
-            # print(f"tau grad at center: {tau_grad.shape}")
-
-            # TODO: Note grads notation is flipped w.r.t PhysicsNeMo-CFD. 
-            # Here, -1 dim is the fields, and the -2 dim is the components of the gradient
-            continuity = grad_c[:,:,0,0:1] + grad_c[:,:,1,1:2] + grad_c[:,:,2,2:3]
-            momentum_x = (
-                rho
-                * (
-                    output_all[:, :, 0:1] * grad_c[:, :, 0, 0:1]
-                    + output_all[:, :, 1:2] * grad_c[:, :, 1, 0:1]
-                    + output_all[:, :, 2:3] * grad_c[:, :, 2, 0:1]
-                )
-                + grad_c[:, :, 0, 2:3]
-                - tau_grad[:, :, 0, 0:1]
-                - tau_grad[:, :, 1, 3:4]
-                - tau_grad[:, :, 2, 4:5]
-            )
-            momentum_y = (
-                rho
-                * (
-                    output_all[:, :, 0:1] * grad_c[:, :, 0, 1:2]
-                    + output_all[:, :, 1:2] * grad_c[:, :, 1, 1:2]
-                    + output_all[:, :, 2:3] * grad_c[:, :, 2, 1:2]
-                )
-                + grad_c[:, :, 1, 2:3]
-                - tau_grad[:, :, 0, 3:4]
-                - tau_grad[:, :, 1, 1:2]
-                - tau_grad[:, :, 2, 5:6]
-            )
-            momentum_z = (
-                rho
-                * (
-                    output_all[:, :, 0:1] * grad_c[:, :, 0, 2:3]
-                    + output_all[:, :, 1:2] * grad_c[:, :, 1, 2:3]
-                    + output_all[:, :, 2:3] * grad_c[:, :, 2, 2:3]
-                )
-                + grad_c[:, :, 2, 2:3]
-                - tau_grad[:, :, 0, 4:5]
-                - tau_grad[:, :, 1, 5:6]
-                - tau_grad[:, :, 2, 2:3]
-            )            
-
-            # print(f"Conitnuity and Momentum shapes: {continuity.shape}, {momentum_x.shape}, {momentum_y.shape}, {momentum_z.shape}")
-            return output_all, continuity, momentum_x, momentum_y, momentum_z   # Shape [1, batch_size, num_variables]
+                # TODO: Note grads notation is flipped w.r.t PhysicsNeMo-CFD. 
+                # Here, -1 dim is the fields, and the -2 dim is the components of the gradient
+                # continuity = grad_c[:,:,0,0:1] + grad_c[:,:,1,1:2] + grad_c[:,:,2,2:3]
+                # momentum_x = (
+                #     rho
+                #     * (
+                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 0:1]
+                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 0:1]
+                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 0:1]
+                #     )
+                #     + grad_c[:, :, 0, 2:3]
+                #     - tau_grad[:, :, 0, 0:1]
+                #     - tau_grad[:, :, 1, 3:4]
+                #     - tau_grad[:, :, 2, 4:5]
+                # )
+                # momentum_y = (
+                #     rho
+                #     * (
+                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 1:2]
+                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 1:2]
+                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 1:2]
+                #     )
+                #     + grad_c[:, :, 1, 2:3]
+                #     - tau_grad[:, :, 0, 3:4]
+                #     - tau_grad[:, :, 1, 1:2]
+                #     - tau_grad[:, :, 2, 5:6]
+                # )
+                # momentum_z = (
+                #     rho
+                #     * (
+                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 2:3]
+                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 2:3]
+                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 2:3]
+                #     )
+                #     + grad_c[:, :, 2, 2:3]
+                #     - tau_grad[:, :, 0, 4:5]
+                #     - tau_grad[:, :, 1, 5:6]
+                #     - tau_grad[:, :, 2, 2:3]
+                # )            
+                # # print(f"Conitnuity and Momentum shapes: {continuity.shape}, {momentum_x.shape}, {momentum_y.shape}, {momentum_z.shape}")
+                # print(f"grad and grad_grad_uvw shapes: {grad_c.shape}, {grad_grad_uvw.shape}")
+            
+            if compute_gradients:
+                return output_all, grad_c, grad_grad_uvw   # Shape [1, batch_size, num_variables]
+            else:
+                return output_all
 
     @profile
     def forward(
         self,
         data_dict,
+        compute_gradients=False
     ):
         # Loading STL inputs, bounding box grids, precomputed SDF and scaling factors
 
@@ -1785,6 +1797,7 @@ class DoMINOPhy(nn.Module):
                 stream_velocity,
                 air_density,
                 eval_mode="volume",
+                compute_gradients=compute_gradients
             )
 
 

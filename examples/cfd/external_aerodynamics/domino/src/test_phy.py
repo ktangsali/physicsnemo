@@ -174,7 +174,7 @@ def test_step(data_dict, model, device, cfg, vol_factors, surf_factors):
                     pos_encoding = model.position_encoder(
                         pos_encoding, eval_mode="volume"
                     )
-                    tpredictions_batch, _, _, _, _, = model.calculate_solution(
+                    tpredictions_batch = model.calculate_solution(
                         volume_mesh_centers_batch,
                         geo_encoding_local,
                         pos_encoding,

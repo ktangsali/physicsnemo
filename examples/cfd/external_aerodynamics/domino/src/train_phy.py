@@ -82,6 +82,7 @@ def loss_fn(
     target: torch.Tensor,
     loss_type: Literal["mse", "rmse"],
     padded_value: float = -10,
+    vol_factors: None = torch.Tensor,
 ) -> torch.Tensor:
     """Calculate mean squared error or root mean squared error with masking for padded values.
 
@@ -101,7 +102,88 @@ def loss_fn(
     else:
         dims = None
 
-    output, continuity, momentum_x, momentum_y, momentum_z = output
+    output, grad, grad_grad_uvw = output
+    
+    # unnormalize gradients
+    # Grads have shape [1, batch_size, 3, num_variables]
+    # 0, 1, 2 -> u, v, w; 3 -> p; 4 -> nut
+    # print(output.device, vol_factors.device)
+    # vol_factors = torch.from_numpy(vol_factors, device=output.device)
+    fields = unnormalize(output, vol_factors[0], vol_factors[1])
+    grad = unnormalize_grad(grad, vol_factors[0], vol_factors[1])
+    grad_grad_uvw = unnormalize_grad(grad_grad_uvw, vol_factors[0][0:3].repeat_interleave(3), vol_factors[1][0:3].repeat_interleave(3))
+
+    rho = 1.226
+    nu = 1.507 * 1e-5
+
+    u = fields[:,:,0:1]
+    v = fields[:,:,1:2]
+    w = fields[:,:,2:3]
+    
+    mu = rho * (nu + fields[:,:,4:5])   # mu + mu_t
+    mu_grad = rho * grad[:,:,:,4:5]
+    mu__x = mu_grad[:,:,0,:]
+    mu__y = mu_grad[:,:,1,:]
+    mu__z = mu_grad[:,:,2,:]
+
+    # compute residuals
+    p__x = grad[:,:,0,3:4]
+    p__y = grad[:,:,1,3:4]
+    p__z = grad[:,:,2,3:4]
+    u__x = grad[:,:,0,0:1]
+    u__y = grad[:,:,1,0:1]
+    u__z = grad[:,:,2,0:1]
+    v__x = grad[:,:,0,1:2]
+    v__y = grad[:,:,1,1:2]
+    v__z = grad[:,:,2,1:2]
+    w__x = grad[:,:,0,2:3]
+    w__y = grad[:,:,1,2:3]
+    w__z = grad[:,:,2,2:3]
+    u__x__x = grad_grad_uvw[:,:,0,0:1]
+    u__x__y = grad_grad_uvw[:,:,1,0:1]
+    u__x__z = grad_grad_uvw[:,:,2,0:1]
+    u__y__y = grad_grad_uvw[:,:,1,1:2]
+    u__y__z = grad_grad_uvw[:,:,2,1:2]
+    u__z__z = grad_grad_uvw[:,:,2,2:3]
+    v__x__x = grad_grad_uvw[:,:,0,3:4]
+    v__x__y = grad_grad_uvw[:,:,1,3:4]
+    v__x__z = grad_grad_uvw[:,:,2,3:4]
+    v__y__y = grad_grad_uvw[:,:,1,4:5]
+    v__y__z = grad_grad_uvw[:,:,2,4:5]
+    v__z__z = grad_grad_uvw[:,:,2,5:6]
+    w__x__x = grad_grad_uvw[:,:,0,6:7]
+    w__x__y = grad_grad_uvw[:,:,1,6:7]
+    w__x__z = grad_grad_uvw[:,:,2,6:7]
+    w__y__y = grad_grad_uvw[:,:,1,7:8]
+    w__y__z = grad_grad_uvw[:,:,2,7:8]
+    w__z__z = grad_grad_uvw[:,:,2,8:9]
+
+    u__y__x = u__x__y
+    u__z__x = u__x__z
+    u__z__y = u__y__z
+    v__y__x = v__x__y
+    v__z__x = v__x__z
+    v__z__y = v__y__z
+    w__y__x = w__x__y
+    w__z__x = w__x__z
+    w__z__y = w__y__z
+    
+    tau_xx__x = 2 * mu * u__x__x + 2 * mu__x * u__x
+    tau_xy__y = mu * (u__y__y + v__x__y) + mu__y * (u__y + v__x)
+    tau_xz__z = mu * (u__z__z + w__x__z) + mu__z * (u__z + w__x)
+    tau_xy__x = mu * (u__y__x + v__x__x) + mu__x * (u__y + v__x)
+    tau_yy__y = 2 * mu * v__y__y + 2 * mu__y * v__y
+    tau_yz__z = mu * (v__z__z + w__y__z) + mu__z * (v__z + w__y)
+    tau_xz__x = mu * (u__z__x + w__x__x) + mu__x * (u__z + w__x) 
+    tau_yz__y = mu * (v__z__y + w__y__y) + mu__y * (v__z + w__y)
+    tau_zz__z = 2 * mu * w__z__z + 2 * mu__z * w__z
+
+    continuity = u__x + v__y + w__z
+    momentum_x = rho * (u * u__x + v * u__y + w * u__z) + p__x - tau_xx__x - tau_xy__y - tau_xz__z
+    momentum_y = rho * (u * v__x + v * v__y + w * v__z) + p__y - tau_xy__x - tau_yy__y - tau_yz__z
+    momentum_z = rho * (u * w__x + v * w__y + w * w__z) + p__z - tau_xz__x - tau_yz__y - tau_zz__z
+    
+    # print(f"Conitnuity and Momentum shapes: {continuity.shape}, {momentum_x.shape}, {momentum_y.shape}, {momentum_z.shape}")
     num = torch.sum(mask * (output - target) ** 2.0, dims)
     if loss_type == "rmse":
         denom = torch.sum(mask * target**2.0, dims)
@@ -267,6 +349,7 @@ def compute_loss_dict(
     integral_scaling_factor: float,
     surf_loss_scaling: float,
     vol_loss_scaling: float,
+    vol_factors: torch.Tensor
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute the loss terms in a single function call.
@@ -289,7 +372,7 @@ def compute_loss_dict(
         target_vol = batch_inputs["volume_fields"]
 
         loss_vol = loss_fn(
-            prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10
+            prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10, vol_factors=vol_factors
         )
         loss_dict["loss_vol"] = loss_vol[0]
         loss_dict["loss_continuity"] = loss_vol[1]
@@ -363,6 +446,7 @@ def validation_step(
     loss_fn_type=None,
     vol_loss_scaling=None,
     surf_loss_scaling=None,
+    vol_factors=None
 ):
     running_vloss = 0.0
     with torch.no_grad():
@@ -371,7 +455,7 @@ def validation_step(
 
             with autocast(enabled=False):
 
-                prediction_vol, prediction_surf = model(sampled_batched)
+                prediction_vol, prediction_surf = model(sampled_batched, compute_gradients=True)
                 loss, loss_dict = compute_loss_dict(
                     prediction_vol,
                     prediction_surf,
@@ -380,8 +464,10 @@ def validation_step(
                     integral_scaling_factor,
                     surf_loss_scaling,
                     vol_loss_scaling,
+                    vol_factors,
                 )
-
+            
+            # print(loss_dict.keys())
             running_vloss += loss.item()
 
     avg_vloss = running_vloss / (i_batch + 1)
@@ -404,6 +490,7 @@ def train_epoch(
     loss_fn_type,
     vol_loss_scaling=None,
     surf_loss_scaling=None,
+    vol_factors=None
 ):
 
     dist = DistributedManager()
@@ -420,7 +507,7 @@ def train_epoch(
 
         with autocast(enabled=False):   # TODO: to support LSTSQ
             with nvtx.range("Model Forward Pass"):
-                prediction_vol, prediction_surf = model(sampled_batched)
+                prediction_vol, prediction_surf = model(sampled_batched, compute_gradients=True)
 
             loss, loss_dict = compute_loss_dict(
                 prediction_vol,
@@ -430,6 +517,7 @@ def train_epoch(
                 integral_scaling_factor,
                 surf_loss_scaling,
                 vol_loss_scaling,
+                vol_factors
             )
 
         loss = loss / loss_interval
@@ -534,6 +622,7 @@ def main(cfg: DictConfig) -> None:
     )
     if os.path.exists(vol_save_path):
         vol_factors = np.load(vol_save_path)
+        vol_factors_tensor = torch.from_numpy(vol_factors).to(dist.device)
     else:
         vol_factors = None
 
@@ -685,6 +774,7 @@ def main(cfg: DictConfig) -> None:
             loss_fn_type=cfg.model.loss_function,
             vol_loss_scaling=cfg.model.vol_loss_scaling,
             surf_loss_scaling=surface_scaling_loss,
+            vol_factors=vol_factors_tensor
         )
         epoch_end_time = time.perf_counter()
         logger.info(
@@ -704,6 +794,7 @@ def main(cfg: DictConfig) -> None:
             loss_fn_type=cfg.model.loss_function,
             vol_loss_scaling=cfg.model.vol_loss_scaling,
             surf_loss_scaling=surface_scaling_loss,
+            vol_factors=vol_factors_tensor
         )
 
         scheduler.step()

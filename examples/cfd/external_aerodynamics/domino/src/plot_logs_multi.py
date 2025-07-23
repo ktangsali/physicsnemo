@@ -43,6 +43,10 @@ def parse_log_file(filepath):
                     losses[key].append(float(value))
     return total_iterations, losses
 
+def get_colors(n, cmap_name='tab10'):
+    cmap = plt.get_cmap(cmap_name)
+    return [cmap(i % cmap.N) for i in range(n)]
+
 def main():
     parser = argparse.ArgumentParser(description='Plot losses from multiple log files.')
     parser.add_argument('logfiles', nargs='+', help='Paths to log files to parse and plot')
@@ -65,6 +69,11 @@ def main():
     fig, axs = plt.subplots(rows, 3, figsize=(15, 5 * rows))
     fig.suptitle('Losses per Mini Batch (Multiple Logs)')
 
+    colors = get_colors(len(log_data.keys()))
+    colors_dict = {}
+    for i, logfile in enumerate(log_data.keys()):
+        colors_dict[logfile] = colors[i]
+
     for idx, key in enumerate(all_keys):
         row, col = divmod(idx, 3)
         ax = axs[row, col] if rows > 1 else axs[col]
@@ -74,7 +83,9 @@ def main():
                 # Ensure matching lengths for iterations and losses
                 y = data['losses'][key]
                 x = data['iterations'][:len(y)]
-                ax.plot(x, y, label=label)
+                y = y[:len(x)]
+                # print(len(y), len(x))
+                ax.plot(x, y, color=colors_dict[logfile], label=label)
         ax.set_title(key)
         ax.set_xlabel('Total Iteration')
         ax.set_ylabel('Loss')
