@@ -197,12 +197,12 @@ DoMINO supports enforcing of PDE residuals as soft constraints. This can be used
 to improve the model predictions' adherence to the governing laws of the problem
 which include Continuity and Navier Stokes equations.
 
-#### Prerequisites
+#### Prerequisites for PDE residuals
 
 The computation of Physics residuals is supported using the PhysicsNeMo-Sym
 library. Install it using
 
-```
+```bash
 pip install "Cython"
 pip install "nvidia-physicsnemo.sym>2.1.0" --no-build-isolation
 ```
@@ -228,10 +228,10 @@ The results of physics addition can be found below (using the DrivAerML
 dataset). The results are computed on the design ID 419 and 439 from the
 validation set and averaged.
 
-
 We observe that, addition of physics losses improves the model
 predictions' ability to respect the governing laws better.
 
+<!-- markdownlint-disable -->
 <table><thead>
   <tr>
     <th></th>
@@ -334,6 +334,7 @@ predictions' ability to respect the governing laws better.
   </tr>
 </tbody>
 </table>
+<!-- markdownlint-enable -->
 
 *Addition of physics constraints to the DoMINO training is under active
 development and might introduce breaking changes in the future*

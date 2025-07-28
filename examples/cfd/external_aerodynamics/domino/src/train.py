@@ -72,18 +72,22 @@ nvmlInit()
 
 from physicsnemo.utils.profiling import profile, Profiler
 
+
 def get_physics_imports(add_physics_loss):
     """Conditionally import physics-related modules based on config."""
     if add_physics_loss:
         from physicsnemo.sym.eq.pde import PDE
         from physicsnemo.sym.eq.ls.grads import FirstDeriv
         from physicsnemo.sym.eq.pdes.navier_stokes import IncompressibleNavierStokes
+
         return PDE, FirstDeriv, IncompressibleNavierStokes
     else:
         return None, None, None
 
+
 # Profiler().enable("line_profiler")
 # Profiler().initialize()
+
 
 def loss_fn(
     output: torch.Tensor,
@@ -133,125 +137,147 @@ def loss_fn(
         fields, num_neighbors = output_neighbors.shape[3], output_neighbors.shape[2]
         coords_total = coords_neighbors[0, :]
         output_total = output_neighbors[0, :]
-        output_total_unnormalized = unnormalize(output_total, vol_factors[0], vol_factors[1])
-        coords_total_unnormalized = unnormalize(coords_total, bounding_box[0], bounding_box[1])
-    
+        output_total_unnormalized = unnormalize(
+            output_total, vol_factors[0], vol_factors[1]
+        )
+        coords_total_unnormalized = unnormalize(
+            coords_total, bounding_box[0], bounding_box[1]
+        )
+
         # compute first order gradients on all the nodes from the neighbors_list
         grad_list = {}
         for parent_id, neighbor_ids in neighbors_list.items():
-            neighbor_ids_tensor = torch.tensor(neighbor_ids).to(output_total_unnormalized.device)
-            du = output_total_unnormalized[:,parent_id:parent_id+1] - output_total_unnormalized[:,neighbor_ids_tensor]
-            dv = coords_total_unnormalized[:,parent_id:parent_id+1] - coords_total_unnormalized[:,neighbor_ids_tensor]
+            neighbor_ids_tensor = torch.tensor(neighbor_ids).to(
+                output_total_unnormalized.device
+            )
+            du = (
+                output_total_unnormalized[:, parent_id : parent_id + 1]
+                - output_total_unnormalized[:, neighbor_ids_tensor]
+            )
+            dv = (
+                coords_total_unnormalized[:, parent_id : parent_id + 1]
+                - coords_total_unnormalized[:, neighbor_ids_tensor]
+            )
             grads = first_deriv.forward(
-                coords=None,
-                connectivity_tensor=None,
-                y=None, 
-                du=du,
-                dv=dv
+                coords=None, connectivity_tensor=None, y=None, du=du, dv=dv
             )
             grad = torch.cat(grads, dim=1)
             grad_list[parent_id] = grad
-    
+
         # compute second order gradients on only the center node
-        neighbor_ids_tensor = torch.tensor(neighbors_list[0]).to(output_total_unnormalized.device)
+        neighbor_ids_tensor = torch.tensor(neighbors_list[0]).to(
+            output_total_unnormalized.device
+        )
         grad_neighbors_center = torch.stack([v for v in grad_list.values()], dim=1)
-        grad_neighbors_center = grad_neighbors_center.reshape(batch_size, len(neighbors_list[0]) + 1, -1)
-    
-        du = grad_neighbors_center[:,0:1] - grad_neighbors_center[:,neighbor_ids_tensor]
-        dv = coords_total_unnormalized[:,0:1] - coords_total_unnormalized[:,neighbor_ids_tensor]
-        
+        grad_neighbors_center = grad_neighbors_center.reshape(
+            batch_size, len(neighbors_list[0]) + 1, -1
+        )
+
+        du = (
+            grad_neighbors_center[:, 0:1]
+            - grad_neighbors_center[:, neighbor_ids_tensor]
+        )
+        dv = (
+            coords_total_unnormalized[:, 0:1]
+            - coords_total_unnormalized[:, neighbor_ids_tensor]
+        )
+
         ggrads_center = first_deriv.forward(
-            coords=None,
-            connectivity_tensor=None,
-            y=None, 
-            du=du,
-            dv=dv
+            coords=None, connectivity_tensor=None, y=None, du=du, dv=dv
         )
         ggrad_center = torch.cat(ggrads_center, dim=1)
-        grad_neighbors_center = grad_neighbors_center.reshape(batch_size, len(neighbors_list[0]) + 1, 3, -1)
-        
+        grad_neighbors_center = grad_neighbors_center.reshape(
+            batch_size, len(neighbors_list[0]) + 1, 3, -1
+        )
+
         # Get the outputs on the original nodes
-        fields_center_unnormalized = output_total_unnormalized[:,0,:]
-        grad_center = grad_neighbors_center[:,0,:,:]
-        grad_grad_uvw_center = ggrad_center[:,:,:9]
-    
+        fields_center_unnormalized = output_total_unnormalized[:, 0, :]
+        grad_center = grad_neighbors_center[:, 0, :, :]
+        grad_grad_uvw_center = ggrad_center[:, :, :9]
+
         nu = 1.507 * 1e-5
-        
+
         dict_mapping = {
-            "u": fields_center_unnormalized[:,0:1],
-            "v": fields_center_unnormalized[:,1:2],
-            "w": fields_center_unnormalized[:,2:3],
-            "p": fields_center_unnormalized[:,3:4],
-            "nu": nu + fields_center_unnormalized[:,4:5],
-            "u__x": grad_center[:,0,0:1],
-            "u__y": grad_center[:,1,0:1],
-            "u__z": grad_center[:,2,0:1],
-            "v__x": grad_center[:,0,1:2],
-            "v__y": grad_center[:,1,1:2],
-            "v__z": grad_center[:,2,1:2],
-            "w__x": grad_center[:,0,2:3],
-            "w__y": grad_center[:,1,2:3],
-            "w__z": grad_center[:,2,2:3],
-            "p__x": grad_center[:,0,3:4],
-            "p__y": grad_center[:,1,3:4],
-            "p__z": grad_center[:,2,3:4],
-            "nu__x": grad_center[:,0,4:5],
-            "nu__y": grad_center[:,1,4:5],
-            "nu__z": grad_center[:,2,4:5],    
-            "u__x__x": grad_grad_uvw_center[:,0,0:1],
-            "u__x__y": grad_grad_uvw_center[:,1,0:1],
-            "u__x__z": grad_grad_uvw_center[:,2,0:1],
-            "u__y__x": grad_grad_uvw_center[:,1,0:1],   # same as __x__y
-            "u__y__y": grad_grad_uvw_center[:,1,1:2],                   
-            "u__y__z": grad_grad_uvw_center[:,2,1:2],                   
-            "u__z__x": grad_grad_uvw_center[:,2,0:1],   # same as __x__z
-            "u__z__y": grad_grad_uvw_center[:,2,1:2],   # same as __y__z
-            "u__z__z": grad_grad_uvw_center[:,2,2:3],
-            "v__x__x": grad_grad_uvw_center[:,0,3:4],
-            "v__x__y": grad_grad_uvw_center[:,1,3:4],
-            "v__x__z": grad_grad_uvw_center[:,2,3:4],
-            "v__y__x": grad_grad_uvw_center[:,1,3:4],   # same as __x__y
-            "v__y__y": grad_grad_uvw_center[:,1,4:5],                   
-            "v__y__z": grad_grad_uvw_center[:,2,4:5],                   
-            "v__z__x": grad_grad_uvw_center[:,2,3:4],   # same as __x__z
-            "v__z__y": grad_grad_uvw_center[:,2,4:5],   # same as __y__z
-            "v__z__z": grad_grad_uvw_center[:,2,5:6],
-            "w__x__x": grad_grad_uvw_center[:,0,6:7],
-            "w__x__y": grad_grad_uvw_center[:,1,6:7],
-            "w__x__z": grad_grad_uvw_center[:,2,6:7],
-            "w__y__x": grad_grad_uvw_center[:,1,6:7],   # same as __x__y
-            "w__y__y": grad_grad_uvw_center[:,1,7:8],                   
-            "w__y__z": grad_grad_uvw_center[:,2,7:8],                   
-            "w__z__x": grad_grad_uvw_center[:,2,6:7],   # same as __x__z
-            "w__z__y": grad_grad_uvw_center[:,2,7:8],   # same as __y__z
-            "w__z__z": grad_grad_uvw_center[:,2,8:9],
+            "u": fields_center_unnormalized[:, 0:1],
+            "v": fields_center_unnormalized[:, 1:2],
+            "w": fields_center_unnormalized[:, 2:3],
+            "p": fields_center_unnormalized[:, 3:4],
+            "nu": nu + fields_center_unnormalized[:, 4:5],
+            "u__x": grad_center[:, 0, 0:1],
+            "u__y": grad_center[:, 1, 0:1],
+            "u__z": grad_center[:, 2, 0:1],
+            "v__x": grad_center[:, 0, 1:2],
+            "v__y": grad_center[:, 1, 1:2],
+            "v__z": grad_center[:, 2, 1:2],
+            "w__x": grad_center[:, 0, 2:3],
+            "w__y": grad_center[:, 1, 2:3],
+            "w__z": grad_center[:, 2, 2:3],
+            "p__x": grad_center[:, 0, 3:4],
+            "p__y": grad_center[:, 1, 3:4],
+            "p__z": grad_center[:, 2, 3:4],
+            "nu__x": grad_center[:, 0, 4:5],
+            "nu__y": grad_center[:, 1, 4:5],
+            "nu__z": grad_center[:, 2, 4:5],
+            "u__x__x": grad_grad_uvw_center[:, 0, 0:1],
+            "u__x__y": grad_grad_uvw_center[:, 1, 0:1],
+            "u__x__z": grad_grad_uvw_center[:, 2, 0:1],
+            "u__y__x": grad_grad_uvw_center[:, 1, 0:1],  # same as __x__y
+            "u__y__y": grad_grad_uvw_center[:, 1, 1:2],
+            "u__y__z": grad_grad_uvw_center[:, 2, 1:2],
+            "u__z__x": grad_grad_uvw_center[:, 2, 0:1],  # same as __x__z
+            "u__z__y": grad_grad_uvw_center[:, 2, 1:2],  # same as __y__z
+            "u__z__z": grad_grad_uvw_center[:, 2, 2:3],
+            "v__x__x": grad_grad_uvw_center[:, 0, 3:4],
+            "v__x__y": grad_grad_uvw_center[:, 1, 3:4],
+            "v__x__z": grad_grad_uvw_center[:, 2, 3:4],
+            "v__y__x": grad_grad_uvw_center[:, 1, 3:4],  # same as __x__y
+            "v__y__y": grad_grad_uvw_center[:, 1, 4:5],
+            "v__y__z": grad_grad_uvw_center[:, 2, 4:5],
+            "v__z__x": grad_grad_uvw_center[:, 2, 3:4],  # same as __x__z
+            "v__z__y": grad_grad_uvw_center[:, 2, 4:5],  # same as __y__z
+            "v__z__z": grad_grad_uvw_center[:, 2, 5:6],
+            "w__x__x": grad_grad_uvw_center[:, 0, 6:7],
+            "w__x__y": grad_grad_uvw_center[:, 1, 6:7],
+            "w__x__z": grad_grad_uvw_center[:, 2, 6:7],
+            "w__y__x": grad_grad_uvw_center[:, 1, 6:7],  # same as __x__y
+            "w__y__y": grad_grad_uvw_center[:, 1, 7:8],
+            "w__y__z": grad_grad_uvw_center[:, 2, 7:8],
+            "w__z__x": grad_grad_uvw_center[:, 2, 6:7],  # same as __x__z
+            "w__z__y": grad_grad_uvw_center[:, 2, 7:8],  # same as __y__z
+            "w__z__z": grad_grad_uvw_center[:, 2, 8:9],
         }
         continuity = ns_eqn["continuity"].evaluate(dict_mapping)["continuity"]
         momentum_x = ns_eqn["momentum_x"].evaluate(dict_mapping)["momentum_x"]
         momentum_y = ns_eqn["momentum_y"].evaluate(dict_mapping)["momentum_y"]
         momentum_z = ns_eqn["momentum_z"].evaluate(dict_mapping)["momentum_z"]
-    
+
         # Compute the weights for the equation residuals
         weight_continuity = torch.sigmoid(0.5 * (torch.abs(continuity) - 10))
         weight_momentum_x = torch.sigmoid(0.5 * (torch.abs(momentum_x) - 10))
         weight_momentum_y = torch.sigmoid(0.5 * (torch.abs(momentum_y) - 10))
         weight_momentum_z = torch.sigmoid(0.5 * (torch.abs(momentum_z) - 10))
-        
+
         weighted_continuity = weight_continuity * torch.abs(continuity)
         weighted_momentum_x = weight_momentum_x * torch.abs(momentum_x)
         weighted_momentum_y = weight_momentum_y * torch.abs(momentum_y)
         weighted_momentum_z = weight_momentum_z * torch.abs(momentum_z)
-    
+
         num = torch.sum(mask * (output - target) ** 2.0, dims)
         if loss_type == "rmse":
             denom = torch.sum(mask * target**2.0, dims)
         else:
             denom = torch.sum(mask)
-    
+
         del coords_total, output_total
         torch.cuda.empty_cache()
-        
-        return torch.mean(num / denom), torch.mean(torch.abs(weighted_continuity)), torch.mean(torch.abs(weighted_momentum_x)), torch.mean(torch.abs(weighted_momentum_y)), torch.mean(torch.abs(weighted_momentum_z))
+
+        return (
+            torch.mean(num / denom),
+            torch.mean(torch.abs(weighted_continuity)),
+            torch.mean(torch.abs(weighted_momentum_x)),
+            torch.mean(torch.abs(weighted_momentum_y)),
+            torch.mean(torch.abs(weighted_momentum_z)),
+        )
 
 
 def loss_fn_surface(
@@ -438,9 +464,15 @@ def compute_loss_dict(
 
         if add_physics_loss:
             loss_vol = loss_fn(
-                prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10, 
-                first_deriv=first_deriv, ns_eqn=ns_eqn, bounding_box=bounding_box, 
-                vol_factors=vol_factors, add_physics_loss=add_physics_loss
+                prediction_vol,
+                target_vol,
+                loss_fn_type.loss_type,
+                padded_value=-10,
+                first_deriv=first_deriv,
+                ns_eqn=ns_eqn,
+                bounding_box=bounding_box,
+                vol_factors=vol_factors,
+                add_physics_loss=add_physics_loss,
             )
             loss_dict["loss_vol"] = loss_vol[0]
             loss_dict["loss_continuity"] = loss_vol[1]
@@ -454,8 +486,11 @@ def compute_loss_dict(
             total_loss_terms.append(loss_vol[4])
         else:
             loss_vol = loss_fn(
-                prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10,
-                add_physics_loss=add_physics_loss
+                prediction_vol,
+                target_vol,
+                loss_fn_type.loss_type,
+                padded_value=-10,
+                add_physics_loss=add_physics_loss,
             )
             loss_dict["loss_vol"] = loss_vol
             total_loss_terms.append(loss_vol)
@@ -537,10 +572,12 @@ def validation_step(
 
             with autocast(enabled=False):
                 if add_physics_loss:
-                    prediction_vol, prediction_surf = model(sampled_batched, return_volume_neighbors=True)
+                    prediction_vol, prediction_surf = model(
+                        sampled_batched, return_volume_neighbors=True
+                    )
                 else:
                     prediction_vol, prediction_surf = model(sampled_batched)
-                    
+
                 loss, loss_dict = compute_loss_dict(
                     prediction_vol,
                     prediction_surf,
@@ -555,7 +592,7 @@ def validation_step(
                     vol_factors,
                     add_physics_loss,
                 )
-            
+
             running_vloss += loss.item()
 
     avg_vloss = running_vloss / (i_batch + 1)
@@ -604,7 +641,9 @@ def train_epoch(
         with autocast(enabled=autocast_enabled):
             with nvtx.range("Model Forward Pass"):
                 if add_physics_loss:
-                    prediction_vol, prediction_surf = model(sampled_batched, return_volume_neighbors=True)
+                    prediction_vol, prediction_surf = model(
+                        sampled_batched, return_volume_neighbors=True
+                    )
                 else:
                     prediction_vol, prediction_surf = model(sampled_batched)
 
@@ -693,7 +732,7 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Config summary:\n{OmegaConf.to_yaml(cfg, sort_keys=True)}")
 
     # Get physics imports conditionally
-    add_physics_loss = getattr(cfg.train, 'add_physics_loss', False)
+    add_physics_loss = getattr(cfg.train, "add_physics_loss", False)
     PDE, FirstDeriv, IncompressibleNavierStokes = get_physics_imports(add_physics_loss)
 
     num_vol_vars = 0
@@ -739,7 +778,9 @@ def main(cfg: DictConfig) -> None:
     )
     if os.path.exists(vol_save_path):
         vol_factors = np.load(vol_save_path)
-        vol_factors_tensor = torch.from_numpy(vol_factors).to(dist.device) if add_physics_loss else None
+        vol_factors_tensor = (
+            torch.from_numpy(vol_factors).to(dist.device) if add_physics_loss else None
+        )
     else:
         vol_factors = None
         vol_factors_tensor = None
@@ -747,7 +788,13 @@ def main(cfg: DictConfig) -> None:
     bounding_box = None
     if add_physics_loss:
         bounding_box = cfg.data.bounding_box
-        bounding_box = torch.from_numpy(np.stack([bounding_box["max"], bounding_box["min"]], axis=0)).to(vol_factors_tensor.dtype).to(dist.device)
+        bounding_box = (
+            torch.from_numpy(
+                np.stack([bounding_box["max"], bounding_box["min"]], axis=0)
+            )
+            .to(vol_factors_tensor.dtype)
+            .to(dist.device)
+        )
 
     if os.path.exists(surf_save_path):
         surf_factors = np.load(surf_save_path)

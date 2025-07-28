@@ -1020,7 +1020,6 @@ class DoMINODataPipe(Dataset):
         return return_dict
 
 
-
 @profile
 def compute_scaling_factors(cfg: DictConfig, input_path: str, use_cache: bool) -> None:
 

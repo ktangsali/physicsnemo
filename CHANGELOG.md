@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   global parameters and encode them using `class ParameterModel`
 - TopoDiff model and example.
 - Added ability for DoMINO model to return volume neighbors.
-- Added functionality in DoMINO recipe to introduce physics residual losses. 
+- Added functionality in DoMINO recipe to introduce physics residual losses.
 
 ### Changed
 
