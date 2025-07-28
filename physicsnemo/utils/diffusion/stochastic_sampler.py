@@ -23,6 +23,28 @@ from torch import Tensor
 from physicsnemo.utils.patching import GridPatching2D
 
 
+# NOTE: use two wrappers for apply, to avoid recompilation when input shape changes
+@torch.compile()
+def _apply_wrapper_Cin_channels(patching, input, additional_input=None):
+    """
+    Apply the patching operation to the input tensor with :math:`C_{in}` channels.
+    """
+    return patching.apply(input=input, additional_input=additional_input)
+
+
+@torch.compile()
+def _apply_wrapper_Cout_channels(patching, input, additional_input=None):
+    """
+    Apply the patching operation to the input tensor with :math:`C_{out}` channels.
+    """
+    return patching.apply(input=input, additional_input=additional_input)
+
+
+@torch.compile()
+def _fuse_wrapper(patching, input, batch_size):
+    return patching.fuse(input=input, batch_size=batch_size)
+
+
 def stochastic_sampler(
     net: torch.nn.Module,
     latents: Tensor,
@@ -41,7 +63,7 @@ def stochastic_sampler(
     S_max: float = float("inf"),
     S_noise: float = 1,
 ) -> Tensor:
-    """
+    r"""
     Proposed EDM sampler (Algorithm 2) with minor changes to enable
     super-resolution and patch-based diffusion.
 
@@ -50,53 +72,57 @@ def stochastic_sampler(
     net : torch.nn.Module
         The neural network model that generates denoised images from noisy
         inputs.
-        Expected signature: `net(x, x_lr, t_hat, class_labels,
-        lead_time_label=lead_time_label, embedding_selector=embedding_selector)`,
-        where:
-            x (torch.Tensor): Noisy input of shape (batch_size, C_out, H, W)
-            x_lr (torch.Tensor): Conditioning input of shape (batch_size, C_cond, H, W)
-            t_hat (torch.Tensor): Noise level of shape (batch_size, 1, 1, 1) or scalar
-            class_labels (torch.Tensor, optional): Optional class labels
-            lead_time_label (torch.Tensor, optional): Optional lead time labels
-            embedding_selector (callable, optional): Function to select
+        Expected signature: ``net(x, x_lr, t_hat, class_labels,
+        lead_time_label=lead_time_label,
+        embedding_selector=embedding_selector)``.
+
+        Inputs:
+            - **x** (*torch.Tensor*): Noisy input of shape :math:`(B, C_{out}, H, W)`
+            - **x_lr** (*torch.Tensor*): Conditioning input of shape :math:`(B, C_{cond}, H, W)`
+            - **t_hat** (*torch.Tensor*): Noise level of shape :math:`(B, 1, 1, 1)` or scalar
+            - **class_labels** (*torch.Tensor, optional*): Optional class labels
+            - **lead_time_label** (*torch.Tensor, optional*): Optional lead time labels
+            - **embedding_selector** (*callable, optional*): Function to select
             positional embeddings. Used for patch-based diffusion.
-        Returns:
-            torch.Tensor: Denoised prediction of shape (batch_size, C_out, H, W)
+
+        Output:
+            - **denoised** (*torch.Tensor*): Denoised prediction of shape :math:`(B, C_{out}, H, W)`
 
         Required attributes:
-            sigma_min (float): Minimum supported noise level for the model
-            sigma_max (float): Maximum supported noise level for the model
-            round_sigma (callable): Method to convert sigma values to tensor representation
+            - **sigma_min** (*float*): Minimum supported noise level for the model
+            - **sigma_max** (*float*): Maximum supported noise level for the model
+            - **round_sigma** (*callable*): Method to convert sigma values to
+              tensor representation
+
     latents : Tensor
         The latent variables (e.g., noise) used as the initial input for the
-        sampler. Has shape (batch_size, C_out, img_shape_y, img_shape_x).
+        sampler. Has shape :math:`(B, C_{out}, H, W)`.
     img_lr : Tensor
         Low-resolution input image for conditioning the super-resolution
-        process. Must have shape (batch_size, C_lr, img_lr_ shape_y,
-        img_lr_shape_x).
+        process. Must have shape :math:`(B, C_{lr}, H, W)`.
     class_labels : Optional[Tensor], optional
         Class labels for conditional generation, if required by the model. By
-        default None.
+        default ``None``.
     randn_like : Callable[[Tensor], Tensor]
         Function to generate random noise with the same shape as the input
         tensor.
-        By default torch.randn_like.
-    patching : Optional[GridPatching2D], optional
+        By default ``torch.randn_like``.
+    patching : Optional[GridPatching2D], default=None
         A patching utility for patch-based diffusion. Implements methods to
-        extract patches from an image and batch the patches along `dim=0`.
-        Should also implement a `fuse` method to reconstruct the original image
-       from a batch of patches. See
-       :class:`physicsnemo.utils.patching.GridPatching2D` for details. By
-       default None, in which case non-patched diffusion is used.
+        extract patches from an image and batch the patches along dim=0.
+        Should also implement a ``fuse`` method to reconstruct the original
+        image from a batch of patches. See
+        :class:`~physicsnemo.utils.patching.GridPatching2D` for details. By
+        default ``None``, in which case non-patched diffusion is used.
     mean_hr : Optional[Tensor], optional
         Optional tensor containing mean high-resolution images for
-        conditioning. Must have same height and width as `img_lr`, with shape
-        (B_hr, C_hr, img_lr_shape_y, img_lr_shape_x)  where the batch dimension
-        B_hr can be either 1, either equal to batch_size, or can be omitted. If
-        B_hr = 1 or is omitted, `mean_hr` will be expanded to match the shape
-        of `img_lr`. By default None.
+        conditioning. Must have same height and width as ``img_lr``, with shape
+        :math:`(B_{hr}, C_{hr}, H, W)`  where the batch dimension
+        :math:`B_{hr}` can be either 1, either equal to batch_size, or can be omitted. If
+        :math:`B_{hr} = 1` or is omitted, ``mean_hr`` will be expanded to match the shape
+        of ``img_lr``. By default ``None``.
     lead_time_label : Optional[Tensor], optional
-        Optional lead time labels. By default None.
+        Optional lead time labels. By default ``None``.
     num_steps : int
         Number of time steps for the sampler. By default 18.
     sigma_min : float
@@ -111,7 +137,7 @@ def stochastic_sampler(
     S_min : float
         Minimum time step for applying churn. By default 0.
     S_max : float
-        Maximum time step for applying churn. By default float("inf").
+        Maximum time step for applying churn. By default ``float("inf")``.
     S_noise : float
         Noise scaling factor applied during the churn step. By default 1.
 
@@ -119,11 +145,11 @@ def stochastic_sampler(
     -------
     Tensor
         The final denoised image produced by the sampler. Same shape as
-        `latents`: (batch_size, C_out, img_shape_y, img_shape_x).
+        ``latents``: :math:`(B, C_{out}, H, W)`.
 
     See Also
     --------
-    :class:`physicsnemo.models.diffusion.EDMPrecondSuperResolution`: A model
+    :class:`~physicsnemo.models.diffusion.preconditioning.EDMPrecondSuperResolution`: A model
         wrapper that provides preconditioning for super-resolution diffusion
         models and implements the required interface for this sampler.
     """
@@ -156,7 +182,7 @@ def stochastic_sampler(
         )
 
     # Time step discretization.
-    step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
+    step_indices = torch.arange(num_steps, device=latents.device)
     t_steps = (
         sigma_max ** (1 / rho)
         + step_indices
@@ -183,7 +209,9 @@ def stochastic_sampler(
     if patching:
         # Patched conditioning [x_lr, mean_hr]
         # (batch_size * patch_num, C_in + C_out, patch_shape_y, patch_shape_x)
-        x_lr = patching.apply(input=x_lr, additional_input=img_lr)
+        x_lr = _apply_wrapper_Cin_channels(
+            patching=patching, input=x_lr, additional_input=img_lr
+        )
 
         # Function to select the correct positional embedding for each patch
         def patch_embedding_selector(emb):
@@ -195,7 +223,7 @@ def stochastic_sampler(
         patch_embedding_selector = None
 
     # Main sampling loop.
-    x_next = latents.to(torch.float64) * t_steps[0]
+    x_next = latents * t_steps[0]
     for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):  # 0, ..., N-1
         x_cur = x_next
         # Increase noise temporarily.
@@ -207,10 +235,12 @@ def stochastic_sampler(
         # Euler step. Perform patching operation on score tensor if patch-based
         # generation is used denoised = net(x_hat, t_hat,
         # class_labels,lead_time_label=lead_time_label).to(torch.float64)
+        x_hat_batch = (
+            _apply_wrapper_Cout_channels(patching=patching, input=x_hat)
+            if patching
+            else x_hat
+        ).to(latents.device)
 
-        x_hat_batch = (patching.apply(input=x_hat) if patching else x_hat).to(
-            latents.device
-        )
         x_lr = x_lr.to(latents.device)
 
         if lead_time_label is not None:
@@ -221,7 +251,7 @@ def stochastic_sampler(
                 class_labels,
                 lead_time_label=lead_time_label,
                 embedding_selector=patch_embedding_selector,
-            ).to(torch.float64)
+            )
         else:
             denoised = net(
                 x_hat_batch,
@@ -229,11 +259,13 @@ def stochastic_sampler(
                 t_hat,
                 class_labels,
                 embedding_selector=patch_embedding_selector,
-            ).to(torch.float64)
+            )
         if patching:
             # Un-patch the denoised image
             # (batch_size, C_out, img_shape_y, img_shape_x)
-            denoised = patching.fuse(input=denoised, batch_size=batch_size)
+            denoised = _fuse_wrapper(
+                patching=patching, input=denoised, batch_size=batch_size
+            )
 
         d_cur = (x_hat - denoised) / t_hat
         x_next = x_hat + (t_next - t_hat) * d_cur
@@ -242,9 +274,11 @@ def stochastic_sampler(
         if i < num_steps - 1:
             # Patched input
             # (batch_size * patch_num, C_out, patch_shape_y, patch_shape_x)
-            x_next_batch = (patching.apply(input=x_next) if patching else x_next).to(
-                latents.device
-            )
+            x_next_batch = (
+                _apply_wrapper_Cout_channels(patching=patching, input=x_next)
+                if patching
+                else x_next
+            ).to(latents.device)
 
             if lead_time_label is not None:
                 denoised = net(
@@ -254,7 +288,7 @@ def stochastic_sampler(
                     class_labels,
                     lead_time_label=lead_time_label,
                     embedding_selector=patch_embedding_selector,
-                ).to(torch.float64)
+                )
             else:
                 denoised = net(
                     x_next_batch,
@@ -262,11 +296,13 @@ def stochastic_sampler(
                     t_next,
                     class_labels,
                     embedding_selector=patch_embedding_selector,
-                ).to(torch.float64)
+                )
             if patching:
                 # Un-patch the denoised image
                 # (batch_size, C_out, img_shape_y, img_shape_x)
-                denoised = patching.fuse(input=denoised, batch_size=batch_size)
+                denoised = _fuse_wrapper(
+                    patching=patching, input=denoised, batch_size=batch_size
+                )
 
             d_prime = (x_next - denoised) / t_next
             x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
