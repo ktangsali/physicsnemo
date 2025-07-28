@@ -225,7 +225,11 @@ it will sample `num_volume_neighbors (num_volume_neighbors // 2 + 1)` (in this
 case 40) total points.
 
 The results of physics addition can be found below (using the DrivAerML
-dataset). We observe that, addition of physics losses improves the model
+dataset). The results are computed on the design ID 419 and 439 from the
+validation set and averaged.
+
+
+We observe that, addition of physics losses improves the model
 predictions' ability to respect the governing laws better.
 
 <table><thead>
@@ -242,7 +246,7 @@ predictions' ability to respect the governing laws better.
     <td>Baseline + Physics (full dataset)</td>
   </tr>
   <tr>
-    <td rowspan="9">Volume</td>
+    <td rowspan="5">Volume</td>
     <td>p</td>
     <td>0.15413</td>
     <td>0.17203</td>
@@ -268,26 +272,6 @@ predictions' ability to respect the governing laws better.
     <td>0.21883</td>
   </tr>
   <tr>
-    <td>continuity</td>
-    <td>30.35207</td>
-    <td>2.11262</td>
-  </tr>
-  <tr>
-    <td>momentum_x</td>
-    <td>19.10928</td>
-    <td>2.33800</td>
-  </tr>
-  <tr>
-    <td>momentum_y</td>
-    <td>99.36662</td>
-    <td>3.18452</td>
-  </tr>
-  <tr>
-    <td>momentum_z</td>
-    <td>45.73862</td>
-    <td>2.69173</td>
-  </tr>
-  <tr>
     <td rowspan="4">Surface</td>
     <td>p</td>
     <td>0.16003</td>
@@ -308,7 +292,48 @@ predictions' ability to respect the governing laws better.
     <td>0.35056</td>
     <td>0.32095</td>
   </tr>
-</tbody></table>
+</tbody>
+</table>
+
+<table><thead>
+  <tr>
+    <th></th>
+    <th colspan="2">Total Residual</th>
+    <th></th>
+  </tr></thead>
+<tbody>
+  <tr>
+    <td>Variable</td>
+    <td>Baseline (full dataset)</td>
+    <td>Baseline + Physics (full dataset)</td>
+    <td>% Improvement</td>
+  </tr>
+  <tr>
+    <td>continuity</td>
+    <td>3.14E+11</td>
+    <td>1.58E+11</td>
+    <td>49.69%</td>
+  </tr>
+  <tr>
+    <td>momentum_x</td>
+    <td>1.01E+16</td>
+    <td>1.08E+15</td>
+    <td>89.24%</td>
+  </tr>
+  <tr>
+    <td>momentum_y</td>
+    <td>2.89E+16</td>
+    <td>9.24E+14</td>
+    <td>96.81%</td>
+  </tr>
+  <tr>
+    <td>momentum_z</td>
+    <td>5.44E+15</td>
+    <td>3.58E+14</td>
+    <td>93.43%</td>
+  </tr>
+</tbody>
+</table>
 
 *Addition of physics constraints to the DoMINO training is under active
 development and might introduce breaking changes in the future*
