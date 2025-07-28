@@ -155,6 +155,23 @@ def unnormalize(
     Transforms normalized values from the range [-1, 1] back to their original
     physical range using the stored min/max values.
 
+    Args:
+        normalized_field: Field values in the normalized range [-1, 1].
+        max_val: Maximum values used in the original normalization.
+        min_val: Minimum values used in the original normalization.
+
+    Returns:
+        Field values restored to their original physical range.
+
+    Examples:
+        >>> import numpy as np
+        >>> normalized = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
+        >>> original = unnormalize(normalized, 5.0, 1.0)
+        >>> np.allclose(original, [1.0, 2.0, 3.0, 4.0, 5.0])
+        True
+    """
+    field_range = max_val - min_val
+    return (normalized_field + 1.0) * field_range * 0.5 + min_val
 
 def standardize(
     field: ArrayType, mean: ArrayType | None = None, std: ArrayType | None = None
