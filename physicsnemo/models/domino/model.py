@@ -793,7 +793,6 @@ class DoMINO(nn.Module):
         self.num_variables_surf = output_features_surf
         self.grid_resolution = model_parameters.interp_res
         self.surface_neighbors = model_parameters.surface_neighbors
-        self.volume_neighbors = model_parameters.volume_neighbors
         self.use_surface_normals = model_parameters.use_surface_normals
         self.use_surface_area = model_parameters.use_surface_area
         self.encode_parameters = model_parameters.encode_parameters

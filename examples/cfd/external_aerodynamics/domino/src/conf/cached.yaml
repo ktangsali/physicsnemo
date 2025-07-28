@@ -21,8 +21,8 @@ defaults:
 exp_tag: cached
 
 data: # Input directory for training and validation data
-  input_dir: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/cached/drivaer_aws/drivaer_data_full/train/
-  input_dir_val: /code/domino-phy-informed-dev/physicsnemo/examples/cfd/external_aerodynamics/domino/cached/drivaer_aws/drivaer_data_full/val/
+  input_dir: /lustre/cached/drivaer_aws/drivaer_data_full/train/
+  input_dir_val: /lustre/cached/drivaer_aws/drivaer_data_full/val/
 data_processor:
   use_cache: true
 
