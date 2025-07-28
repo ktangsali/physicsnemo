@@ -191,6 +191,128 @@ launch overhead at the cost of more memory use.  For non-sharded
 training, the `two-loop` setting is more optimal. The difference in `one-loop`
 or `two-loop` is purely computational, not algorithmic.
 
+### Training with Physics Losses
+
+DoMINO supports enforcing of PDE residuals as soft constraints. This can be used
+to improve the model predictions' adherence to the governing laws of the problem
+which include Continuity and Navier Stokes equations.
+
+#### Prerequisites
+
+The computation of Physics residuals is supported using the PhysicsNeMo-Sym
+library. Install it using
+
+```
+pip install "Cython"
+pip install "nvidia-physicsnemo.sym>2.1.0" --no-build-isolation
+```
+
+To execute the training using physics losses, run the `train.py` with below
+configuration
+
+```bash
+torchrun --nproc_per_node=<num-gpus> train.py \
+    ++train.add_physics_loss=True ++model.num_volume_neighbors=8
+```
+
+Note, the `num_volume_neighbors` is set to 8 to reduce the memory requirement.
+Also, when the Physics losses are applied, it will automatically sample
+`num_volume_neighbors // 2` additional points, for each point in
+`num_volume_neighbors`. These are considered as "2-hop" neighbors, which are
+required to compute the higher order gradients required for Navier-Stokes
+equations. Hence, even if `num_volume_neighbors` is set to 8, for the fields,
+it will sample `num_volume_neighbors (num_volume_neighbors // 2 + 1)` (in this
+case 40) total points.
+
+The results of physics addition can be found below (using the DrivAerML
+dataset). We observe that, addition of physics losses improves the model
+predictions' ability to respect the governing laws better.
+
+<table><thead>
+  <tr>
+    <th></th>
+    <th></th>
+    <th colspan="2">L2 Errors</th>
+  </tr></thead>
+<tbody>
+  <tr>
+    <td>Type</td>
+    <td>Variable</td>
+    <td>Baseline (full dataset)</td>
+    <td>Baseline + Physics (full dataset)</td>
+  </tr>
+  <tr>
+    <td rowspan="9">Volume</td>
+    <td>p</td>
+    <td>0.15413</td>
+    <td>0.17203</td>
+  </tr>
+  <tr>
+    <td>U_x</td>
+    <td>0.15566</td>
+    <td>0.16397</td>
+  </tr>
+  <tr>
+    <td>U_y</td>
+    <td>0.32229</td>
+    <td>0.34383</td>
+  </tr>
+  <tr>
+    <td>U_z</td>
+    <td>0.31027</td>
+    <td>0.32450</td>
+  </tr>
+  <tr>
+    <td>nut</td>
+    <td>0.21049</td>
+    <td>0.21883</td>
+  </tr>
+  <tr>
+    <td>continuity</td>
+    <td>30.35207</td>
+    <td>2.11262</td>
+  </tr>
+  <tr>
+    <td>momentum_x</td>
+    <td>19.10928</td>
+    <td>2.33800</td>
+  </tr>
+  <tr>
+    <td>momentum_y</td>
+    <td>99.36662</td>
+    <td>3.18452</td>
+  </tr>
+  <tr>
+    <td>momentum_z</td>
+    <td>45.73862</td>
+    <td>2.69173</td>
+  </tr>
+  <tr>
+    <td rowspan="4">Surface</td>
+    <td>p</td>
+    <td>0.16003</td>
+    <td>0.14298</td>
+  </tr>
+  <tr>
+    <td>wss_x</td>
+    <td>0.21476</td>
+    <td>0.20519</td>
+  </tr>
+  <tr>
+    <td>wss_y</td>
+    <td>0.31697</td>
+    <td>0.30335</td>
+  </tr>
+  <tr>
+    <td>wss_z</td>
+    <td>0.35056</td>
+    <td>0.32095</td>
+  </tr>
+</tbody></table>
+
+*Addition of physics constraints to the DoMINO training is under active
+development and might introduce breaking changes in the future*
+
 ### Retraining recipe for DoMINO model
 
 To enable retraining the DoMINO model from a pre-trained checkpoint, follow the steps:
