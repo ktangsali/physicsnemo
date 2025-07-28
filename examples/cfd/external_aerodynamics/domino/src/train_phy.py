@@ -33,7 +33,7 @@ import re
 import torch
 import torchinfo
 
-from typing import Literal
+from typing import Literal, Any, Optional, Tuple
 
 import apex
 import numpy as np
@@ -73,16 +73,29 @@ nvmlInit()
 
 from physicsnemo.utils.profiling import profile, Profiler
 
+def get_physics_imports(add_physics_loss):
+    """Conditionally import physics-related modules based on config."""
+    if add_physics_loss:
+        from physicsnemo.sym.eq.pde import PDE
+        from physicsnemo.sym.eq.ls.grads import FirstDeriv
+        from physicsnemo.sym.eq.pdes.navier_stokes import IncompressibleNavierStokes
+        return PDE, FirstDeriv, IncompressibleNavierStokes
+    else:
+        return None, None, None
+
 # Profiler().enable("line_profiler")
 # Profiler().initialize()
-
 
 def loss_fn(
     output: torch.Tensor,
     target: torch.Tensor,
     loss_type: Literal["mse", "rmse"],
     padded_value: float = -10,
-    vol_factors: None = torch.Tensor,
+    first_deriv: Optional[torch.nn.Module] = None,
+    ns_eqn: Any = None,
+    bounding_box: Optional[torch.Tensor] = None,
+    vol_factors: Optional[torch.Tensor] = None,
+    add_physics_loss: bool = False,
 ) -> torch.Tensor:
     """Calculate mean squared error or root mean squared error with masking for padded values.
 
@@ -91,9 +104,14 @@ def loss_fn(
         target: Ground truth values
         loss_type: Type of loss to calculate ("mse" or "rmse")
         padded_value: Value used for padding in the tensor
+        first_deriv: First derivative calculator (only used if add_physics_loss=True)
+        ns_eqn: Navier-Stokes equations (only used if add_physics_loss=True)
+        bounding_box: Bounding box for normalization (only used if add_physics_loss=True)
+        vol_factors: Volume factors for normalization (only used if add_physics_loss=True)
+        add_physics_loss: Whether to add physics-based loss terms
 
     Returns:
-        Calculated loss as a scalar tensor
+        Calculated loss as a scalar tensor or tuple of losses if physics loss is enabled
     """
     mask = abs(target - padded_value) > 1e-3
 
@@ -102,95 +120,139 @@ def loss_fn(
     else:
         dims = None
 
-    output, grad, grad_grad_uvw = output
-    
-    # unnormalize gradients
-    # Grads have shape [1, batch_size, 3, num_variables]
-    # 0, 1, 2 -> u, v, w; 3 -> p; 4 -> nut
-    # print(output.device, vol_factors.device)
-    # vol_factors = torch.from_numpy(vol_factors, device=output.device)
-    fields = unnormalize(output, vol_factors[0], vol_factors[1])
-    grad = unnormalize_grad(grad, vol_factors[0], vol_factors[1])
-    grad_grad_uvw = unnormalize_grad(grad_grad_uvw, vol_factors[0][0:3].repeat_interleave(3), vol_factors[1][0:3].repeat_interleave(3))
-
-    rho = 1.226
-    nu = 1.507 * 1e-5
-
-    u = fields[:,:,0:1]
-    v = fields[:,:,1:2]
-    w = fields[:,:,2:3]
-    
-    mu = rho * (nu + fields[:,:,4:5])   # mu + mu_t
-    mu_grad = rho * grad[:,:,:,4:5]
-    mu__x = mu_grad[:,:,0,:]
-    mu__y = mu_grad[:,:,1,:]
-    mu__z = mu_grad[:,:,2,:]
-
-    # compute residuals
-    p__x = grad[:,:,0,3:4]
-    p__y = grad[:,:,1,3:4]
-    p__z = grad[:,:,2,3:4]
-    u__x = grad[:,:,0,0:1]
-    u__y = grad[:,:,1,0:1]
-    u__z = grad[:,:,2,0:1]
-    v__x = grad[:,:,0,1:2]
-    v__y = grad[:,:,1,1:2]
-    v__z = grad[:,:,2,1:2]
-    w__x = grad[:,:,0,2:3]
-    w__y = grad[:,:,1,2:3]
-    w__z = grad[:,:,2,2:3]
-    u__x__x = grad_grad_uvw[:,:,0,0:1]
-    u__x__y = grad_grad_uvw[:,:,1,0:1]
-    u__x__z = grad_grad_uvw[:,:,2,0:1]
-    u__y__y = grad_grad_uvw[:,:,1,1:2]
-    u__y__z = grad_grad_uvw[:,:,2,1:2]
-    u__z__z = grad_grad_uvw[:,:,2,2:3]
-    v__x__x = grad_grad_uvw[:,:,0,3:4]
-    v__x__y = grad_grad_uvw[:,:,1,3:4]
-    v__x__z = grad_grad_uvw[:,:,2,3:4]
-    v__y__y = grad_grad_uvw[:,:,1,4:5]
-    v__y__z = grad_grad_uvw[:,:,2,4:5]
-    v__z__z = grad_grad_uvw[:,:,2,5:6]
-    w__x__x = grad_grad_uvw[:,:,0,6:7]
-    w__x__y = grad_grad_uvw[:,:,1,6:7]
-    w__x__z = grad_grad_uvw[:,:,2,6:7]
-    w__y__y = grad_grad_uvw[:,:,1,7:8]
-    w__y__z = grad_grad_uvw[:,:,2,7:8]
-    w__z__z = grad_grad_uvw[:,:,2,8:9]
-
-    u__y__x = u__x__y
-    u__z__x = u__x__z
-    u__z__y = u__y__z
-    v__y__x = v__x__y
-    v__z__x = v__x__z
-    v__z__y = v__y__z
-    w__y__x = w__x__y
-    w__z__x = w__x__z
-    w__z__y = w__y__z
-    
-    tau_xx__x = 2 * mu * u__x__x + 2 * mu__x * u__x
-    tau_xy__y = mu * (u__y__y + v__x__y) + mu__y * (u__y + v__x)
-    tau_xz__z = mu * (u__z__z + w__x__z) + mu__z * (u__z + w__x)
-    tau_xy__x = mu * (u__y__x + v__x__x) + mu__x * (u__y + v__x)
-    tau_yy__y = 2 * mu * v__y__y + 2 * mu__y * v__y
-    tau_yz__z = mu * (v__z__z + w__y__z) + mu__z * (v__z + w__y)
-    tau_xz__x = mu * (u__z__x + w__x__x) + mu__x * (u__z + w__x) 
-    tau_yz__y = mu * (v__z__y + w__y__y) + mu__y * (v__z + w__y)
-    tau_zz__z = 2 * mu * w__z__z + 2 * mu__z * w__z
-
-    continuity = u__x + v__y + w__z
-    momentum_x = rho * (u * u__x + v * u__y + w * u__z) + p__x - tau_xx__x - tau_xy__y - tau_xz__z
-    momentum_y = rho * (u * v__x + v * v__y + w * v__z) + p__y - tau_xy__x - tau_yy__y - tau_yz__z
-    momentum_z = rho * (u * w__x + v * w__y + w * w__z) + p__z - tau_xz__x - tau_yz__y - tau_zz__z
-    
-    # print(f"Conitnuity and Momentum shapes: {continuity.shape}, {momentum_x.shape}, {momentum_y.shape}, {momentum_z.shape}")
-    num = torch.sum(mask * (output - target) ** 2.0, dims)
-    if loss_type == "rmse":
-        denom = torch.sum(mask * target**2.0, dims)
+    if not add_physics_loss:
+        num = torch.sum(mask * (output - target) ** 2.0, dims)
+        if loss_type == "rmse":
+            denom = torch.sum(mask * target**2.0, dims)
+        else:
+            denom = torch.sum(mask)
+        return torch.mean(num / denom)
     else:
-        denom = torch.sum(mask)
-
-    return torch.mean(num / denom), torch.mean(torch.abs(continuity)), torch.mean(torch.abs(momentum_x)), torch.mean(torch.abs(momentum_y)), torch.mean(torch.abs(momentum_z))
+        # Physics loss enabled
+        output, coords_neighbors, output_neighbors, neighbors_list = output
+        batch_size = output.shape[1]
+        fields, num_neighbors = output_neighbors.shape[3], output_neighbors.shape[2]
+        coords_total = coords_neighbors[0, :]
+        output_total = output_neighbors[0, :]
+        output_total_unnormalized = unnormalize(output_total, vol_factors[0], vol_factors[1])
+        coords_total_unnormalized = unnormalize(coords_total, bounding_box[0], bounding_box[1])
+    
+        # compute first order gradients on all the nodes from the neighbors_list
+        grad_list = {}
+        for parent_id, neighbor_ids in neighbors_list.items():
+            neighbor_ids_tensor = torch.tensor(neighbor_ids).to(output_total_unnormalized.device)
+            du = output_total_unnormalized[:,parent_id:parent_id+1] - output_total_unnormalized[:,neighbor_ids_tensor]
+            dv = coords_total_unnormalized[:,parent_id:parent_id+1] - coords_total_unnormalized[:,neighbor_ids_tensor]
+            grads = first_deriv.forward(
+                coords=None,
+                connectivity_tensor=None,
+                y=None, 
+                du=du,
+                dv=dv
+            )
+            grad = torch.cat(grads, dim=1)
+            grad_list[parent_id] = grad
+    
+        # compute second order gradients on only the center node
+        neighbor_ids_tensor = torch.tensor(neighbors_list[0]).to(output_total_unnormalized.device)
+        grad_neighbors_center = torch.stack([v for v in grad_list.values()], dim=1)
+        grad_neighbors_center = grad_neighbors_center.reshape(batch_size, len(neighbors_list[0]) + 1, -1)
+    
+        du = grad_neighbors_center[:,0:1] - grad_neighbors_center[:,neighbor_ids_tensor]
+        dv = coords_total_unnormalized[:,0:1] - coords_total_unnormalized[:,neighbor_ids_tensor]
+        
+        ggrads_center = first_deriv.forward(
+            coords=None,
+            connectivity_tensor=None,
+            y=None, 
+            du=du,
+            dv=dv
+        )
+        ggrad_center = torch.cat(ggrads_center, dim=1)
+        grad_neighbors_center = grad_neighbors_center.reshape(batch_size, len(neighbors_list[0]) + 1, 3, -1)
+        
+        # Get the outputs on the original nodes
+        fields_center_unnormalized = output_total_unnormalized[:,0,:]
+        grad_center = grad_neighbors_center[:,0,:,:]
+        grad_grad_uvw_center = ggrad_center[:,:,:9]
+    
+        nu = 1.507 * 1e-5
+        
+        dict_mapping = {
+            "u": fields_center_unnormalized[:,0:1],
+            "v": fields_center_unnormalized[:,1:2],
+            "w": fields_center_unnormalized[:,2:3],
+            "p": fields_center_unnormalized[:,3:4],
+            "nu": nu + fields_center_unnormalized[:,4:5],
+            "u__x": grad_center[:,0,0:1],
+            "u__y": grad_center[:,1,0:1],
+            "u__z": grad_center[:,2,0:1],
+            "v__x": grad_center[:,0,1:2],
+            "v__y": grad_center[:,1,1:2],
+            "v__z": grad_center[:,2,1:2],
+            "w__x": grad_center[:,0,2:3],
+            "w__y": grad_center[:,1,2:3],
+            "w__z": grad_center[:,2,2:3],
+            "p__x": grad_center[:,0,3:4],
+            "p__y": grad_center[:,1,3:4],
+            "p__z": grad_center[:,2,3:4],
+            "nu__x": grad_center[:,0,4:5],
+            "nu__y": grad_center[:,1,4:5],
+            "nu__z": grad_center[:,2,4:5],    
+            "u__x__x": grad_grad_uvw_center[:,0,0:1],
+            "u__x__y": grad_grad_uvw_center[:,1,0:1],
+            "u__x__z": grad_grad_uvw_center[:,2,0:1],
+            "u__y__x": grad_grad_uvw_center[:,1,0:1],   # same as __x__y
+            "u__y__y": grad_grad_uvw_center[:,1,1:2],                   
+            "u__y__z": grad_grad_uvw_center[:,2,1:2],                   
+            "u__z__x": grad_grad_uvw_center[:,2,0:1],   # same as __x__z
+            "u__z__y": grad_grad_uvw_center[:,2,1:2],   # same as __y__z
+            "u__z__z": grad_grad_uvw_center[:,2,2:3],
+            "v__x__x": grad_grad_uvw_center[:,0,3:4],
+            "v__x__y": grad_grad_uvw_center[:,1,3:4],
+            "v__x__z": grad_grad_uvw_center[:,2,3:4],
+            "v__y__x": grad_grad_uvw_center[:,1,3:4],   # same as __x__y
+            "v__y__y": grad_grad_uvw_center[:,1,4:5],                   
+            "v__y__z": grad_grad_uvw_center[:,2,4:5],                   
+            "v__z__x": grad_grad_uvw_center[:,2,3:4],   # same as __x__z
+            "v__z__y": grad_grad_uvw_center[:,2,4:5],   # same as __y__z
+            "v__z__z": grad_grad_uvw_center[:,2,5:6],
+            "w__x__x": grad_grad_uvw_center[:,0,6:7],
+            "w__x__y": grad_grad_uvw_center[:,1,6:7],
+            "w__x__z": grad_grad_uvw_center[:,2,6:7],
+            "w__y__x": grad_grad_uvw_center[:,1,6:7],   # same as __x__y
+            "w__y__y": grad_grad_uvw_center[:,1,7:8],                   
+            "w__y__z": grad_grad_uvw_center[:,2,7:8],                   
+            "w__z__x": grad_grad_uvw_center[:,2,6:7],   # same as __x__z
+            "w__z__y": grad_grad_uvw_center[:,2,7:8],   # same as __y__z
+            "w__z__z": grad_grad_uvw_center[:,2,8:9],
+        }
+        continuity = ns_eqn["continuity"].evaluate(dict_mapping)["continuity"]
+        momentum_x = ns_eqn["momentum_x"].evaluate(dict_mapping)["momentum_x"]
+        momentum_y = ns_eqn["momentum_y"].evaluate(dict_mapping)["momentum_y"]
+        momentum_z = ns_eqn["momentum_z"].evaluate(dict_mapping)["momentum_z"]
+    
+        # Compute the weights for the equation residuals
+        weight_continuity = torch.sigmoid(0.5 * (torch.abs(continuity) - 10))
+        weight_momentum_x = torch.sigmoid(0.5 * (torch.abs(momentum_x) - 10))
+        weight_momentum_y = torch.sigmoid(0.5 * (torch.abs(momentum_y) - 10))
+        weight_momentum_z = torch.sigmoid(0.5 * (torch.abs(momentum_z) - 10))
+        
+        weighted_continuity = weight_continuity * torch.abs(continuity)
+        weighted_momentum_x = weight_momentum_x * torch.abs(momentum_x)
+        weighted_momentum_y = weight_momentum_y * torch.abs(momentum_y)
+        weighted_momentum_z = weight_momentum_z * torch.abs(momentum_z)
+    
+        num = torch.sum(mask * (output - target) ** 2.0, dims)
+        if loss_type == "rmse":
+            denom = torch.sum(mask * target**2.0, dims)
+        else:
+            denom = torch.sum(mask)
+    
+        del coords_total, output_total
+        torch.cuda.empty_cache()
+        
+        return torch.mean(num / denom), torch.mean(torch.abs(weighted_continuity)), torch.mean(torch.abs(weighted_momentum_x)), torch.mean(torch.abs(weighted_momentum_y)), torch.mean(torch.abs(weighted_momentum_z))
 
 
 def loss_fn_surface(
@@ -349,7 +411,11 @@ def compute_loss_dict(
     integral_scaling_factor: float,
     surf_loss_scaling: float,
     vol_loss_scaling: float,
-    vol_factors: torch.Tensor
+    first_deriv: Optional[torch.nn.Module] = None,
+    ns_eqn: Any = None,
+    bounding_box: Optional[torch.Tensor] = None,
+    vol_factors: Optional[torch.Tensor] = None,
+    add_physics_loss: bool = False,
 ) -> Tuple[torch.Tensor, dict]:
     """
     Compute the loss terms in a single function call.
@@ -371,20 +437,30 @@ def compute_loss_dict(
     if prediction_vol is not None:
         target_vol = batch_inputs["volume_fields"]
 
-        loss_vol = loss_fn(
-            prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10, vol_factors=vol_factors
-        )
-        loss_dict["loss_vol"] = loss_vol[0]
-        loss_dict["loss_continuity"] = loss_vol[1]
-        loss_dict["loss_momentum_x"] = loss_vol[2]
-        loss_dict["loss_momentum_y"] = loss_vol[3]
-        loss_dict["loss_momentum_z"] = loss_vol[4]
-        total_loss_terms.append(loss_vol[0])
-        total_loss_terms.append(loss_vol[1])
-        total_loss_terms.append(loss_vol[2])
-        total_loss_terms.append(loss_vol[3])
-        total_loss_terms.append(loss_vol[4])
-        
+        if add_physics_loss:
+            loss_vol = loss_fn(
+                prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10, 
+                first_deriv=first_deriv, ns_eqn=ns_eqn, bounding_box=bounding_box, 
+                vol_factors=vol_factors, add_physics_loss=add_physics_loss
+            )
+            loss_dict["loss_vol"] = loss_vol[0]
+            loss_dict["loss_continuity"] = loss_vol[1]
+            loss_dict["loss_momentum_x"] = loss_vol[2]
+            loss_dict["loss_momentum_y"] = loss_vol[3]
+            loss_dict["loss_momentum_z"] = loss_vol[4]
+            total_loss_terms.append(loss_vol[0])
+            total_loss_terms.append(loss_vol[1])
+            total_loss_terms.append(loss_vol[2])
+            total_loss_terms.append(loss_vol[3])
+            total_loss_terms.append(loss_vol[4])
+        else:
+            loss_vol = loss_fn(
+                prediction_vol, target_vol, loss_fn_type.loss_type, padded_value=-10,
+                add_physics_loss=add_physics_loss
+            )
+            loss_dict["loss_vol"] = loss_vol
+            total_loss_terms.append(loss_vol)
+
     if prediction_surf is not None:
 
         target_surf = batch_inputs["surface_fields"]
@@ -446,7 +522,11 @@ def validation_step(
     loss_fn_type=None,
     vol_loss_scaling=None,
     surf_loss_scaling=None,
-    vol_factors=None
+    first_deriv: Optional[torch.nn.Module] = None,
+    ns_eqn: Any = None,
+    bounding_box: Optional[torch.Tensor] = None,
+    vol_factors: Optional[torch.Tensor] = None,
+    add_physics_loss=False,
 ):
     running_vloss = 0.0
     with torch.no_grad():
@@ -454,8 +534,11 @@ def validation_step(
             sampled_batched = dict_to_device(sample_batched, device)
 
             with autocast(enabled=False):
-
-                prediction_vol, prediction_surf = model(sampled_batched, compute_gradients=True)
+                if add_physics_loss:
+                    prediction_vol, prediction_surf = model(sampled_batched, return_volume_neighbors=True)
+                else:
+                    prediction_vol, prediction_surf = model(sampled_batched)
+                    
                 loss, loss_dict = compute_loss_dict(
                     prediction_vol,
                     prediction_surf,
@@ -464,10 +547,13 @@ def validation_step(
                     integral_scaling_factor,
                     surf_loss_scaling,
                     vol_loss_scaling,
+                    first_deriv,
+                    ns_eqn,
+                    bounding_box,
                     vol_factors,
+                    add_physics_loss,
                 )
             
-            # print(loss_dict.keys())
             running_vloss += loss.item()
 
     avg_vloss = running_vloss / (i_batch + 1)
@@ -490,7 +576,11 @@ def train_epoch(
     loss_fn_type,
     vol_loss_scaling=None,
     surf_loss_scaling=None,
-    vol_factors=None
+    first_deriv: Optional[torch.nn.Module] = None,
+    ns_eqn: Any = None,
+    bounding_box: Optional[torch.Tensor] = None,
+    vol_factors: Optional[torch.Tensor] = None,
+    add_physics_loss=False,
 ):
 
     dist = DistributedManager()
@@ -505,9 +595,16 @@ def train_epoch(
 
         sampled_batched = dict_to_device(sample_batched, device)
 
-        with autocast(enabled=False):   # TODO: to support LSTSQ
+        if add_physics_loss:
+            autocast_enabled = False
+        else:
+            autocast_enabled = True
+        with autocast(enabled=autocast_enabled):
             with nvtx.range("Model Forward Pass"):
-                prediction_vol, prediction_surf = model(sampled_batched, compute_gradients=True)
+                if add_physics_loss:
+                    prediction_vol, prediction_surf = model(sampled_batched, return_volume_neighbors=True)
+                else:
+                    prediction_vol, prediction_surf = model(sampled_batched)
 
             loss, loss_dict = compute_loss_dict(
                 prediction_vol,
@@ -517,7 +614,11 @@ def train_epoch(
                 integral_scaling_factor,
                 surf_loss_scaling,
                 vol_loss_scaling,
-                vol_factors
+                first_deriv,
+                ns_eqn,
+                bounding_box,
+                vol_factors,
+                add_physics_loss,
             )
 
         loss = loss / loss_interval
@@ -548,8 +649,6 @@ def train_epoch(
         )
 
         logging_string += loss_string
-        # for key, value in loss_dict.items():
-        #     logging_string += f"    {key}: {value.item():.5f}\n"
         logging_string += f"  GPU memory used: {gpu_memory_used:.3f} Gb\n"
         logging_string += f"  GPU memory delta: {gpu_memory_delta:.3f} Gb\n"
         logging_string += f"  Time taken: {elapsed_time:.2f} seconds\n"
@@ -589,6 +688,10 @@ def main(cfg: DictConfig) -> None:
 
     logger.info(f"Config summary:\n{OmegaConf.to_yaml(cfg, sort_keys=True)}")
 
+    # Get physics imports conditionally
+    add_physics_loss = getattr(cfg.train, 'add_physics_loss', False)
+    PDE, FirstDeriv, IncompressibleNavierStokes = get_physics_imports(add_physics_loss)
+
     num_vol_vars = 0
     volume_variable_names = []
     if model_type == "volume" or model_type == "combined":
@@ -622,9 +725,15 @@ def main(cfg: DictConfig) -> None:
     )
     if os.path.exists(vol_save_path):
         vol_factors = np.load(vol_save_path)
-        vol_factors_tensor = torch.from_numpy(vol_factors).to(dist.device)
+        vol_factors_tensor = torch.from_numpy(vol_factors).to(dist.device) if add_physics_loss else None
     else:
         vol_factors = None
+        vol_factors_tensor = None
+
+    bounding_box = None
+    if add_physics_loss:
+        bounding_box = cfg.data.bounding_box
+        bounding_box = torch.from_numpy(np.stack([bounding_box["max"], bounding_box["min"]], axis=0)).to(vol_factors_tensor.dtype).to(dist.device)
 
     if os.path.exists(surf_save_path):
         surf_factors = np.load(surf_save_path)
@@ -701,6 +810,14 @@ def main(cfg: DictConfig) -> None:
         optimizer, milestones=[100, 200, 300, 400, 500, 600, 700, 800], gamma=0.5
     )
 
+    # Initialize physics components conditionally
+    first_deriv = None
+    ns_eqn = None
+    if add_physics_loss:
+        first_deriv = FirstDeriv(dim=3, direct_input=True)
+        ns_eqn = IncompressibleNavierStokes(rho=1.226, nu="nu", dim=3, time=False)
+        ns_eqn = ns_eqn.make_nodes(return_as_dict=True)
+
     # Initialize the scaler for mixed precision
     scaler = GradScaler()
 
@@ -774,7 +891,11 @@ def main(cfg: DictConfig) -> None:
             loss_fn_type=cfg.model.loss_function,
             vol_loss_scaling=cfg.model.vol_loss_scaling,
             surf_loss_scaling=surface_scaling_loss,
-            vol_factors=vol_factors_tensor
+            first_deriv=first_deriv,
+            ns_eqn=ns_eqn,
+            bounding_box=bounding_box,
+            vol_factors=vol_factors_tensor,
+            add_physics_loss=add_physics_loss,
         )
         epoch_end_time = time.perf_counter()
         logger.info(
@@ -794,7 +915,11 @@ def main(cfg: DictConfig) -> None:
             loss_fn_type=cfg.model.loss_function,
             vol_loss_scaling=cfg.model.vol_loss_scaling,
             surf_loss_scaling=surface_scaling_loss,
-            vol_factors=vol_factors_tensor
+            first_deriv=first_deriv,
+            ns_eqn=ns_eqn,
+            bounding_box=bounding_box,
+            vol_factors=vol_factors_tensor,
+            add_physics_loss=add_physics_loss,
         )
 
         scheduler.step()

@@ -800,6 +800,18 @@ class DoMINOPhy(nn.Module):
         self.param_scaling_factors = model_parameters.parameter_model.scaling_params
         self.geo_encoding_type = model_parameters.geometry_encoding_type
 
+        if hasattr(model_parameters, "num_volume_neighbors"):
+            self.num_volume_neighbors = model_parameters.num_volume_neighbors
+        else:
+            self.num_volume_neighbors = 50
+
+        if hasattr(model_parameters, "return_volume_neighbors"):
+            self.return_volume_neighbors = model_parameters.return_volume_neighbors
+            if self.return_volume_neighbors and self.solution_calculation_mode == "one-loop":
+                print("'one-loop' solution_calculation mode not supported when return_volume_neighbors is set to true")
+                print("Overwriting the solution_calculation mode to 'two-loop'")
+                self.solution_calculation_mode = "two-loop"
+                
         if self.use_surface_normals:
             if not self.use_surface_area:
                 input_features_surface = input_features + 3
@@ -1256,11 +1268,10 @@ class DoMINOPhy(nn.Module):
 
     def sample_sphere(self, center, r, num_points):
         """Uniformly sample points in a 3D shpere around the center"""
-        directions = torch.randn(size=(center.shape[0], center.shape[1], num_points, center.shape[2]), device=center.device) # Add num_points dim
-        directions = directions / torch.norm(directions, dim=-1, keepdim=True)  # Normalize along the coordinate dimension
+        directions = torch.randn(size=(center.shape[0], center.shape[1], num_points, center.shape[2]), device=center.device)
+        directions = directions / torch.norm(directions, dim=-1, keepdim=True)
 
-        radii = r * torch.pow(torch.rand(size=(num_points, 1), device=center.device), 1/3)  # use the same radius for all the points in a batch
-        # print(center.shape, directions.shape, radii.shape)
+        radii = r * torch.pow(torch.rand(size=(num_points, 1), device=center.device), 1/3)
         return center.unsqueeze(2) + directions * radii[None, None, :, :].expand(-1, center.shape[1], num_points, -1)
 
     def sample_shpere_shell(self, center, r_inner, r_outer, num_points):
@@ -1268,27 +1279,10 @@ class DoMINOPhy(nn.Module):
         directions = torch.randn(size=(center.shape[0], center.shape[1], num_points, center.shape[2]), device=center.device)
         directions = directions / torch.norm(directions, dim=-1, keepdim=True)
 
-        radii = torch.pow(torch.rand(size=(num_points, 1), device=center.device) * (r_outer ** 3 - r_inner ** 3) + r_inner ** 3, 1/3)    # Uniform samping inside a shell
+        radii = torch.pow(torch.rand(size=(num_points, 1), device=center.device) * (r_outer ** 3 - r_inner ** 3) + r_inner ** 3, 1/3)
         return center.unsqueeze(2) + directions + radii[None, None, :, :].expand(-1, center.shape[1], num_points, -1)
    
  
-    def compute_ls_grads(self, dv, du):
-        """Given du and dv, compute the grads (batched)"""
-        
-        # print(f"du shape: {du.shape}, dv shape: {dv.shape}")
-        w_squared = 1 / ((dv**2).sum(dim=3) + 1e-8) # Sum along the coordinate dim
-        # print(f"w_squared shape: {w_squared.shape}")
-        W = torch.diag_embed(w_squared)
-        # print(f"W shape: {W.shape}")
-        A = torch.matmul(torch.matmul(dv.transpose(-2, -1), W), dv)   # Should be [1, batch_size, 3, 3]
-        # print(f"A shape: {A.shape}")
-        B = torch.matmul(torch.matmul(dv.transpose(-2, -1), W), du)   # Should be [1, batch_size, 3, 5]
-        # print(f"A dtype: {A.dtype}, B dtype: {B.dtype}")
-        grad_u, _, _, _ = torch.linalg.lstsq(A, B) # Should be [1, batchsize, 3, 5]
-        # print(f"Grad shape: {grad_u.shape}")
-
-        return grad_u
-
     def calculate_solution(
         self,
         volume_mesh_centers,
@@ -1297,9 +1291,9 @@ class DoMINOPhy(nn.Module):
         inlet_velocity,
         air_density,
         eval_mode,
-        num_sample_points=8,
+        num_sample_points=50,
         noise_intensity=50,
-        compute_gradients=False
+        return_volume_neighbors=False
     ):
         """Function to approximate solution sampling the neighborhood information"""
         if eval_mode == "volume":
@@ -1420,84 +1414,45 @@ class DoMINOPhy(nn.Module):
             return one_loop_output_all
 
         if self.solution_calculation_mode == "two-loop":
-            # print(f"Generating {num_sample_points} neighbors")
-            # volume_m_c_perturbed = volume_mesh_centers
             batchsize = volume_mesh_centers.shape[1]
-            # noise = torch.rand(
-            #     size=(
-            #         volume_mesh_centers.shape[0], 
-            #         volume_mesh_centers.shape[1],
-            #         num_sample_points-1,    # Sample one less point
-            #         volume_mesh_centers.shape[2],
-            #     ),
-            #     device=volume_mesh_centers.device
-            # )
-            # noise = 2 * (noise - 0.5)
-            # noise = noise / noise_intensity
-            # dist_perturbed = torch.norm(noise, dim=-1, keepdim=True)  # Normalize along the coordinate dimension
-            # volume_m_c_perturbed = volume_mesh_centers.unsqueeze(2).expand(-1, -1, num_sample_points-1, -1) + noise 
-            # volume_m_c_perturbed = torch.cat([volume_mesh_centers.unsqueeze(2), volume_m_c_perturbed], dim=2)
             volume_m_c_perturbed = [volume_mesh_centers.unsqueeze(2)]
-            num_hop1 = num_sample_points
-            num_hop2 = num_sample_points // 2 if num_sample_points != 1 else 1  # This is per 1 hop node
-            edges = []
-            neighbors = defaultdict(list)
             
-            volume_m_c_hop1 = self.sample_sphere(volume_mesh_centers, 1 / noise_intensity, num_hop1)
-            # print(f"Hop 1 shape: {volume_m_c_hop1.shape}")
-            # 1 hop neighbors
-            for i in range(num_hop1):
-                volume_m_c_perturbed.append(volume_m_c_hop1[:,:,i:i+1,:])
-                idx = len(volume_m_c_perturbed)
-                edges.append((0, idx))
-                neighbors[0].append(idx)
-                # neighbors[idx].append(0)  # bi-directional is probably not needed
-
-            # 2 hop neighbors
-            for i in range(num_hop1):
-                parent_idx = i + 1 # Skipping the first point, which is the original
-                parent_point = volume_m_c_perturbed[parent_idx]
-
-                # print(f"Parent point shape: {parent_point.shape}")
-                children = self.sample_shpere_shell(parent_point.squeeze(2), 1 / noise_intensity, 2 / noise_intensity, num_hop2)
+            if return_volume_neighbors:
+                num_hop1 = num_sample_points
+                num_hop2 = num_sample_points // 2 if num_sample_points != 1 else 1  # This is per 1 hop node
+                neighbors = defaultdict(list)
             
-                for c in range(num_hop2):
+                volume_m_c_hop1 = self.sample_sphere(volume_mesh_centers, 1 / noise_intensity, num_hop1)
+                # 1 hop neighbors
+                for i in range(num_hop1):
                     idx = len(volume_m_c_perturbed)
-                    # print(f"Children shape: {children.shape}")
-                    volume_m_c_perturbed.append(children[:,:,c:c+1,:])
-                    edges.append((parent_idx, idx))
-                    neighbors[parent_idx].append(idx)   
-                    # neighbors[idx].append(parent_idx) # bi-directional is probably not needed
-            
-            # for t in volume_m_c_perturbed:
-            #     print(t.shape)
-            volume_m_c_perturbed = torch.cat(volume_m_c_perturbed, dim=2)
-            neighbors = dict(neighbors)
-            # print(neighbors)
-            
-            # print(f"volume_m_c_perturbed shape: {volume_m_c_perturbed.shape}")
-            # print(f"Num variables: {num_variables}")
-            u_neighbors = []
-            v_neighbors = []
-            w_neighbors = []
-            p_neighbors = []
-            nut_neighbors = []
-            for f in range(num_variables):  # This is 5 for DrivAerML
-                # How to know when f is Velocity?
-                # is 0, 1, 2 -> u, v, w; 3 -> p; 4 -> nut ?
-                # Find a way to store the velocity at all the preturbed points
-                # What happens to the aggregation step for the preturbed points? 
-                for p in range(volume_m_c_perturbed.shape[2]):
-                    #if p == 0:
-                    #    print(f"Volume mesh centers shape: {volume_mesh_centers.shape}")
-                    #    volume_m_c = volume_mesh_centers  # Shape [1, batch_size, 3]
-                    #else:
-                        # noise = torch.rand_like(volume_mesh_centers)
-                        # noise = 2 * (noise - 0.5)
-                        # noise = noise / noise_intensity
-                        # dist = torch.norm(noise, dim=-1, keepdim=True)
-                        # volume_m_c = volume_mesh_centers + noise
+                    volume_m_c_perturbed.append(volume_m_c_hop1[:,:,i:i+1,:])
+                    neighbors[0].append(idx)
 
+                # 2 hop neighbors
+                for i in range(num_hop1):
+                    parent_idx = i + 1 # Skipping the first point, which is the original
+                    parent_point = volume_m_c_perturbed[parent_idx]
+
+                    children = self.sample_shpere_shell(parent_point.squeeze(2), 1 / noise_intensity, 2 / noise_intensity, num_hop2)
+
+                    for c in range(num_hop2):
+                        idx = len(volume_m_c_perturbed)
+                        volume_m_c_perturbed.append(children[:,:,c:c+1,:])
+                        neighbors[parent_idx].append(idx)
+            
+                volume_m_c_perturbed = torch.cat(volume_m_c_perturbed, dim=2)
+                neighbors = dict(neighbors)
+                field_neighbors = {i: [] for i in range(num_variables)}
+            else:
+                volume_m_c_sample = self.sample_sphere(volume_mesh_centers, 1 / noise_intensity, num_sample_points)
+                for i in range(num_sample_points):
+                    volume_m_c_perturbed.append(volume_m_c_sample[:,:,i:i+1,:])
+                
+                volume_m_c_perturbed = torch.cat(volume_m_c_perturbed, dim=2)
+                       
+            for f in range(num_variables):
+                for p in range(volume_m_c_perturbed.shape[2]):
                     volume_m_c = volume_m_c_perturbed[:,:,p,:] 
                     if p != 0:
                         dist = torch.norm(volume_m_c - volume_mesh_centers, dim=-1, keepdim=True) 
@@ -1506,8 +1461,7 @@ class DoMINOPhy(nn.Module):
                     if self.encode_parameters:
                         output = torch.cat((output, param_encoding), axis=-1)
                     if p == 0:
-                        output_center = agg_model[f](output)    # Shape [1, batch_size, 1]
-                        # print(f"Output center shape: {output_center.shape}")
+                        output_center = agg_model[f](output)
                     else:
                         if p == 1:
                             output_neighbor = agg_model[f](output) * (1.0 / dist)
@@ -1515,187 +1469,24 @@ class DoMINOPhy(nn.Module):
                         else:
                             output_neighbor += agg_model[f](output) * (1.0 / dist)
                             dist_sum += 1.0 / dist
-                    if f == 0:
-                        u_neighbors.append(agg_model[f](output))
-                    elif f == 1:
-                        v_neighbors.append(agg_model[f](output))
-                    elif f == 2:
-                        w_neighbors.append(agg_model[f](output))
-                    elif f == 3:
-                        p_neighbors.append(agg_model[f](output))
-                    elif f == 4:
-                        nut_neighbors.append(agg_model[f](output))
-                    else:
-                        pass
+                    if return_volume_neighbors:
+                        field_neighbors[f].append(agg_model[f](output))
                 
-                if f == 0:
-                    u_neighbors = torch.stack(u_neighbors, dim=2)   # Shape [1, batch_size, num_sample_points, 1]
-                    # print(f"u_neighbors shape: {u_neighbors.shape}")
-                elif f == 1:
-                    v_neighbors = torch.stack(v_neighbors, dim=2)
-                elif f == 2:
-                    w_neighbors = torch.stack(w_neighbors, dim=2)
-                elif f == 3:
-                    p_neighbors = torch.stack(p_neighbors, dim=2)
-                elif f == 4:
-                    nut_neighbors = torch.stack(nut_neighbors, dim=2)
-                else:
-                    pass
+                if return_volume_neighbors:
+                    field_neighbors[f] = torch.stack(field_neighbors[f], dim=2)
 
-                
-                # Use the velocity on center and all preturbed points to compute the velocity gradient
-                # Build consolidated arrays for all min-meshes in the batch
-                # Each mini-mesh: [oiriginal_point, 20, preturbed_neighbors]
-                # Build edges for all mini-meshes in a batch
-                # Update the offsets and indices
-                # Form a single mesh with all the mini-meshes in the batch
-                # Compute the adjacency for the big mesh - likely a resource hog
-                # Compute gradients in batch
-                # Extract the gradients for original points (every (n_neighbors + 1)th point)
-                # Return the gradients and add it to the output_all
                 if num_sample_points > 1:
-                    output_res = 0.5 * output_center + 0.5 * output_neighbor / dist_sum # This only applies to the main point, what about the preturbed points? 
+                    output_res = 0.5 * output_center + 0.5 * output_neighbor / dist_sum # This only applies to the main point, and not the preturbed points
                 else:
                     output_res = output_center
                 if f == 0:
                     output_all = output_res
                 else:
                     output_all = torch.cat((output_all, output_res), axis=-1)
-            # print(f"Output all shape: {output_all.shape}")
-
-            # Compute the gradients here
-            # Build edges for each point
-            # points_flat = all_points.reshape(-1, all_points.shape[3]) # Shape (batchsize * num_sample_points, 3)
-            # u_flat = u_neighbors.reshape(-1, u_neighbors.shape[3])  # Shape (batchsize * num_sample_points, 1)
-            # v_flat = v_neighbors.reshape(-1, v_neighbors.shape[3])
-            # w_flat = w_neighbors.reshape(-1, w_neighbors.shape[3])
-            # nut_flat = nut_neighbors.reshape(-1, nut_neighbors.shape[3])
-
-            # Compute u grads (batched)
-            # print(volume_m_c_perturbed.shape, volume_mesh_centers.shape)
-            # dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
-            # du = u_neighbors - output_all[:, :, 0:1].unsqueeze(2)    # choose u
-            # # Remove the first point from du and dv as that represents the same point
-            # dv = dv[:,:,1:,:]
-            # du = du[:,:,1:,:]
-            # print(f"dv shape: {dv.shape}")
-            # w_squared = 1 / ((dv**2).sum(dim=3) + 1e-8) # Sum along the coordinate dim
-            # print(f"w_squared shape: {w_squared.shape}")
-            # W = torch.diag_embed(w_squared)
-            # print(f"W shape: {W.shape}")
-            # A = torch.matmul(torch.matmul(dv.transpose(-2, -1), W), dv)   # Should be [1, batch_size, 3, 3]
-            # print(f"A shape: {A.shape}")
-            # B = torch.matmul(torch.matmul(dv.transpose(-2, -1), W), du)   # Should be [1, batch_size, 3, 1]
-            # print(f"A dtype: {A.dtype}, B dtype: {B.dtype}")
-            # grad_u, _, _, _ = torch.linalg.lstsq(A, B, rcond=-1) # Should be [1, batchsize, 3, 1]
-            # print(f"Grad u shape: {grad_u.shape}")
             
-            if compute_gradients:
-                field_neighbors = torch.cat([u_neighbors, v_neighbors, w_neighbors, p_neighbors, nut_neighbors], dim=3) # concatenate along the channel dimension
-                dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
-                du = field_neighbors - output_all.unsqueeze(2)    # choose u
-            
-                # Compute grads on the original point
-                dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-                du = du[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-                grad = []
-                grad.append(self.compute_ls_grads(dv, du))
-
-                # Compute the 1st order grads on 1 hop neighbors
-                for i in range(num_hop1):
-                    indices_to_select = torch.tensor(neighbors[1+i], dtype=torch.int, device=volume_mesh_centers.device)
-                    dv = volume_m_c_perturbed[:,:,1+i,:].unsqueeze(2) - torch.index_select(volume_m_c_perturbed, dim=2, index=indices_to_select) # collect 2 hop neighbors
-                    du = field_neighbors[:,:,1+i,:].unsqueeze(2) - torch.index_select(field_neighbors, dim=2, index=indices_to_select)
-                    grad.append(self.compute_ls_grads(dv, du))
-            
-                grad = torch.stack(grad, dim=2)
-                # print(f"Grad for all 1 hop neighbors (including center): {grad.shape}")
-                # get gradients at the center
-                grad_c = grad[:,:,0,:,:]  # Shape [1, batch_size, 3, num_variables]
-                # print(f"Grad at center shape: {grad_c.shape}")
-
-                # compute gradients for shear stresss tensor
-                # TODO: Remove! Cannot compute stress tensor's grads here, because the quantities are normalized
-                # rho = 1.226
-                # nu = 1.507 * 1e-5
-                # mu = rho * nu
-
-                # tau_xx = 2 * mu * grad[:,:,0:1,0:1,0:1]    # x component of u grad
-                # tau_yy = 2 * mu * grad[:,:,0:1,1:2,1:2]
-                # tau_zz = 2 * mu * grad[:,:,0:1,2:3,2:3]
-                # tau_xy = mu * (grad[:,:,0:1,1:2,0:1] + grad[:,:,0:1,0:1,1:2])
-                # tau_xz = mu * (grad[:,:,0:1,2:3,0:1] + grad[:,:,0:1,0:1,2:3])
-                # tau_yz = mu * (grad[:,:,0:1,2:3,1:2] + grad[:,:,0:1,1:2,2:3])
-
-                # tau = torch.cat([tau_xx, tau_yy, tau_zz, tau_xy, tau_xz, tau_yz], dim=4)    # concat along the field dimension
-                # tau = tau.squeeze(3)    # Scalars
-                # tau_xx_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,0:1,0:1]    # x component of u grad
-                # tau_yy_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,1:2,1:2]
-                # tau_zz_neighbors = 2 * mu * grad[:,:,1:num_hop1+1,2:3,2:3]
-                # tau_xy_neighbors = mu * (grad[:,:,1:num_hop1+1,1:2,0:1] + grad[:,:,1:num_hop1+1,0:1,1:2])
-                # tau_xz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,0:1] + grad[:,:,1:num_hop1+1,0:1,2:3])
-                # tau_yz_neighbors = mu * (grad[:,:,1:num_hop1+1,2:3,1:2] + grad[:,:,1:num_hop1+1,1:2,2:3])
-
-                # tau_neighbors = torch.cat([tau_xx_neighbors, tau_yy_neighbors, tau_zz_neighbors, tau_xy_neighbors, tau_xz_neighbors, tau_yz_neighbors], dim=4)
-                # tau_neighbors = tau_neighbors.squeeze(3)
-                dv = volume_m_c_perturbed - volume_mesh_centers.unsqueeze(2)
-                dv = dv[:,:,1:num_hop1+1,:] # only use 1 hop neighbors
-            
-                # Gradients of velocity are only needed for second order
-                grad_uvw = grad[:,:,0:1,:,0:3]   # First 3 variables are velocity
-                grad_uvw_neighbors = grad[:,:,1:num_hop1+1,:,0:3]   # First 3 variables are velocity
-                dgrad_uvw = grad_uvw_neighbors - grad_uvw
-                dgrad_uvw = dgrad_uvw.reshape(dgrad_uvw.shape[0], dgrad_uvw.shape[1], dgrad_uvw.shape[2], 9)    # Stack all gradients along last dimension. First 3 will be u grads, next 3 will be v and finally w. 
-                # dtau = tau - tau_neighbors
-                # print(f"dtau shape: {dtau.shape}")
-                # tau_grad = self.compute_ls_grads(dv, dtau)
-                grad_grad_uvw = self.compute_ls_grads(dv, dgrad_uvw)
-                # print(f"tau grad at center: {tau_grad.shape}")
-
-                # TODO: Note grads notation is flipped w.r.t PhysicsNeMo-CFD. 
-                # Here, -1 dim is the fields, and the -2 dim is the components of the gradient
-                # continuity = grad_c[:,:,0,0:1] + grad_c[:,:,1,1:2] + grad_c[:,:,2,2:3]
-                # momentum_x = (
-                #     rho
-                #     * (
-                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 0:1]
-                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 0:1]
-                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 0:1]
-                #     )
-                #     + grad_c[:, :, 0, 2:3]
-                #     - tau_grad[:, :, 0, 0:1]
-                #     - tau_grad[:, :, 1, 3:4]
-                #     - tau_grad[:, :, 2, 4:5]
-                # )
-                # momentum_y = (
-                #     rho
-                #     * (
-                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 1:2]
-                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 1:2]
-                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 1:2]
-                #     )
-                #     + grad_c[:, :, 1, 2:3]
-                #     - tau_grad[:, :, 0, 3:4]
-                #     - tau_grad[:, :, 1, 1:2]
-                #     - tau_grad[:, :, 2, 5:6]
-                # )
-                # momentum_z = (
-                #     rho
-                #     * (
-                #         output_all[:, :, 0:1] * grad_c[:, :, 0, 2:3]
-                #         + output_all[:, :, 1:2] * grad_c[:, :, 1, 2:3]
-                #         + output_all[:, :, 2:3] * grad_c[:, :, 2, 2:3]
-                #     )
-                #     + grad_c[:, :, 2, 2:3]
-                #     - tau_grad[:, :, 0, 4:5]
-                #     - tau_grad[:, :, 1, 5:6]
-                #     - tau_grad[:, :, 2, 2:3]
-                # )            
-                # # print(f"Conitnuity and Momentum shapes: {continuity.shape}, {momentum_x.shape}, {momentum_y.shape}, {momentum_z.shape}")
-                # print(f"grad and grad_grad_uvw shapes: {grad_c.shape}, {grad_grad_uvw.shape}")
-            
-            if compute_gradients:
-                return output_all, grad_c, grad_grad_uvw   # Shape [1, batch_size, num_variables]
+            if return_volume_neighbors:
+                field_neighbors = torch.cat([field_neighbors[i] for i in range(num_variables)], dim=3)
+                return output_all, volume_m_c_perturbed, field_neighbors, neighbors
             else:
                 return output_all
 
@@ -1703,7 +1494,7 @@ class DoMINOPhy(nn.Module):
     def forward(
         self,
         data_dict,
-        compute_gradients=False
+        return_volume_neighbors=False
     ):
         # Loading STL inputs, bounding box grids, precomputed SDF and scaling factors
 
@@ -1797,7 +1588,8 @@ class DoMINOPhy(nn.Module):
                 stream_velocity,
                 air_density,
                 eval_mode="volume",
-                compute_gradients=compute_gradients
+                num_sample_points=self.num_volume_neighbors,
+                return_volume_neighbors=return_volume_neighbors
             )
 
 
