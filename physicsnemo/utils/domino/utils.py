@@ -84,10 +84,6 @@ def unnormalize(field: ArrayType, mx: ArrayType, mn: ArrayType) -> ArrayType:
     """Function to unnormalize fields"""
     return (field + 1.0) * (mx - mn) * 0.5 + mn
 
-def unnormalize_grad(field_grad: ArrayType, mx_field: ArrayType, mn_field: ArrayType) -> ArrayType:
-    """Function to unnormalize fields' gradients"""
-    return (field_grad) * (mx_field - mn_field) * 0.5
-
 def standardize(field: ArrayType, mean: ArrayType, std: ArrayType) -> ArrayType:
     """Function to standardize fields"""
     return (field - mean) / std
