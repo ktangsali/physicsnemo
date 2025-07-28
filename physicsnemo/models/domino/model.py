@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from physicsnemo.models.layers.ball_query import BallQueryLayer
 from physicsnemo.utils.profiling import profile
 
+from collections import defaultdict
 
 def fourier_encode(coords, num_freqs):
     """Function to caluculate fourier features"""
@@ -792,12 +793,25 @@ class DoMINO(nn.Module):
         self.num_variables_surf = output_features_surf
         self.grid_resolution = model_parameters.interp_res
         self.surface_neighbors = model_parameters.surface_neighbors
+        self.volume_neighbors = model_parameters.volume_neighbors
         self.use_surface_normals = model_parameters.use_surface_normals
         self.use_surface_area = model_parameters.use_surface_area
         self.encode_parameters = model_parameters.encode_parameters
         self.param_scaling_factors = model_parameters.parameter_model.scaling_params
         self.geo_encoding_type = model_parameters.geometry_encoding_type
 
+        if hasattr(model_parameters, "num_volume_neighbors"):
+            self.num_volume_neighbors = model_parameters.num_volume_neighbors
+        else:
+            self.num_volume_neighbors = 50
+
+        if hasattr(model_parameters, "return_volume_neighbors"):
+            self.return_volume_neighbors = model_parameters.return_volume_neighbors
+            if self.return_volume_neighbors and self.solution_calculation_mode == "one-loop":
+                print("'one-loop' solution_calculation mode not supported when return_volume_neighbors is set to true")
+                print("Overwriting the solution_calculation mode to 'two-loop'")
+                self.solution_calculation_mode = "two-loop"
+                
         if self.use_surface_normals:
             if not self.use_surface_area:
                 input_features_surface = input_features + 3
@@ -1252,6 +1266,23 @@ class DoMINO(nn.Module):
 
             return output_all
 
+    def sample_sphere(self, center, r, num_points):
+        """Uniformly sample points in a 3D shpere around the center"""
+        directions = torch.randn(size=(center.shape[0], center.shape[1], num_points, center.shape[2]), device=center.device)
+        directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+
+        radii = r * torch.pow(torch.rand(size=(num_points, 1), device=center.device), 1/3)
+        return center.unsqueeze(2) + directions * radii[None, None, :, :].expand(-1, center.shape[1], num_points, -1)
+
+    def sample_shpere_shell(self, center, r_inner, r_outer, num_points):
+        """Uniformly sample points in a 3D shell around a center"""
+        directions = torch.randn(size=(center.shape[0], center.shape[1], num_points, center.shape[2]), device=center.device)
+        directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+
+        radii = torch.pow(torch.rand(size=(num_points, 1), device=center.device) * (r_outer ** 3 - r_inner ** 3) + r_inner ** 3, 1/3)
+        return center.unsqueeze(2) + directions + radii[None, None, :, :].expand(-1, center.shape[1], num_points, -1)
+   
+ 
     def calculate_solution(
         self,
         volume_mesh_centers,
@@ -1262,6 +1293,7 @@ class DoMINO(nn.Module):
         eval_mode,
         num_sample_points=20,
         noise_intensity=50,
+        return_volume_neighbors=False
     ):
         """Function to approximate solution sampling the neighborhood information"""
         if eval_mode == "volume":
@@ -1382,18 +1414,48 @@ class DoMINO(nn.Module):
             return one_loop_output_all
 
         if self.solution_calculation_mode == "two-loop":
+            batchsize = volume_mesh_centers.shape[1]
+            volume_m_c_perturbed = [volume_mesh_centers.unsqueeze(2)]
+            
+            if return_volume_neighbors:
+                num_hop1 = num_sample_points
+                num_hop2 = num_sample_points // 2 if num_sample_points != 1 else 1  # This is per 1 hop node
+                neighbors = defaultdict(list)
+            
+                volume_m_c_hop1 = self.sample_sphere(volume_mesh_centers, 1 / noise_intensity, num_hop1)
+                # 1 hop neighbors
+                for i in range(num_hop1):
+                    idx = len(volume_m_c_perturbed)
+                    volume_m_c_perturbed.append(volume_m_c_hop1[:,:,i:i+1,:])
+                    neighbors[0].append(idx)
 
+                # 2 hop neighbors
+                for i in range(num_hop1):
+                    parent_idx = i + 1 # Skipping the first point, which is the original
+                    parent_point = volume_m_c_perturbed[parent_idx]
+
+                    children = self.sample_shpere_shell(parent_point.squeeze(2), 1 / noise_intensity, 2 / noise_intensity, num_hop2)
+
+                    for c in range(num_hop2):
+                        idx = len(volume_m_c_perturbed)
+                        volume_m_c_perturbed.append(children[:,:,c:c+1,:])
+                        neighbors[parent_idx].append(idx)
+            
+                volume_m_c_perturbed = torch.cat(volume_m_c_perturbed, dim=2)
+                neighbors = dict(neighbors)
+                field_neighbors = {i: [] for i in range(num_variables)}
+            else:
+                volume_m_c_sample = self.sample_sphere(volume_mesh_centers, 1 / noise_intensity, num_sample_points)
+                for i in range(num_sample_points):
+                    volume_m_c_perturbed.append(volume_m_c_sample[:,:,i:i+1,:])
+                
+                volume_m_c_perturbed = torch.cat(volume_m_c_perturbed, dim=2)
+                       
             for f in range(num_variables):
-                for p in range(num_sample_points):
-                    if p == 0:
-                        volume_m_c = volume_mesh_centers
-                    else:
-                        noise = torch.rand_like(volume_mesh_centers)
-                        noise = 2 * (noise - 0.5)
-                        noise = noise / noise_intensity
-                        dist = torch.norm(noise, dim=-1, keepdim=True)
-
-                        volume_m_c = volume_mesh_centers + noise
+                for p in range(volume_m_c_perturbed.shape[2]):
+                    volume_m_c = volume_m_c_perturbed[:,:,p,:] 
+                    if p != 0:
+                        dist = torch.norm(volume_m_c - volume_mesh_centers, dim=-1, keepdim=True) 
                     basis_f = nn_basis[f](volume_m_c)
                     output = torch.cat((basis_f, encoding_node, encoding_g), axis=-1)
                     if self.encode_parameters:
@@ -1407,21 +1469,32 @@ class DoMINO(nn.Module):
                         else:
                             output_neighbor += agg_model[f](output) * (1.0 / dist)
                             dist_sum += 1.0 / dist
+                    if return_volume_neighbors:
+                        field_neighbors[f].append(agg_model[f](output))
+                
+                if return_volume_neighbors:
+                    field_neighbors[f] = torch.stack(field_neighbors[f], dim=2)
+
                 if num_sample_points > 1:
-                    output_res = 0.5 * output_center + 0.5 * output_neighbor / dist_sum
+                    output_res = 0.5 * output_center + 0.5 * output_neighbor / dist_sum # This only applies to the main point, and not the preturbed points
                 else:
                     output_res = output_center
                 if f == 0:
                     output_all = output_res
                 else:
                     output_all = torch.cat((output_all, output_res), axis=-1)
-
-            return output_all
+            
+            if return_volume_neighbors:
+                field_neighbors = torch.cat([field_neighbors[i] for i in range(num_variables)], dim=3)
+                return output_all, volume_m_c_perturbed, field_neighbors, neighbors
+            else:
+                return output_all
 
     @profile
     def forward(
         self,
         data_dict,
+        return_volume_neighbors=False
     ):
         # Loading STL inputs, bounding box grids, precomputed SDF and scaling factors
 
@@ -1515,7 +1588,11 @@ class DoMINO(nn.Module):
                 stream_velocity,
                 air_density,
                 eval_mode="volume",
+                num_sample_points=self.num_volume_neighbors,
+                return_volume_neighbors=return_volume_neighbors
             )
+
+
         else:
             output_vol = None
 
