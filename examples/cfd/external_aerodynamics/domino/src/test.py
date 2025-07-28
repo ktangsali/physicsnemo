@@ -384,7 +384,6 @@ def main(cfg: DictConfig):
         model = model.module
 
     dirnames = get_filenames(input_path)
-    print(dirnames)
     dev_id = torch.cuda.current_device()
     num_files = int(len(dirnames) / dist.world_size)
     dirnames_per_gpu = dirnames[int(num_files * dev_id) : int(num_files * (dev_id + 1))]
