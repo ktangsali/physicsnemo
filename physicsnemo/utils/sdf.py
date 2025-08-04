@@ -150,7 +150,7 @@ def signed_distance_field(
         device = mesh_vertices.device
         wp_device = f"cuda:{device.id}"
     else:
-        wp_device = wp.get_default_device()
+        wp_device = wp.get_device()
 
     with wp.ScopedDevice(wp_device):
         mesh = wp.Mesh(
