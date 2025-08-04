@@ -124,11 +124,11 @@ def compute_physics_loss(
             output_total_unnormalized.device
         )
         du = (
-            output_total_unnormalized[:, parent_id : parent_id + 1]
+            output_total_unnormalized[:, [parent_id]]
             - output_total_unnormalized[:, neighbor_ids_tensor]
         )
         dv = (
-            coords_total_unnormalized[:, parent_id : parent_id + 1]
+            coords_total_unnormalized[:, [parent_id]]
             - coords_total_unnormalized[:, neighbor_ids_tensor]
         )
         grads = first_deriv.forward(
@@ -147,11 +147,11 @@ def compute_physics_loss(
     )
 
     du = (
-        grad_neighbors_center[:, 0:1]
+        grad_neighbors_center[:, [0]]
         - grad_neighbors_center[:, neighbor_ids_tensor]
     )
     dv = (
-        coords_total_unnormalized[:, 0:1]
+        coords_total_unnormalized[:, [0]]
         - coords_total_unnormalized[:, neighbor_ids_tensor]
     )
 
