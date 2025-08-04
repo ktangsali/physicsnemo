@@ -73,9 +73,6 @@ nvmlInit()
 from physicsnemo.utils.profiling import profile, Profiler
 
 
-
-
-
 # Profiler().enable("line_profiler")
 # Profiler().initialize()
 
