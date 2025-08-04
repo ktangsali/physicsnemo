@@ -1581,7 +1581,21 @@ class DoMINO(nn.Module):
             return output_all
 
     def sample_sphere(self, center, r, num_points):
-        """Uniformly sample points in a 3D shpere around the center"""
+        """Uniformly sample points in a 3D sphere around the center.
+
+        This method generates random points within a sphere of radius r centered
+        at each point in the input tensor. The sampling is uniform in volume,
+        meaning points are more likely to be sampled in the outer regions of the sphere.
+
+        Args:
+            center: Tensor of shape (batch_size, num_points, 3) containing center coordinates
+            r: Radius of the sphere for sampling
+            num_points: Number of points to sample per center
+
+        Returns:
+            Tensor of shape (batch_size, num_points, num_samples, 3) containing
+            the sampled points around each center
+        """
         directions = torch.randn(
             size=(center.shape[0], center.shape[1], num_points, center.shape[2]),
             device=center.device,
@@ -1596,7 +1610,22 @@ class DoMINO(nn.Module):
         )
 
     def sample_shpere_shell(self, center, r_inner, r_outer, num_points):
-        """Uniformly sample points in a 3D shell around a center"""
+        """Uniformly sample points in a 3D spherical shell around a center.
+
+        This method generates random points within a spherical shell (annulus)
+        between inner radius r_inner and outer radius r_outer centered at each
+        point in the input tensor. The sampling is uniform in volume within the shell.
+
+        Args:
+            center: Tensor of shape (batch_size, num_points, 3) containing center coordinates
+            r_inner: Inner radius of the spherical shell
+            r_outer: Outer radius of the spherical shell
+            num_points: Number of points to sample per center
+
+        Returns:
+            Tensor of shape (batch_size, num_points, num_samples, 3) containing
+            the sampled points within the spherical shell around each center
+        """
         directions = torch.randn(
             size=(center.shape[0], center.shape[1], num_points, center.shape[2]),
             device=center.device,
