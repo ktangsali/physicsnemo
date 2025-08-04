@@ -409,7 +409,6 @@ def main(cfg: DictConfig):
     l2_volume_all = []
     aero_forces_all = []
     for count, dirname in enumerate(dirnames_per_gpu):
-        print(f"Processing file {dirname}")
         filepath = os.path.join(input_path, dirname)
         tag = int(re.findall(r"(\w+?)(\d+)", dirname)[0][1])
         stl_path = os.path.join(filepath, f"drivaer_{tag}.stl")

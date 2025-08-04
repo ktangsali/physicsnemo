@@ -197,6 +197,9 @@ DoMINO supports enforcing of PDE residuals as soft constraints. This can be used
 to improve the model predictions' adherence to the governing laws of the problem
 which include Continuity and Navier Stokes equations.
 
+Note, if you wish to modify the PDEs used for DoMINO, please edit the
+`compute_physics_loss` function from `train.py` appropriately.
+
 #### Prerequisites for PDE residuals
 
 The computation of Physics residuals is supported using the PhysicsNeMo-Sym
@@ -207,21 +210,21 @@ pip install "Cython"
 pip install "nvidia-physicsnemo.sym>2.1.0" --no-build-isolation
 ```
 
-To execute the training using physics losses, run the `train.py` with below
-configuration
+To execute the training using physics losses, run the `train.py` with the
+configuration below
 
 ```bash
 torchrun --nproc_per_node=<num-gpus> train.py \
-    ++train.add_physics_loss=True ++model.num_volume_neighbors=8
+    ++train.add_physics_loss=True ++model.num_neighbors_volume=8
 ```
 
-Note, the `num_volume_neighbors` is set to 8 to reduce the memory requirement.
+Note, the `num_neighbors_volume` is set to 8 to reduce the memory requirement.
 Also, when the Physics losses are applied, it will automatically sample
-`num_volume_neighbors // 2` additional points, for each point in
-`num_volume_neighbors`. These are considered as "2-hop" neighbors, which are
+`num_neighbors_volume // 2` additional points, for each point in
+`num_neighbors_volume`. These are considered as "2-hop" neighbors, which are
 required to compute the higher order gradients required for Navier-Stokes
-equations. Hence, even if `num_volume_neighbors` is set to 8, for the fields,
-it will sample `num_volume_neighbors (num_volume_neighbors // 2 + 1)` (in this
+equations. Hence, even if `num_neighbors_volume` is set to 8, for the fields,
+it will sample `num_neighbors_volume (num_neighbors_volume // 2 ) + 1` (in this
 case 40) total points.
 
 The results of physics addition can be found below (using the DrivAerML
