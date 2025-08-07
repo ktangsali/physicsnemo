@@ -1,7 +1,7 @@
-PhysicsNeMo Core
+PhysicsNeMo 
 =================
 
-Welcome to the PhysicsNeMo Core documentation. This section contains the API reference and examples for the main PhysicsNeMo framework.
+Welcome to the PhysicsNeMo documentation. This section contains the API reference and examples for the main PhysicsNeMo repository.
 
 .. toctree::
    :maxdepth: 2
