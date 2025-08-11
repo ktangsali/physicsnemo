@@ -1,19 +1,15 @@
 DLWP Data Curation
 ==================
 
-This directory contains scripts for downloading and processing ERA5 data
-for the DLWP (Deep Learning Weather Prediction) model. Two options are
-provided for data acquisition:
+This directory contains scripts for downloading and processing ERA5 data for the DLWP (Deep Learning Weather Prediction) model. Two options are provided for data acquisition:
 
 Installation
 ------------
 
 1. Set up CDS API access:
 
-   -  Create an account at
-      `Copernicus <https://cds.climate.copernicus.eu/>`__
-   -  Install the CDS API key following instructions at `CDS API How
-      To <https://cds.climate.copernicus.eu/api-how-to>`__
+   -  Create an account at `Copernicus <https://cds.climate.copernicus.eu/>`__
+   -  Install the CDS API key following instructions at `CDS API How To <https://cds.climate.copernicus.eu/how-to-api>`__
    -  The key should be stored in ``$HOME/.cdsapirc``
 
 2. Install required packages:
@@ -36,25 +32,18 @@ Installation
 Option 1: Using Dataset Download Example (Complete Dataset)
 -----------------------------------------------------------
 
-For training the full model, we recommend using the ERA5 downloader in
-the ``dataset_download`` example:
+For training the full model, we recommend using the ERA5 downloader in the ``dataset_download`` example:
 
 .. code:: bash
 
    python dataset_download/start_mirror.py --config-name="config_dlwp.yaml"
 
-This will download all required variables and organize them in the
-correct format. The user will need to specify the variables to download
-in the ``config_dlwp.yaml`` file. The user will also need to transform
-the data to the cubed-sphere grid using a modification of the
-``post_processing.py`` script, or by using the linear transform provided
-by TempestRemap manually.
+This will download all required variables and organize them in the correct format. The user will need to specify the variables to download in the ``config_dlwp.yaml`` file. The user will also need to transform the data to the cubed-sphere grid using a modification of the ``post_processing.py`` script, or by using the linear transform provided by TempestRemap manually.
 
 Option 2: Quick Start with Minimal Dataset
 ------------------------------------------
 
-For testing or getting started quickly, you can use the simplified
-download script that fetches a minimal set of variables:
+For testing or getting started quickly, you can use the simplified download script that fetches a minimal set of variables:
 
 .. code:: bash
 
@@ -109,8 +98,7 @@ Output structure:
 Post-Processing Script (``post_processing.py``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This script transforms the downloaded data from lat-lon grid to
-cubed-sphere grid format.
+This script transforms the downloaded data from lat-lon grid to cubed-sphere grid format.
 
 Prerequisites:
 
@@ -165,12 +153,7 @@ Output:
 Notes
 -----
 
--  The simplified download script is intended for testing and
-   development. For full model training, use Option 1.
--  The cubed-sphere resolution (64 in the example) can be adjusted based
-   on your needs.
--  Ensure sufficient disk space for both downloaded data and transformed
-   outputs.
--  The post-processing script expects the mapping file to be named
-   ``map_LL721x1440_CS64.nc``. Adjust the filename in the script if
-   using different parameters.
+-  The simplified download script is intended for testing and development. For full model training, use Option 1.
+-  The cubed-sphere resolution (64 in the example) can be adjusted based on your needs.
+-  Ensure sufficient disk space for both downloaded data and transformed outputs.
+-  The post-processing script expects the mapping file to be named ``map_LL721x1440_CS64.nc``. Adjust the filename in the script if using different parameters.
