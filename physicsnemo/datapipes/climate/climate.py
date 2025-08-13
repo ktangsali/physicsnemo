@@ -362,7 +362,7 @@ class ClimateDatapipe(Datapipe):
 
     Parameters
     ----------
-    sources: Iterable[ClimateDataSpec]
+    sources: Iterable[ClimateDataSourceSpec]
         A list of data specifications defining the sources for the climate variables
     batch_size : int, optional
         Batch size, by default 1

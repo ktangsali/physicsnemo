@@ -87,7 +87,7 @@ class ERA5HDF5Datapipe(Datapipe):
         If specified, crops input and output variables so image dimensions are
         divisible by patch_size, by default None
     num_samples_per_year : int, optional
-        Number of samples randomly taken from each year. If None, all will be use, by default None
+        Number of samples randomly taken from each year. If None, all will be used, by default None
     use_cos_zenith: bool, optional
         If True, the cosine zenith angles corresponding to the coordinates will be produced,
         by default False
@@ -103,7 +103,7 @@ class ERA5HDF5Datapipe(Datapipe):
             By default ((90, -90), (0, 360)).
         Defaults are only applicable if use_cos_zenith is True. Otherwise, defaults to {}.
     use_time_of_year_index: bool
-        If true, also returns the index that can be sued to determine the time of the year
+        If true, also returns the index that can be used to determine the time of the year
         corresponding to each sample. By default False.
     shuffle : bool, optional
         Shuffle dataset, by default True
@@ -481,12 +481,12 @@ class ERA5DaliExternalSource:
     batch_size : int, optional
         Batch size, by default 1
     use_cos_zenith: bool
-        If True, the cosine zenith angles corresponding to the coordinates will be produced,
+        If True, the cosine zenith angles corresponding to the coordinates will be produced
     cos_zenith_args: Dict
         Dictionary containing the following
         dt: float
             Time in hours between each timestep in the dataset
-        start_year
+        start_year: int
             Start year of dataset
     shuffle : bool, optional
         Shuffle dataset, by default True

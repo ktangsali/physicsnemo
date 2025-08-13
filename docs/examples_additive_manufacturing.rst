@@ -1,5 +1,5 @@
 Additive Manufacturing Examples
-==============================
+===============================
 
 Additive manufacturing and materials science examples using PhysicsNeMo.
 

@@ -1,5 +1,5 @@
 Introductory Examples
-====================
+=====================
 
 These examples are designed to help you learn the key concepts of PhysicsNeMo.
 

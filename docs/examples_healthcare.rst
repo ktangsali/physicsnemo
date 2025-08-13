@@ -1,5 +1,5 @@
 Healthcare Examples
-==================
+===================
 
 Healthcare and medical applications using PhysicsNeMo.
 
