@@ -92,15 +92,19 @@ class ERA5HDF5Datapipe(Datapipe):
         If True, the cosine zenith angles corresponding to the coordinates will be produced,
         by default False
     cos_zenith_args: Dict, optional
-        Dictionary containing the following
+        Dictionary containing the following:
+        
         dt: float, optional
             Time in hours between each timestep in the dataset, by default 6 hr
+        
         start_year: int, optional
             Start year of dataset, by default 1980
+        
         latlon_bounds : Tuple[Tuple[float, float], Tuple[float, float]], optional
             Bounds of latitude and longitude in the data, in the format
             ((lat_start, lat_end,), (lon_start, lon_end)).
             By default ((90, -90), (0, 360)).
+        
         Defaults are only applicable if use_cos_zenith is True. Otherwise, defaults to {}.
     use_time_of_year_index: bool
         If true, also returns the index that can be used to determine the time of the year
@@ -483,9 +487,11 @@ class ERA5DaliExternalSource:
     use_cos_zenith: bool
         If True, the cosine zenith angles corresponding to the coordinates will be produced
     cos_zenith_args: Dict
-        Dictionary containing the following
+        Dictionary containing the following:
+        
         dt: float
             Time in hours between each timestep in the dataset
+        
         start_year: int
             Start year of dataset
     shuffle : bool, optional
