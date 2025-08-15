@@ -40,10 +40,10 @@ from physicsnemo.models.meshgraphnet.meshgraphnet import MeshGraphNet
 
 class Mesh_Reduced(torch.nn.Module):
     """PbGMR-GMUS architecture.
-    
+
     A mesh-reduced architecture that combines encoding and decoding processors
     for physics prediction in reduced mesh space.
-    
+
     Parameters
     ----------
     input_dim_nodes : int
@@ -78,7 +78,7 @@ class Mesh_Reduced(torch.nn.Module):
         Number of nodes considered for per pivotal position, by default 3.
     aggregation : str, optional
         Message aggregation type, by default "mean".
-    
+
     Notes
     -----
     Reference: Han, Xu, et al. "Predicting physics in mesh-reduced space with temporal attention."
@@ -155,7 +155,7 @@ class Mesh_Reduced(torch.nn.Module):
         num_workers: int = 1,
     ):
         """Perform k-nearest neighbor interpolation.
-        
+
         Parameters
         ----------
         x : torch.Tensor
@@ -172,7 +172,7 @@ class Mesh_Reduced(torch.nn.Module):
             Number of nearest neighbors to consider, by default 3.
         num_workers : int, optional
             Number of workers for parallel processing, by default 1.
-            
+
         Returns
         -------
         torch.Tensor
@@ -209,7 +209,7 @@ class Mesh_Reduced(torch.nn.Module):
 
     def encode(self, x, edge_features, graph, position_mesh, position_pivotal):
         """Encode mesh features to pivotal space.
-        
+
         Parameters
         ----------
         x : torch.Tensor
@@ -222,7 +222,7 @@ class Mesh_Reduced(torch.nn.Module):
             Mesh positions.
         position_pivotal : torch.Tensor
             Pivotal positions.
-            
+
         Returns
         -------
         torch.Tensor
@@ -255,7 +255,7 @@ class Mesh_Reduced(torch.nn.Module):
 
     def decode(self, x, edge_features, graph, position_mesh, position_pivotal):
         """Decode pivotal features back to mesh space.
-        
+
         Parameters
         ----------
         x : torch.Tensor
@@ -268,7 +268,7 @@ class Mesh_Reduced(torch.nn.Module):
             Mesh positions.
         position_pivotal : torch.Tensor
             Pivotal positions.
-            
+
         Returns
         -------
         torch.Tensor

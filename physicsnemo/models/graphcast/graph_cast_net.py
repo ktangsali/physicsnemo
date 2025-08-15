@@ -225,19 +225,19 @@ class GraphCastNet(Module):
     Note
     ----
     Based on these papers:
-    
+
     - "GraphCast: Learning skillful medium-range global weather forecasting"
         https://arxiv.org/abs/2212.12794
-    
+
     - "Forecasting Global Weather with Graph Neural Networks"
         https://arxiv.org/abs/2202.07575
-    
+
     - "Learning Mesh-Based Simulation with Graph Networks"
         https://arxiv.org/abs/2010.03409
-    
+
     - "MultiScale MeshGraphNets"
         https://arxiv.org/abs/2210.00612
-    
+
     - "GenCast: Diffusion-based ensemble forecasting for medium-range weather"
         https://arxiv.org/abs/2312.15796
     """
