@@ -78,7 +78,7 @@ from physicsnemo.utils.profiling import profile, Profiler
 
 
 def compute_physics_loss(
-    output: torch.Tensor,
+    output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[int, list[int]]],
     target: torch.Tensor,
     mask: torch.Tensor,
     loss_type: Literal["mse", "rmse"],
@@ -106,6 +106,7 @@ def compute_physics_loss(
     """
     # Physics loss enabled
     output, coords_neighbors, output_neighbors, neighbors_list = output
+    
     batch_size = output.shape[1]
     fields, num_neighbors = output_neighbors.shape[3], output_neighbors.shape[2]
     coords_total = coords_neighbors[0, :]
@@ -289,7 +290,7 @@ def loss_fn(
 
 
 def loss_fn_with_physics(
-    output: torch.Tensor,
+    output: tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[int, list[int]]],
     target: torch.Tensor,
     loss_type: Literal["mse", "rmse"],
     padded_value: float = -10,
@@ -483,7 +484,7 @@ def drag_loss_fn(output, target, area, normals, stream_velocity=None, padded_val
 
 
 def compute_loss_dict(
-    prediction_vol: torch.Tensor,
+    prediction_vol: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[int, list[int]]],
     prediction_surf: torch.Tensor,
     batch_inputs: dict,
     loss_fn_type: dict,
@@ -621,7 +622,12 @@ def validation_step(
         for i_batch, sample_batched in enumerate(dataloader):
             sampled_batched = dict_to_device(sample_batched, device)
 
-            with autocast(enabled=True):
+            if add_physics_loss:
+                autocast_enabled = False
+            else:
+                autocast_enabled = True
+
+            with autocast(enabled=autocast_enabled):
                 if add_physics_loss:
                     prediction_vol, prediction_surf = model(
                         sampled_batched, return_volume_neighbors=True
@@ -1046,7 +1052,7 @@ def main(cfg: DictConfig) -> None:
         scheduler.step()
         logger.info(
             f"Device {dist.device} "
-            f"LOSS train {avg_loss:.5f} "
+            f"Loss train {avg_loss:.5f} "
             f"valid {avg_vloss:.5f} "
             f"Current lr {scheduler.get_last_lr()[0]} "
             f"Integral factor {initial_integral_factor}"
