@@ -22,6 +22,7 @@ def loss_fn(
     pred: torch.Tensor,
     target: torch.Tensor,
     mode: Literal["surface", "volume"],
+    ignore_w_component: bool = False,
 ) -> torch.Tensor:
     """
     Compute the main loss function for the model.
@@ -29,7 +30,8 @@ def loss_fn(
     Args:
         pred: Predicted tensor from the model.
         target: Ground truth tensor.
-        others: Dictionary of additional tensors (e.g., surface_areas, surface_normals, stream_velocity).
+        mode: Data mode (surface or volume).
+        ignore_w_component: If True, w component is excluded from volume predictions.
 
     Returns:
         Loss value as a scalar tensor.
@@ -37,18 +39,63 @@ def loss_fn(
     if mode == "surface":
         loss = loss_fn_surface(pred, target, "mse")
     elif mode == "volume":
-        loss = loss_fn_volume(pred, target, "mse")
+        loss = loss_fn_volume(pred, target, "mse", ignore_w_component)
     return loss
 
 
 def loss_fn_volume(
-    pred: torch.Tensor, target: torch.Tensor, mode: Literal["mse", "rmse"]
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_type: Literal["mse", "rmse"],
+    ignore_w_component: bool = False,
 ) -> torch.Tensor:
-    """
-    Compute the main loss function for the model.
-    """
+    """Calculate loss for volume data by handling scalar and vector components separately.
 
-    raise NotImplementedError("Volumetric loss not yet implemented.")
+    Args:
+        pred: Predicted volume values (U_x, U_y, [U_z], p, nut)
+        target: Ground truth volume values
+        loss_type: Type of loss to calculate ("mse" or "rmse")
+        ignore_w_component: If True, w (U_z) is excluded and pred has 4 dims (U_x, U_y, p, nut)
+
+    Returns:
+        Combined loss for velocity vector and scalar fields
+    """
+    # Separate velocity vector and scalars based on whether w component is included
+    if ignore_w_component:
+        # pred/target shape: [batch, points, 4] -> (U_x, U_y, p, nut)
+        pred_velocity, pred_pressure, pred_nut = torch.split(pred, [2, 1, 1], dim=2)
+        target_velocity, target_pressure, target_nut = torch.split(target, [2, 1, 1], dim=2)
+        num_outputs = 4
+    else:
+        # pred/target shape: [batch, points, 5] -> (U_x, U_y, U_z, p, nut)
+        pred_velocity, pred_pressure, pred_nut = torch.split(pred, [3, 1, 1], dim=2)
+        target_velocity, target_pressure, target_nut = torch.split(target, [3, 1, 1], dim=2)
+        num_outputs = 5
+
+    # Compute numerators
+    numerator_velocity = torch.mean((pred_velocity - target_velocity) ** 2.0, (0, 1))
+    numerator_pressure = torch.mean((pred_pressure - target_pressure) ** 2.0)
+    numerator_nut = torch.mean((pred_nut - target_nut) ** 2.0)
+
+    eps = 1e-8
+    if loss_type == "mse":
+        loss_velocity = torch.sum(numerator_velocity)
+        loss_pressure = numerator_pressure
+        loss_nut = numerator_nut
+    else:
+        # Compute relative losses for rmse
+        denom_velocity = torch.mean((target_velocity) ** 2.0, (0, 1)) + eps
+        loss_velocity = torch.sum(numerator_velocity / denom_velocity)
+        
+        denom_pressure = torch.mean((target_pressure) ** 2.0) + eps
+        loss_pressure = numerator_pressure / denom_pressure
+        
+        denom_nut = torch.mean((target_nut) ** 2.0) + eps
+        loss_nut = numerator_nut / denom_nut
+
+    loss = loss_velocity + loss_pressure + loss_nut
+
+    return loss / num_outputs
 
 
 def loss_fn_surface(

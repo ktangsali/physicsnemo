@@ -34,7 +34,7 @@ for a given field in a dataset, typically used for preprocessing in CFD workflow
 
 
 def compute_mean_std_min_max(
-    dataset: DomainParallelZarrDataset, field_key: str
+    dataset: DomainParallelZarrDataset, field_key: str, ignore_w_component: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the mean, standard deviation, minimum, and maximum for a specified field
@@ -45,6 +45,7 @@ def compute_mean_std_min_max(
     Args:
         dataset (DomainParallelZarrDataset): The dataset to process.
         field_key (str): The key for the field to normalize.
+        ignore_w_component (bool): If True, exclude w (U_z) component for volume fields.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -59,6 +60,11 @@ def compute_mean_std_min_max(
     for i in range(len(dataset)):
         print(f"reading file: {i}")
         data = dataset[i][field_key]
+        
+        # Exclude w (U_z) component if specified (index 2)
+        if ignore_w_component and field_key == "volume_fields":
+            data = torch.cat([data[..., :2], data[..., 3:]], dim=-1)
+        
         if mean is None:
             # Initialize accumulators based on the shape of the data
             mean = torch.zeros(data.shape[-1], device=data.device)
@@ -96,15 +102,37 @@ if __name__ == "__main__":
     in a dataset, using configuration from a YAML file.
 
     The computed statistics are printed and saved to a .npz file.
+    
+    Usage:
+        python compute_normalizations.py                    # Uses mode from config
+        python compute_normalizations.py --mode surface     # Force surface mode
+        python compute_normalizations.py --mode volume      # Force volume mode
     """
-    # Edit this path to your config file or hardcode the config as needed
-    config_path: str = "conf/train_surface.yaml"
+    import sys
+    
+    config_path: str = "conf/train.yaml"
     cfg = OmegaConf.load(config_path)
+    
+    mode = None
+    if len(sys.argv) > 2 and sys.argv[1] == "--mode":
+        mode = sys.argv[2]
+    else:
+        mode = cfg.data.mode
+    
+    if mode == "surface":
+        field_key = "surface_fields"
+    elif mode == "volume":
+        field_key = "volume_fields"
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Must be 'surface' or 'volume'")
+    
+    # Get ignore_w_component from config (only applicable for volume mode)
+    ignore_w_component = cfg.data.get("ignore_w_component", False) if mode == "volume" else False
+    
+    print(f"Computing normalization for {mode} mode, field: {field_key}")
+    if ignore_w_component:
+        print("Note: Excluding w (U_z) component from volume normalization")
 
-    # Choose which field to normalize
-    field_key: str = "surface_fields"
-
-    # Create the dataset using configuration parameters
     dataset = DomainParallelZarrDataset(
         data_path=cfg.data.train.data_path,
         device_mesh=None,
@@ -115,18 +143,20 @@ if __name__ == "__main__":
         large_keys=[field_key],
     )
 
-    # Compute normalization statistics
-    mean, std, min_val, max_val = compute_mean_std_min_max(dataset, field_key)
+    mean, std, min_val, max_val = compute_mean_std_min_max(
+        dataset, field_key, ignore_w_component
+    )
     print(f"Mean for {field_key}: {mean}")
     print(f"Std for {field_key}: {std}")
     print(f"Min for {field_key}: {min_val}")
     print(f"Max for {field_key}: {max_val}")
 
-    # Save statistics to a .npz file for later use
+    output_file = f"{field_key}_normalization.npz"
     np.savez(
-        f"{field_key}_normalization.npz",
+        output_file,
         mean=mean.cpu().numpy(),
         std=std.cpu().numpy(),
         min=min_val.cpu().numpy(),
         max=max_val.cpu().numpy(),
     )
+    print(f"\nSaved normalization statistics to {output_file}")

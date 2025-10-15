@@ -37,7 +37,9 @@ from loss import loss_fn
 from metrics import metrics_fn
 from preprocess import (
     preprocess_surface_data,
+    preprocess_volume_data,
     downsample_surface,
+    downsample_volume,
 )
 
 from contextlib import nullcontext
@@ -155,8 +157,12 @@ def forward_pass(
         )
 
     elif cfg.data.mode == "volume":
-        # This is a feature to implement in the future.
-        pass
+        features, embeddings, targets, others = preprocess_volume_data(
+            batch, norm_factors, cfg.data.get("ignore_w_component", False)
+        )
+        features, embeddings, targets = downsample_volume(
+            features, embeddings, targets, cfg.data.resolution
+        )
     else:
         raise ValueError(f"Unknown data mode: {cfg.data.mode}")
 
@@ -173,10 +179,18 @@ def forward_pass(
 
         outputs = unpad_output_for_fp8(outputs, output_pad_size)
 
-        loss = loss_fn(outputs, targets, cfg.data.mode)
+        loss = loss_fn(
+            outputs, targets, cfg.data.mode, cfg.data.get("ignore_w_component", False)
+        )
 
     metrics = metrics_fn(
-        outputs, targets, others, dist_manager, cfg.data.mode, norm_factors
+        outputs,
+        targets,
+        others,
+        dist_manager,
+        cfg.data.mode,
+        norm_factors,
+        cfg.data.get("ignore_w_component", False),
     )
 
     return loss, metrics
@@ -253,7 +267,7 @@ def train_epoch(
                 loss.backward()
                 optimizer.step()
 
-            if not isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
+            if not isinstance(scheduler, (torch.optim.lr_scheduler.StepLR, torch.optim.lr_scheduler.ExponentialLR)):
                 scheduler.step()
 
             end_time = time.time()
@@ -542,7 +556,7 @@ def main(cfg: DictConfig):
     if cfg.data.mode == "surface":
         norm_file = "surface_fields_normalization.npz"
     elif cfg.data.mode == "volume":
-        raise Exception("Volume training not yet supported.")
+        norm_file = "volume_fields_normalization.npz"
 
     norm_data = np.load(norm_file)
     norm_factors = {
@@ -570,6 +584,8 @@ def main(cfg: DictConfig):
         )
     elif scheduler_name == "StepLR":
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, **scheduler_params)
+    elif scheduler_name == "ExponentialLR":
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, **scheduler_params)
     else:
         raise ValueError(f"Unknown scheduler: {scheduler_name}")
 
@@ -641,7 +657,7 @@ def main(cfg: DictConfig):
         if epoch % cfg.training.save_interval == 0 and dist_manager.rank == 0:
             save_checkpoint(**ckpt_args, epoch=epoch)
 
-        if scheduler_name == "StepLR":
+        if scheduler_name in ["StepLR", "ExponentialLR"]:
             scheduler.step()
 
     logger.info("Training completed!")

@@ -53,6 +53,7 @@ def metrics_fn(
     dm: DistributedManager,
     mode: str,
     norm_factors: dict[str, torch.Tensor],
+    ignore_w_component: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
     Computes metrics for either surface or volume data.
@@ -63,6 +64,7 @@ def metrics_fn(
         others: Dictionary containing normalization statistics.
         dm: DistributedManager instance for distributed context.
         mode: Either "surface" or "volume".
+        ignore_w_component: If True, w component is excluded from volume predictions.
 
     Returns:
         Dictionary of computed metrics.
@@ -71,7 +73,9 @@ def metrics_fn(
         if mode == "surface":
             metrics = metrics_fn_surface(pred, target, others, dm, norm_factors)
         elif mode == "volume":
-            metrics = metrics_fn_volume(pred, target, others, dm, norm_factors)
+            metrics = metrics_fn_volume(
+                pred, target, others, dm, norm_factors, ignore_w_component
+            )
         else:
             raise ValueError(f"Unknown data mode: {mode}")
 
@@ -85,9 +89,10 @@ def metrics_fn_volume(
     others: dict[str, torch.Tensor],
     dm: DistributedManager,
     norm_factors: dict[str, torch.Tensor],
+    ignore_w_component: bool = False,
 ) -> dict[str, torch.Tensor]:
     """
-    Placeholder for volume metrics computation.
+    Computes L2 metrics for volume data.
 
     Args:
         pred: Predicted values.
@@ -95,11 +100,44 @@ def metrics_fn_volume(
         others: Dictionary containing additional statistics.
         dm: DistributedManager instance for distributed context.
         norm_factors: Dictionary of normalization factors.
+        ignore_w_component: If True, w (U_z) is excluded from predictions.
 
-    Raises:
-        NotImplementedError: Always, as this function is not yet implemented.
+    Returns:
+        Dictionary of L2 metrics for each variable.
     """
-    raise NotImplementedError("Volume metrics not yet implemented.")
+    # Unnormalize the volume values for L2:
+    target = target * norm_factors["std"] + norm_factors["mean"]
+    pred = pred * norm_factors["std"] + norm_factors["mean"]
+
+    l2_num = (pred - target) ** 2
+    l2_num = torch.sum(l2_num, dim=1)
+    l2_num = torch.sqrt(l2_num)
+
+    l2_denom = target**2
+    l2_denom = torch.sum(l2_denom, dim=1)
+    l2_denom = torch.sqrt(l2_denom)
+
+    l2 = l2_num / l2_denom
+
+    if ignore_w_component:
+        # pred/target shape: [batch, points, 4] -> (U_x, U_y, p, nut)
+        metrics = {
+            "l2_u": torch.mean(l2[:, 0]),
+            "l2_v": torch.mean(l2[:, 1]),
+            "l2_p": torch.mean(l2[:, 2]),
+            "l2_nut": torch.mean(l2[:, 3]),
+        }
+    else:
+        # pred/target shape: [batch, points, 5] -> (U_x, U_y, U_z, p, nut)
+        metrics = {
+            "l2_u": torch.mean(l2[:, 0]),
+            "l2_v": torch.mean(l2[:, 1]),
+            "l2_w": torch.mean(l2[:, 2]),
+            "l2_p": torch.mean(l2[:, 3]),
+            "l2_nut": torch.mean(l2[:, 4]),
+        }
+
+    return metrics
 
 
 def metrics_fn_surface(

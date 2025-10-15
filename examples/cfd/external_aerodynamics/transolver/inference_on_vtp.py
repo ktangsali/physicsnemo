@@ -46,6 +46,7 @@ def read_data_from_stl(
     stl_path: str,
     air_density: float = 1.2050,
     stream_velocity: float = 30.0,
+    angle_of_attack: float = 0.0,
 ) -> dict:
     """
     Reads mesh and surface data from an STL file and prepares a batch dictionary for inference.
@@ -54,9 +55,10 @@ def read_data_from_stl(
         stl_path (str): Path to the STL file.
         air_density (float, optional): Air density value. Defaults to 1.2050.
         stream_velocity (float, optional): Stream velocity value. Defaults to 30.0.
+        angle_of_attack (float, optional): Angle of attack value. Defaults to 0.0.
 
     Returns:
-        dict: Batch dictionary with mesh centers, normals, sizes, air density, and stream velocity as torch tensors.
+        dict: Batch dictionary with mesh centers, normals, sizes, air density, stream velocity, and angle of attack as torch tensors.
     """
 
     dm = DistributedManager()
@@ -70,7 +72,7 @@ def read_data_from_stl(
     normals = np.asarray(mesh.cell_normals)
     # Normalize cell normals
     surface_normals = (
-        surface_normals / np.linalg.norm(surface_normals, axis=1)[:, np.newaxis]
+        normals / np.linalg.norm(normals, axis=1)[:, np.newaxis]
     )
     batch["surface_normals"] = surface_normals
     surface_areas = mesh.compute_cell_sizes(length=False, area=True, volume=False)
@@ -78,6 +80,7 @@ def read_data_from_stl(
 
     batch["air_density"] = np.array([air_density], dtype="float32")
     batch["stream_velocity"] = np.array([stream_velocity], dtype="float32")
+    batch["angle_of_attack"] = np.array([angle_of_attack], dtype="float32")
 
     batch = {
         k: torch.from_numpy(v).to(device=dm.device, dtype=torch.float32)
@@ -93,6 +96,7 @@ def read_data_from_vtp(
     vtp_path: str,
     air_density: float = 1.2050,
     stream_velocity: float = 30.0,
+    angle_of_attack: float = 0.0,
 ) -> tuple:
     """
     Reads mesh and surface data from a VTP file and prepares a batch dictionary for inference.
@@ -101,6 +105,7 @@ def read_data_from_vtp(
         vtp_path (str): Path to the VTP file.
         air_density (float, optional): Air density value. Defaults to 1.2050.
         stream_velocity (float, optional): Stream velocity value. Defaults to 30.0.
+        angle_of_attack (float, optional): Angle of attack value. Defaults to 0.0.
 
     Returns:
         tuple: (mesh, batch) where mesh is a pyvista mesh object and batch is a dictionary of torch tensors.
@@ -125,6 +130,7 @@ def read_data_from_vtp(
 
     batch["air_density"] = np.array([air_density], dtype="float32")
     batch["stream_velocity"] = np.array([stream_velocity], dtype="float32")
+    batch["angle_of_attack"] = np.array([angle_of_attack], dtype="float32")
 
     # From VTP we can also exctract the ground-truth results:
     batch = {
@@ -153,7 +159,7 @@ def preprocess_data(
     mesh_centers = batch["surface_mesh_centers"]
     normals = batch["surface_normals"]
     node_features = torch.stack(
-        [batch["air_density"], batch["stream_velocity"]], axis=-1
+        [batch["air_density"], batch["stream_velocity"], batch["angle_of_attack"]], axis=-1
     )
 
     # Calculate center of mass
