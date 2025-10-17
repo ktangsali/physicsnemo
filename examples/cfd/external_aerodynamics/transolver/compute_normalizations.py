@@ -61,9 +61,11 @@ def compute_mean_std_min_max(
         print(f"reading file: {i}")
         data = dataset[i][field_key]
         
-        # Exclude w (U_z) component if specified (index 2)
+        # Exclude w (U_z) component and implicit_distance if specified
+        # volume_fields: [U_x, U_y, U_z, p, nut, implicit_distance]
         if ignore_w_component and field_key == "volume_fields":
-            data = torch.cat([data[..., :2], data[..., 3:]], dim=-1)
+            # Exclude U_z (index 2) and implicit_distance (index 5, last column)
+            data = torch.cat([data[..., :2], data[..., 3:5]], dim=-1)  # [U_x, U_y, p, nut]
         
         if mean is None:
             # Initialize accumulators based on the shape of the data
@@ -131,7 +133,8 @@ if __name__ == "__main__":
     
     print(f"Computing normalization for {mode} mode, field: {field_key}")
     if ignore_w_component:
-        print("Note: Excluding w (U_z) component from volume normalization")
+        print("Note: Excluding w (U_z) component and implicit_distance from volume normalization")
+        print("      Normalizing only: [U_x, U_y, p, nut]")
 
     dataset = DomainParallelZarrDataset(
         data_path=cfg.data.train.data_path,

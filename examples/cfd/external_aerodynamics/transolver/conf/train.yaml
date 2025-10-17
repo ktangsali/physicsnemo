@@ -17,11 +17,11 @@
 
 
 output_dir: "runs"
-run_id: "airfrans/float32_full_uq_1"
+run_id: "airfrans_dataset_orig/bfloat16_full_2"
 
 # Training configuration
 training:
-  precision: float32 # float32, float16, bfloat16, or float8
+  precision: bfloat16 # float32, float16, bfloat16, or float8
   num_epochs: 501 # Add one to save at 250
   save_interval: 25  # Save checkpoint every N epochs
   compile: false
@@ -31,12 +31,12 @@ model:
   _target_: physicsnemo.models.transolver.Transolver
   functional_dim: 3 # Input feature dimension (air_density, stream_velocity, angle_of_attack)
   out_dim: 4        # Output feature dimension (U_x, U_y, p, nut) - w component excluded for 2D sim
-  embedding_dim: 16  # Spatial embedding dimension (mesh_centers[3] + sdf[1] + fourier_sin[6] + fourier_cos[6])
-  n_layers: 4       # Number of transformer layers
-  n_hidden: 128     # Hidden dimension
+  embedding_dim: 4  # Spatial embedding dimension (mesh_centers[3] + sdf[1])
+  n_layers: 8       # Number of transformer layers
+  n_hidden: 256     # Hidden dimension
   dropout: 0.0      # Dropout rate
-  n_head: 4         # Number of attention heads
-  act: "relu"       # Activation function
+  n_head: 8         # Number of attention heads
+  act: "gelu"       # Activation function
   mlp_ratio: 4      # MLP ratio in attention blocks
   slice_num: 128     # Number of slices in physics attention
   unified_pos: false # Whether to use unified positional embeddings
@@ -62,9 +62,9 @@ optimizer:
 # Data configuration
 data:
   train:
-    data_path: ../../../../../physicsnemo-curator/airfrans_dataset_1_processed_7/train
+    data_path: ../../../../../physicsnemo-curator/airfrans_dataset_orig_processed/train
   val:
-    data_path: ../../../../../physicsnemo-curator/airfrans_dataset_1_processed_7/val
+    data_path: ../../../../../physicsnemo-curator/airfrans_dataset_orig_processed/val
   max_workers: 8
   pin_memory: true
   resolution: 300_000
@@ -73,7 +73,6 @@ data:
   data_keys:
     - "volume_fields"
     - "volume_mesh_centers"
-    - "volume_sdf"
     - "air_density"
     - "stream_velocity"
     - "angle_of_attack"
@@ -82,7 +81,6 @@ data:
   large_keys:
     - "volume_fields"
     - "volume_mesh_centers"
-    - "volume_sdf"
 
 # Logging configuration
 logging:

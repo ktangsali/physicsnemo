@@ -106,8 +106,12 @@ def preprocess_volume_data(
     """
 
     mesh_centers = batch["volume_mesh_centers"]
-    sdf = batch["volume_sdf"]
-    targets = batch["volume_fields"]
+    volume_fields = batch["volume_fields"]
+    
+    # Extract implicit_distance (last column) as SDF
+    # volume_fields: [U_x, U_y, U_z, p, nut, implicit_distance]
+    sdf = volume_fields[..., -1:]  # Keep as (N, 1)
+    targets = volume_fields[..., :-1]  # Everything except implicit_distance
     
     # Exclude w (U_z) component if specified (index 2: U_x=0, U_y=1, U_z=2, p=3, nut=4)
     if ignore_w_component:
@@ -131,21 +135,21 @@ def preprocess_volume_data(
     mesh_centers = mesh_centers - center_of_mass
 
     # Create Fourier features for positional encoding
-    fourier_sin_features = [
-        torch.sin(mesh_centers * (2 ** i) * torch.pi)
-        for i in range(2)
-    ]
-    fourier_cos_features = [
-        torch.cos(mesh_centers * (2 ** i) * torch.pi)
-        for i in range(2)
-    ]
+    # fourier_sin_features = [
+    #     torch.sin(mesh_centers * (2 ** i) * torch.pi)
+    #     for i in range(2)
+    # ]
+    # fourier_cos_features = [
+    #     torch.cos(mesh_centers * (2 ** i) * torch.pi)
+    #     for i in range(2)
+    # ]
 
     embeddings = torch.cat(
         [
             mesh_centers,
             sdf,
-            *fourier_sin_features,
-            *fourier_cos_features
+            # *fourier_sin_features,
+            # *fourier_cos_features
         ],
         dim=-1,
     )

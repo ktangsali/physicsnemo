@@ -23,159 +23,12 @@ making them dimensionless and comparable across different flow conditions.
 import pyvista as pv
 import numpy as np
 from tqdm import tqdm
-from numba import njit
 from pathlib import Path
 from multiprocessing import Pool
 import pandas as pd
 
-@njit
-def compute_face_area_numba(point_ids, points):
-    n_points = len(point_ids)
-    p0 = points[point_ids[0]]
-    area_vec = np.zeros(3)
-    
-    for i in range(1, n_points - 1):
-        p1 = points[point_ids[i]]
-        p2 = points[point_ids[i + 1]]
-        edge1 = p1 - p0
-        edge2 = p2 - p0
-        area_vec += np.cross(edge1, edge2)
-    
-    return 0.5 * np.sqrt(np.sum(area_vec * area_vec))
-
-@njit
-def compute_face_normal_numba(point_ids, points, cell_center):
-    n_points = len(point_ids)
-    p0 = points[point_ids[0]]
-    area_vec = np.zeros(3)
-    
-    for i in range(1, n_points - 1):
-        p1 = points[point_ids[i]]
-        p2 = points[point_ids[i + 1]]
-        edge1 = p1 - p0
-        edge2 = p2 - p0
-        area_vec += np.cross(edge1, edge2)
-    
-    normal = area_vec / (2.0 * np.sqrt(np.sum(area_vec * area_vec)))
-    
-    face_center = np.zeros(3)
-    for i in range(n_points):
-        face_center += points[point_ids[i]]
-    face_center /= n_points
-    
-    face_to_cell = cell_center - face_center
-    
-    if np.sum(normal * face_to_cell) > 0:
-        normal = -normal
-    
-    return normal
-
-@njit
-def compute_face_velocity_numba(point_ids, velocity_data):
-    vel = np.zeros(3)
-    n = len(point_ids)
-    for i in range(n):
-        vel += velocity_data[point_ids[i]]
-    return vel / n
-
-@njit
-def compute_face_scalar_numba(point_ids, scalar_data):
-    val = 0.0
-    n = len(point_ids)
-    for i in range(n):
-        val += scalar_data[point_ids[i]]
-    return val / n
-
-def compute_cell_gradient_gauss_green(cell_id, points, scalar_data, cell_volumes, cell_centers, neighbors, face_point_ids_map):
-    gradient = np.zeros(3)
-    cell1_center = cell_centers[cell_id]
-    cell_volume = cell_volumes[cell_id]
-
-    for neighbor_idx in neighbors[cell_id]:
-        face_point_ids = face_point_ids_map[(cell_id, neighbor_idx)]
-        
-        area = compute_face_area_numba(face_point_ids, points)
-        normal = compute_face_normal_numba(face_point_ids, points, cell1_center)
-        scalar_face = compute_face_scalar_numba(face_point_ids, scalar_data)
-        gradient += area * scalar_face * normal
-    
-    return gradient / cell_volume
-
-@njit
-def compute_viscous_stress_tensor(velocity_grad, nu_eff):
-    tau = np.zeros((3, 3))
-    for i in range(3):
-        for j in range(3):
-            tau[i, j] = nu_eff * (velocity_grad[i, j] + velocity_grad[j, i])
-    return tau
-
-def compute_cell_momentum(cell_id, points, velocity_data, pressure_data, nut_data, nu, cell_volumes, cell_centers, cell_point_ids, neighbors, face_point_ids_map):
-    momentum_residual = np.zeros(3)
-    cell1_center = cell_centers[cell_id]
-    
-    u_grad = compute_cell_gradient_gauss_green(cell_id, points, velocity_data[:, 0], cell_volumes, cell_centers, neighbors, face_point_ids_map)
-    v_grad = compute_cell_gradient_gauss_green(cell_id, points, velocity_data[:, 1], cell_volumes, cell_centers, neighbors, face_point_ids_map)
-    w_grad = compute_cell_gradient_gauss_green(cell_id, points, velocity_data[:, 2], cell_volumes, cell_centers, neighbors, face_point_ids_map)
-    
-    velocity_grad = np.array([u_grad, v_grad, w_grad])
-    
-    cell_pts = cell_point_ids[cell_id]
-    cell_velocity = np.mean([velocity_data[pt_id] for pt_id in cell_pts], axis=0)
-    cell_pressure = np.mean([pressure_data[pt_id] for pt_id in cell_pts])
-    cell_nut = np.mean([nut_data[pt_id] for pt_id in cell_pts])
-    nu_eff = nu + cell_nut
-    
-    tau = compute_viscous_stress_tensor(velocity_grad, nu_eff)
-    
-    for neighbor_idx in neighbors[cell_id]:
-        face_point_ids = face_point_ids_map[(cell_id, neighbor_idx)]
-        
-        area = compute_face_area_numba(face_point_ids, points)
-        normal = compute_face_normal_numba(face_point_ids, points, cell1_center)
-        vel_face = compute_face_velocity_numba(face_point_ids, velocity_data)
-        pressure_face = compute_face_scalar_numba(face_point_ids, pressure_data)
-        
-        convective_flux = area * np.outer(vel_face, vel_face) @ normal
-        pressure_flux = area * pressure_face * normal
-        viscous_flux = area * tau @ normal
-        
-        momentum_residual += convective_flux + pressure_flux - viscous_flux
-    
-    return momentum_residual
-    
-def compute_cell_continuity(cell_id, points, velocity_data, cell_centers, neighbors, face_point_ids_map):
-    flux = 0.0
-    cell1_center = cell_centers[cell_id]
-
-    for neighbor_idx in neighbors[cell_id]:
-        if (cell_id, neighbor_idx) not in face_point_ids_map:
-            continue
-        
-        face_point_ids = face_point_ids_map[(cell_id, neighbor_idx)]
-        area = compute_face_area_numba(face_point_ids, points)
-        normal = compute_face_normal_numba(face_point_ids, points, cell1_center)
-        vel_face_center = compute_face_velocity_numba(face_point_ids, velocity_data)
-        flux += area * np.sum(normal * vel_face_center)
-    
-    return flux
-
-def compute_residuals_for_field(mesh, velocity_data, pressure_data, nut_data, nu, cell_volumes, points, cell_centers, cell_point_ids, neighbors, face_point_ids_map):
-    n_cells = mesh.n_cells
-    continuity = np.zeros(n_cells)
-    momentum_x = np.zeros(n_cells)
-    momentum_y = np.zeros(n_cells)
-    momentum_z = np.zeros(n_cells)
-    
-    for idx in range(n_cells):
-        continuity_cell = compute_cell_continuity(idx, points, velocity_data, cell_centers, neighbors, face_point_ids_map)
-        momentum_cell = compute_cell_momentum(idx, points, velocity_data, pressure_data, nut_data, nu, cell_volumes, cell_centers, cell_point_ids, neighbors, face_point_ids_map)
-        
-        continuity[idx] = continuity_cell
-        momentum_x[idx] = momentum_cell[0]
-        momentum_y[idx] = momentum_cell[1]
-        momentum_z[idx] = momentum_cell[2]
-    
-    return continuity, momentum_x, momentum_y, momentum_z
+# Import residual computation functions from physics module
+from physics import _prepare_mesh_data, _compute_residuals_fvm
 
 def create_boundary_mask(mesh, box_position, box_length):
     bounds = [
@@ -191,57 +44,23 @@ def create_boundary_mask(mesh, box_position, box_length):
     
     return mask
 
-def extract_uinf_from_filename(filename):
-    """Extract Uinf from filename like: airFoil2D_SST_71.134_7.877_1.724_2.818_11.267"""
-    parts = filename.replace('pred_internal_', '').replace('.vtu', '').split('_')
-    # Format: airFoil2D_turbulence_Uinf_aoa_digit1_digit2_...
-    # So Uinf is at index 2 after splitting
+def extract_uinf_and_aoa_from_filename(filename):
+    """Extract Uinf and AoA from filename like: pred_airFoil2D_SST_31.283_-4.156_0.919_6.98_14.32_internal.vtu"""
+    # Remove prefix and suffix, then split
+    parts = filename.replace('pred_', '').replace('_internal', '').replace('.vtu', '').split('_')
+    # Format after cleanup: airFoil2D_SST_Uinf_aoa_digit1_digit2_...
+    # parts[0] = 'airFoil2D', parts[1] = 'SST', parts[2] = Uinf, parts[3] = AoA
     uinf = float(parts[2])
-    return uinf
+    aoa = float(parts[3])
+    return uinf, aoa
 
 def process_file(args):
-    vtu_file, nu, output_dir, box_position, box_length, L_ref, rho = args
+    vtu_file, nu, output_dir, box_position, box_length, L_ref, rho, is_2d = args
     
-    # Extract reference velocity from filename
-    U_ref = extract_uinf_from_filename(vtu_file.name)
+    # Extract reference velocity and angle of attack from filename
+    U_ref, aoa = extract_uinf_and_aoa_from_filename(vtu_file.name)
     
     mesh = pv.read(vtu_file)
-    mesh_with_sizes = mesh.compute_cell_sizes(length=False, area=False, volume=True)
-    cell_volumes = mesh_with_sizes.cell_data['Volume']
-    
-    points = mesh.points
-    
-    cell_centers = []
-    cell_point_ids = []
-    neighbors = []
-    face_point_ids_map = {}
-
-    for cell_id in range(mesh.n_cells):
-        cell = mesh.get_cell(cell_id)
-        cell_centers.append(cell.center)
-        cell_point_ids.append(list(cell.point_ids))
-        
-        cell_neighbors = list(mesh.cell_neighbors(cell_id, 'faces'))
-        neighbors.append(cell_neighbors)
-        
-        for neighbor_id in cell_neighbors:
-            if (cell_id, neighbor_id) not in face_point_ids_map:
-                neighbor_cell = mesh.get_cell(neighbor_id)
-                
-                for i in range(cell.n_faces):
-                    face1 = cell.get_face(i)
-                    face1_point_ids = set(face1.point_ids)
-                    for j in range(neighbor_cell.n_faces):
-                        face2_point_ids = set(neighbor_cell.get_face(j).point_ids)
-                        if face1_point_ids == face2_point_ids:
-                            face_arr = np.array(face1.point_ids, dtype=np.int64)
-                            face_point_ids_map[(cell_id, neighbor_id)] = face_arr
-                            face_point_ids_map[(neighbor_id, cell_id)] = face_arr
-                            break
-                    if (cell_id, neighbor_id) in face_point_ids_map:
-                        break
-
-    cell_centers = np.array(cell_centers)
     
     # Read dimensional data
     velocity_pred_dim = mesh.point_data["PredictedU"]
@@ -268,16 +87,37 @@ def process_file(args):
     # nu* = nu/(U_ref*L_ref) = nu/U_ref (since L_ref=1.0)
     nu_star = nu / (U_ref * L_ref)
     
-    # Compute residuals on non-dimensionalized variables
-    continuity_pred, momentum_x_pred, momentum_y_pred, momentum_z_pred = compute_residuals_for_field(
-        mesh, velocity_pred, pressure_pred, nut_pred, nu_star, cell_volumes, points, 
-        cell_centers, cell_point_ids, neighbors, face_point_ids_map
+    # Temporarily store non-dimensionalized data in mesh for processing
+    mesh.point_data["U_temp"] = velocity_pred.astype(np.float64)
+    mesh.point_data["p_temp"] = pressure_pred.astype(np.float64)
+    mesh.point_data["nut_temp"] = nut_pred.astype(np.float64)
+    
+    # Convert to VTK format for physics module
+    import vtk
+    from vtk.util import numpy_support
+    
+    # Create VTK unstructured grid from PyVista mesh
+    ugrid_pred = mesh.cast_to_unstructured_grid()
+    
+    # Prepare mesh data and compute residuals using physics module
+    mesh_data_pred = _prepare_mesh_data(ugrid_pred, "U_temp", "p_temp", "nut_temp", is_2d=is_2d)
+    continuity_pred, momentum_x_pred, momentum_y_pred, momentum_z_pred = _compute_residuals_fvm(
+        mesh_data_pred, nu_star, device="cpu", is_2d=is_2d
     )
     
-    continuity_true, momentum_x_true, momentum_y_true, momentum_z_true = compute_residuals_for_field(
-        mesh, velocity_true, pressure_true, nut_true, nu_star, cell_volumes, points, 
-        cell_centers, cell_point_ids, neighbors, face_point_ids_map
+    # Repeat for true values
+    mesh.point_data["U_temp"] = velocity_true.astype(np.float64)
+    mesh.point_data["p_temp"] = pressure_true.astype(np.float64)
+    mesh.point_data["nut_temp"] = nut_true.astype(np.float64)
+    
+    ugrid_true = mesh.cast_to_unstructured_grid()
+    mesh_data_true = _prepare_mesh_data(ugrid_true, "U_temp", "p_temp", "nut_temp", is_2d=is_2d)
+    continuity_true, momentum_x_true, momentum_y_true, momentum_z_true = _compute_residuals_fvm(
+        mesh_data_true, nu_star, device="cpu", is_2d=is_2d
     )
+    
+    # Extract cell volumes/areas from mesh_data
+    cell_volumes = mesh_data_pred['cell_volumes']
     
     mask = create_boundary_mask(mesh, box_position, box_length)
     
@@ -327,12 +167,20 @@ def process_file(args):
     total_momentum_y_true = np.abs(momentum_y_true[mask]).sum() / total_volume
     total_momentum_z_true = np.abs(momentum_z_true[mask]).sum() / total_volume
     
-    l2_U = np.sqrt(np.mean((velocity_pred_cell[mask] - velocity_true_cell[mask])**2))
+    # For 2D data, only compute L2 on in-plane components (U_x, U_y) to match continuity residual
+    if is_2d:
+        velocity_pred_cell_2d = velocity_pred_cell[mask, :2]  # Only x and y components
+        velocity_true_cell_2d = velocity_true_cell[mask, :2]
+    else:
+        velocity_pred_cell_2d = velocity_pred_cell[mask]
+        velocity_true_cell_2d = velocity_true_cell[mask]
+    
+    l2_U = np.sqrt(np.mean((velocity_pred_cell_2d - velocity_true_cell_2d)**2))
     l2_p = np.sqrt(np.mean((pressure_pred_cell[mask] - pressure_true_cell[mask])**2))
     l2_nut = np.sqrt(np.mean((nut_pred_cell[mask] - nut_true_cell[mask])**2))
     
-    l2_num_U = np.sqrt(np.sum((velocity_pred_cell[mask] - velocity_true_cell[mask])**2))
-    l2_denom_U = np.sqrt(np.sum(velocity_true_cell[mask]**2))
+    l2_num_U = np.sqrt(np.sum((velocity_pred_cell_2d - velocity_true_cell_2d)**2))
+    l2_denom_U = np.sqrt(np.sum(velocity_true_cell_2d**2))
     relative_l2_U = l2_num_U / (l2_denom_U + 1e-10)
     
     l2_num_p = np.sqrt(np.sum((pressure_pred_cell[mask] - pressure_true_cell[mask])**2))
@@ -349,6 +197,7 @@ def process_file(args):
     return {
         'filename': vtu_file.name,
         'U_ref': U_ref,  # Reference velocity used for non-dimensionalization
+        'aoa': aoa,  # Angle of attack (degrees)
         'total_continuity_pred': total_continuity_pred,
         'total_momentum_x_pred': total_momentum_x_pred,
         'total_momentum_y_pred': total_momentum_y_pred,
@@ -369,9 +218,10 @@ def main():
     nu = 1.5498148291427463e-05  # Kinematic viscosity
     L_ref = 1.0  # Reference length scale
     rho = 1.0    # Reference density
+    is_2d = True  # Set to True for 2D meshes (slices), False for full 3D meshes
     
-    input_dir = Path("test/airfrans/float32_full_expt_2")
-    output_dir = Path("test/airfrans/float32_full_expt_2_with_res_non_dim")
+    input_dir = Path("test/airfrans_dataset_orig/bfloat16_full_2")
+    output_dir = Path("test/airfrans_dataset_orig/bfloat16_full_2_with_res_non_dim")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     box_position = np.array([-1.8, -1.2, 0.0])
@@ -379,13 +229,13 @@ def main():
     
     vtu_files = list(input_dir.glob("*.vtu"))
     
-    args_list = [(vtu_file, nu, output_dir, box_position, box_length, L_ref, rho) for vtu_file in vtu_files]
+    args_list = [(vtu_file, nu, output_dir, box_position, box_length, L_ref, rho, is_2d) for vtu_file in vtu_files]
     
     with Pool() as pool:
         results = list(tqdm(pool.imap(process_file, args_list), total=len(args_list)))
     
     df = pd.DataFrame(results)
-    df.to_csv("residuals_and_errors_non_dim.csv", index=False)
+    df.to_csv("residuals_and_errors_non_dim_2d.csv", index=False)
 
 if __name__ == "__main__":
     main()
