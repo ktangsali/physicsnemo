@@ -109,7 +109,7 @@ The several examples inside PhysicsNeMo can be classified based on their domains
 
 ### Active Learning
 
-1. [Classify the famous two-moons data distribution using Active learning](./examples/active_learning/moons/)
+1. [Classify the famous two-moons data distribution using Active learning](./active_learning/moons/)
 
 ## Additional examples
 
