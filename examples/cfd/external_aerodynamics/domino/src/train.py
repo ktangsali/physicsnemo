@@ -196,7 +196,7 @@ def validation_step(
                     log_physics_loss_only=(log_physics_loss and not add_physics_loss),
                     # FVM Physics Loss Parameters
                     prediction_vol_neighbors=prediction_vol_neighbors,
-                    datapipe=datapipe if (add_physics_loss or log_physics_loss) else None,
+                    datapipe=datapipe,  # Always pass datapipe for consistent unnormalized data loss
                     physics_loss_weight=physics_loss_weight,
                 )
 
@@ -353,7 +353,7 @@ def train_epoch(
                     add_physics_loss,
                     # FVM Physics Loss Parameters
                     prediction_vol_neighbors=prediction_vol_neighbors,
-                    datapipe=datapipe if add_physics_loss else None,
+                    datapipe=datapipe,  # Always pass datapipe for consistent unnormalized data loss
                     physics_loss_weight=physics_loss_weight,
                 )
 

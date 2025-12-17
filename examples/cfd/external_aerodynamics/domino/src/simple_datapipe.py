@@ -8,6 +8,7 @@ Removes: bounding box filtering, domain parallelism, complex sharding.
 
 from pathlib import Path
 from typing import Literal, Optional
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -292,6 +293,15 @@ class SimpleDoMINODataPipe(Dataset):
         
         # Compute center of mass
         center_of_mass = calculate_center_of_mass(stl_centers, stl_areas)
+        
+        # Compute length scale same way as curator (for non-dimensionalization)
+        # This is the maximum dimension of the STL bounding box
+        if isinstance(stl_coords, torch.Tensor):
+            stl_coords_np = stl_coords.cpu().numpy()
+        else:
+            stl_coords_np = stl_coords
+        length_scale = float(np.amax(np.amax(stl_coords_np, axis=0) - np.amin(stl_coords_np, axis=0)))
+        result["length_scale"] = torch.tensor(length_scale, dtype=torch.float32, device=self.output_device)
         
         # Process surface grid SDF
         if self.normalize_coordinates:

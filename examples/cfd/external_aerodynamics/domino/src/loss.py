@@ -40,8 +40,11 @@ def compute_fvm_physics_loss(
     1. FVM residuals computed on MODEL PREDICTIONS (maintains gradients!)
     2. FVM residuals computed on GROUND TRUTH data
     
-    IMPORTANT: Unnormalizes coordinates and fields before computing residuals!
-    FVM residuals must be computed in physical space for correct physics.
+    IMPORTANT: Unnormalizes fields to restore non-dimensional values from preprocessed data.
+    The viscosity is non-dimensionalized using the same scheme as curator:
+        nu* = nu / (U_ref * L_ref)
+    where U_ref = 30.0 m/s and L_ref = max dimension of vehicle STL.
+    FVM residuals are computed in non-dimensional space for consistency.
     
     Uses Warp's PyTorch interop to maintain autodifferentiability throughout.
     Gradients can flow back through the FVM computation to the model.
@@ -53,7 +56,7 @@ def compute_fvm_physics_loss(
                             [batch, n_cells, max_neighbors, 5] (in NORMALIZED space)
         batch: Batch dictionary with 'volume_cell_indices' and 'volume_fields' keys
         datapipe: Datapipe with mesh connectivity and normalization parameters
-        nu: Kinematic viscosity (m^2/s) in physical units
+        nu: Kinematic viscosity (m^2/s) in dimensional physical units
     
     Returns:
         Tuple of (continuity_loss, momentum_x_loss, momentum_y_loss, momentum_z_loss)
@@ -64,15 +67,37 @@ def compute_fvm_physics_loss(
     
     device = solutions_main.device
     
+    # ========================================
+    # STEP -1: Non-dimensionalize viscosity to match preprocessed data
+    # ========================================
+    # Curator applies: ν* = ν / (U_ref * L_ref)
+    # where L_ref = max dimension of STL bounding box
+    U_ref = 30.0  # m/s (STREAM_VELOCITY from curator constants)
+    
+    # Get L_ref from batch (computed in datapipe same way as curator)
+    if 'length_scale' not in batch:
+        raise ValueError(
+            "Cannot compute physics loss: 'length_scale' not found in batch. "
+            "Ensure datapipe computes this in process_data()."
+        )
+    
+    L_ref = batch['length_scale']
+    if isinstance(L_ref, torch.Tensor):
+        L_ref = L_ref.item()
+    
+    # Non-dimensionalize viscosity
+    nu_nondim = nu / (U_ref * L_ref)
+    
     # Keep as torch tensors (don't detach - we want gradients!)
     # Explicitly convert to float32 (in case model output is float16 from autocast)
     solutions_main_squeezed = solutions_main.squeeze(0).float()  # [n_cells, 5]
     solutions_neighbors_squeezed = solutions_neighbors.squeeze(0).float()  # [n_cells, max_nb, 5]
     
     # ========================================
-    # STEP 0: UNNORMALIZE model predictions to physical space
+    # STEP 0: UNNORMALIZE model predictions to non-dimensional space
     # ========================================
-    # Model outputs are normalized/scaled, but FVM needs physical units!
+    # Model outputs are statistically normalized (min-max or mean-std).
+    # Unnormalizing restores the non-dimensional fields as stored in preprocessed data.
     
     if datapipe.volume_factors is not None:
         # Unscale fields based on scaling type
@@ -115,9 +140,9 @@ def compute_fvm_physics_loss(
     # ========================================
     # STEP 1: Compute residuals on PREDICTIONS (maintains gradients!)
     # ========================================
-    # NOTE: solutions_main_squeezed and solutions_neighbors_squeezed are now in PHYSICAL units
-    # The mesh connectivity (coordinates, volumes) is already in physical units
-    # (loaded directly from zarr without normalization)
+    # NOTE: solutions are now in NON-DIMENSIONAL units (after unnormalization)
+    # The mesh connectivity (coordinates, volumes) is in dimensional units
+    # But we use nu_nondim which matches the non-dimensional fields
     
     # Build field data dict with torch tensors
     velocity_pred = torch.zeros((n_total_cells, 3), dtype=torch.float32, device=device)
@@ -158,9 +183,9 @@ def compute_fvm_physics_loss(
     # Get batched mesh data (will convert to numpy internally, but we'll pass torch tensors)
     batched_mesh_pred = datapipe.get_batched_mesh_data(batch, field_data=field_data_pred_torch)
     
-    # Compute FVM residuals using torch-compatible version (maintains gradients!)
+    # Compute FVM residuals using torch-compatible version with non-dimensional viscosity (maintains gradients!)
     continuity_pred_all, momentum_x_pred_all, momentum_y_pred_all, momentum_z_pred_all = \
-        compute_residuals_warp_cell_centered_torch(batched_mesh_pred, nu, device=str(device))
+        compute_residuals_warp_cell_centered_torch(batched_mesh_pred, nu_nondim, device=str(device))
     
     # Extract residuals for sampled cells only
     local_cell_indices = batched_mesh_pred.get('local_cell_indices', torch.arange(len(continuity_pred_all)))
@@ -178,9 +203,9 @@ def compute_fvm_physics_loss(
     # Use ground truth data (no field_data parameter = use mesh_connectivity data)
     batched_mesh_gt = datapipe.get_batched_mesh_data(batch, field_data=None)
     
-    # Compute FVM residuals on ground truth (no gradients needed here)
+    # Compute FVM residuals on ground truth with non-dimensional viscosity (no gradients needed here)
     continuity_gt_all, momentum_x_gt_all, momentum_y_gt_all, momentum_z_gt_all = \
-        compute_residuals_warp_cell_centered(batched_mesh_gt, nu)
+        compute_residuals_warp_cell_centered(batched_mesh_gt, nu_nondim)
     
     # Extract residuals for sampled cells only
     local_cell_indices_gt = batched_mesh_gt.get('local_cell_indices', np.arange(len(continuity_gt_all)))
@@ -660,10 +685,45 @@ def compute_loss_dict(
     if prediction_vol is not None:
         target_vol = batch_inputs["volume_fields"]
 
-        # Data loss (always computed for volume)
+        # Unnormalize prediction and target for consistent loss computation with physics loss
+        if datapipe is not None and datapipe.volume_factors is not None:
+            device = prediction_vol.device
+            prediction_vol_unnorm = prediction_vol.clone()
+            target_vol_unnorm = target_vol.clone()
+            
+            if datapipe.scaling_type == "mean_std_scaling":
+                # Unstandardize: x_physical = x_normalized * std + mean
+                prediction_vol_unnorm = unstandardize(
+                    prediction_vol_unnorm,
+                    datapipe.volume_factors[0].to(device),  # mean
+                    datapipe.volume_factors[1].to(device),  # std
+                )
+                target_vol_unnorm = unstandardize(
+                    target_vol_unnorm,
+                    datapipe.volume_factors[0].to(device),
+                    datapipe.volume_factors[1].to(device),
+                )
+            elif datapipe.scaling_type == "min_max_scaling":
+                # Unnormalize: x_physical = x_normalized * (max - min) + min
+                prediction_vol_unnorm = unnormalize(
+                    prediction_vol_unnorm,
+                    datapipe.volume_factors[0].to(device),  # min
+                    datapipe.volume_factors[1].to(device),  # max
+                )
+                target_vol_unnorm = unnormalize(
+                    target_vol_unnorm,
+                    datapipe.volume_factors[0].to(device),
+                    datapipe.volume_factors[1].to(device),
+                )
+        else:
+            # Fall back to normalized loss if datapipe not available
+            prediction_vol_unnorm = prediction_vol
+            target_vol_unnorm = target_vol
+
+        # Data loss (computed on unnormalized values for consistency with physics loss)
         loss_vol = loss_fn(
-            prediction_vol,
-            target_vol,
+            prediction_vol_unnorm,
+            target_vol_unnorm,
             loss_fn_type.loss_type,
             padded_value=-10,
         )
