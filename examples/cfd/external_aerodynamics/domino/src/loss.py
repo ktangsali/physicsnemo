@@ -182,10 +182,32 @@ def compute_fvm_physics_loss(
     # Get batched mesh data (will convert to numpy internally, but we'll pass torch tensors)
     batched_mesh_pred = datapipe.get_batched_mesh_data(batch, field_data=field_data_pred_torch)
     
+    # # Print coordinates BEFORE non-dimensionalization 
+    # print(f"[Physics Loss] Before non-dimensionalization (dimensional, meters):")
+    # print(f"  L_ref = {L_ref:.4f} m")
+    # if isinstance(batched_mesh_pred['cell_centers'], np.ndarray):
+    #     cc_min = batched_mesh_pred['cell_centers'].min(axis=0)
+    #     cc_max = batched_mesh_pred['cell_centers'].max(axis=0)
+    # else:
+    #     cc_min = batched_mesh_pred['cell_centers'].min(dim=0).values.cpu().numpy()
+    #     cc_max = batched_mesh_pred['cell_centers'].max(dim=0).values.cpu().numpy()
+    # print(f"  Cell centers range: [{cc_min[0]:.4f}, {cc_max[0]:.4f}] x [{cc_min[1]:.4f}, {cc_max[1]:.4f}] x [{cc_min[2]:.4f}, {cc_max[2]:.4f}]")
+    
     # Non-dimensionalize geometry to match non-dimensional fields
     batched_mesh_pred['points'] = batched_mesh_pred['points'] / L_ref
     batched_mesh_pred['cell_centers'] = batched_mesh_pred['cell_centers'] / L_ref
     batched_mesh_pred['cell_volumes'] = batched_mesh_pred['cell_volumes'] / (L_ref ** 3)
+    
+    # # Print coordinates AFTER non-dimensionalization 
+    # print(f"[Physics Loss] After non-dimensionalization (non-dimensional):")
+    # if isinstance(batched_mesh_pred['cell_centers'], np.ndarray):
+    #     cc_min_nondim = batched_mesh_pred['cell_centers'].min(axis=0)
+    #     cc_max_nondim = batched_mesh_pred['cell_centers'].max(axis=0)
+    # else:
+    #     cc_min_nondim = batched_mesh_pred['cell_centers'].min(dim=0).values.cpu().numpy()
+    #     cc_max_nondim = batched_mesh_pred['cell_centers'].max(dim=0).values.cpu().numpy()
+    # print(f"  Cell centers range: [{cc_min_nondim[0]:.4f}, {cc_max_nondim[0]:.4f}] x [{cc_min_nondim[1]:.4f}, {cc_max_nondim[1]:.4f}] x [{cc_min_nondim[2]:.4f}, {cc_max_nondim[2]:.4f}]")
+    # print(f"  nu_nondim = {nu_nondim:.6e}")
     
     # Compute FVM residuals using torch-compatible version with non-dimensional viscosity (maintains gradients!)
     continuity_pred_all, momentum_x_pred_all, momentum_y_pred_all, momentum_z_pred_all = \
