@@ -141,8 +141,7 @@ def compute_fvm_physics_loss(
     # STEP 1: Compute residuals on PREDICTIONS (maintains gradients!)
     # ========================================
     # NOTE: solutions are now in NON-DIMENSIONAL units (after unnormalization)
-    # The mesh connectivity (coordinates, volumes) is in dimensional units
-    # But we use nu_nondim which matches the non-dimensional fields
+    # Geometry will also be non-dimensionalized to match
     
     # Build field data dict with torch tensors
     velocity_pred = torch.zeros((n_total_cells, 3), dtype=torch.float32, device=device)
@@ -183,6 +182,11 @@ def compute_fvm_physics_loss(
     # Get batched mesh data (will convert to numpy internally, but we'll pass torch tensors)
     batched_mesh_pred = datapipe.get_batched_mesh_data(batch, field_data=field_data_pred_torch)
     
+    # Non-dimensionalize geometry to match non-dimensional fields
+    batched_mesh_pred['points'] = batched_mesh_pred['points'] / L_ref
+    batched_mesh_pred['cell_centers'] = batched_mesh_pred['cell_centers'] / L_ref
+    batched_mesh_pred['cell_volumes'] = batched_mesh_pred['cell_volumes'] / (L_ref ** 3)
+    
     # Compute FVM residuals using torch-compatible version with non-dimensional viscosity (maintains gradients!)
     continuity_pred_all, momentum_x_pred_all, momentum_y_pred_all, momentum_z_pred_all = \
         compute_residuals_warp_cell_centered_torch(batched_mesh_pred, nu_nondim, device=str(device))
@@ -202,6 +206,11 @@ def compute_fvm_physics_loss(
     # ========================================
     # Use ground truth data (no field_data parameter = use mesh_connectivity data)
     batched_mesh_gt = datapipe.get_batched_mesh_data(batch, field_data=None)
+    
+    # Non-dimensionalize geometry to match non-dimensional fields
+    batched_mesh_gt['points'] = batched_mesh_gt['points'] / L_ref
+    batched_mesh_gt['cell_centers'] = batched_mesh_gt['cell_centers'] / L_ref
+    batched_mesh_gt['cell_volumes'] = batched_mesh_gt['cell_volumes'] / (L_ref ** 3)
     
     # Compute FVM residuals on ground truth with non-dimensional viscosity (no gradients needed here)
     continuity_gt_all, momentum_x_gt_all, momentum_y_gt_all, momentum_z_gt_all = \
@@ -662,7 +671,8 @@ def compute_loss_dict(
     # FVM-Based Physics Loss Parameters
     prediction_vol_neighbors: torch.Tensor | None = None,
     datapipe = None,
-    physics_loss_weight: float = 1.0,
+    physics_loss_weight_continuity: float = 1.0,
+    physics_loss_weight_momentum: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
     """
     Compute the loss terms in a single function call.
@@ -748,10 +758,10 @@ def compute_loss_dict(
             
             # Only add to total loss if add_physics_loss=True (not just logging)
             if add_physics_loss:
-                total_loss_terms.append(continuity_loss * physics_loss_weight)
-                total_loss_terms.append(momentum_x_loss * physics_loss_weight)
-                total_loss_terms.append(momentum_y_loss * physics_loss_weight)
-                total_loss_terms.append(momentum_z_loss * physics_loss_weight)
+                total_loss_terms.append(continuity_loss * physics_loss_weight_continuity)
+                total_loss_terms.append(momentum_x_loss * physics_loss_weight_momentum)
+                total_loss_terms.append(momentum_y_loss * physics_loss_weight_momentum)
+                total_loss_terms.append(momentum_z_loss * physics_loss_weight_momentum)
 
     if prediction_surf is not None:
         target_surf = batch_inputs["surface_fields"]

@@ -190,7 +190,8 @@ train: # Training configurable parameters
   # FVM Physics Loss Settings
   add_physics_loss: true  # Set to true to enable FVM-based physics loss in training
   log_physics_loss: true  # Set to true to compute and log physics loss during validation (even if not training with it)
-  physics_loss_weight: 10000  # Final weight for physics loss (balance data vs physics)
+  physics_loss_weight_continuity: 1000  # Weight for continuity equation (higher to compensate for smaller magnitude)
+  physics_loss_weight_momentum: 100     # Weight for momentum equations (X, Y, Z components)
   # Curriculum Learning for Physics Loss
   physics_loss_curriculum:
     enabled: true  # Enable curriculum learning for physics loss weight

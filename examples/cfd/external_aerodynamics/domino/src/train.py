@@ -143,7 +143,8 @@ def validation_step(
     add_physics_loss=False,
     log_physics_loss=False,
     autocast_enabled=None,
-    physics_loss_weight=1.0,
+    physics_loss_weight_continuity=1.0,
+    physics_loss_weight_momentum=1.0,
 ):
     dm = DistributedManager()
     running_vloss = 0.0
@@ -197,7 +198,8 @@ def validation_step(
                     # FVM Physics Loss Parameters
                     prediction_vol_neighbors=prediction_vol_neighbors,
                     datapipe=datapipe,  # Always pass datapipe for consistent unnormalized data loss
-                    physics_loss_weight=physics_loss_weight,
+                    physics_loss_weight_continuity=physics_loss_weight_continuity,
+                    physics_loss_weight_momentum=physics_loss_weight_momentum,
                 )
 
             running_vloss += loss.item()
@@ -293,7 +295,8 @@ def train_epoch(
     autocast_enabled=None,
     grad_clip_enabled=None,
     grad_max_norm=None,
-    physics_loss_weight=1.0,
+    physics_loss_weight_continuity=1.0,
+    physics_loss_weight_momentum=1.0,
 ):
     dm = DistributedManager()
 
@@ -354,7 +357,8 @@ def train_epoch(
                     # FVM Physics Loss Parameters
                     prediction_vol_neighbors=prediction_vol_neighbors,
                     datapipe=datapipe,  # Always pass datapipe for consistent unnormalized data loss
-                    physics_loss_weight=physics_loss_weight,
+                    physics_loss_weight_continuity=physics_loss_weight_continuity,
+                    physics_loss_weight_momentum=physics_loss_weight_momentum,
                 )
 
                 # Compute metrics:
@@ -513,7 +517,8 @@ def main(cfg: DictConfig) -> None:
     ######################################################
     add_physics_loss = getattr(cfg.train, "add_physics_loss", False)
     log_physics_loss = getattr(cfg.train, "log_physics_loss", False)
-    physics_loss_weight_base = getattr(cfg.train, "physics_loss_weight", 1.0)
+    physics_loss_weight_continuity_base = getattr(cfg.train, "physics_loss_weight_continuity", 1.0)
+    physics_loss_weight_momentum_base = getattr(cfg.train, "physics_loss_weight_momentum", 1.0)
     
     # Curriculum learning parameters
     curriculum_cfg = getattr(cfg.train, "physics_loss_curriculum", None)
@@ -772,9 +777,16 @@ def main(cfg: DictConfig) -> None:
         logger.info(f"Device {dist.device}, epoch {epoch_number}:")
 
         # Compute current physics loss weight based on curriculum
-        current_physics_loss_weight = compute_physics_loss_weight_curriculum(
+        current_physics_loss_weight_continuity = compute_physics_loss_weight_curriculum(
             epoch=epoch,
-            base_weight=physics_loss_weight_base,
+            base_weight=physics_loss_weight_continuity_base,
+            curriculum_enabled=curriculum_enabled,
+            warmup_epochs=warmup_epochs,
+            rampup_epochs=rampup_epochs,
+        )
+        current_physics_loss_weight_momentum = compute_physics_loss_weight_curriculum(
+            epoch=epoch,
+            base_weight=physics_loss_weight_momentum_base,
             curriculum_enabled=curriculum_enabled,
             warmup_epochs=warmup_epochs,
             rampup_epochs=rampup_epochs,
@@ -786,7 +798,10 @@ def main(cfg: DictConfig) -> None:
             )
             if curriculum_enabled:
                 logger.info(
-                    f"Physics loss curriculum enabled: warmup={warmup_epochs} epochs, rampup={rampup_epochs} epochs, final_weight={physics_loss_weight_base}"
+                    f"Physics loss curriculum enabled: warmup={warmup_epochs} epochs, rampup={rampup_epochs} epochs"
+                )
+                logger.info(
+                    f"Final weights: continuity={physics_loss_weight_continuity_base}, momentum={physics_loss_weight_momentum_base}"
                 )
         
         if epoch == init_epoch and log_physics_loss and not add_physics_loss:
@@ -794,10 +809,11 @@ def main(cfg: DictConfig) -> None:
                 "Physics loss logging enabled - FVM residuals will be computed during validation for monitoring (not used in training)"
             )
         
-        # Log current physics loss weight
+        # Log current physics loss weights
         if add_physics_loss and dist.rank == 0:
-            logger.info(f"Epoch {epoch}: Physics loss weight = {current_physics_loss_weight:.6f}")
-            writer.add_scalar("Hyperparameters/physics_loss_weight", current_physics_loss_weight, epoch)
+            logger.info(f"Epoch {epoch}: Physics loss weights - continuity={current_physics_loss_weight_continuity:.6f}, momentum={current_physics_loss_weight_momentum:.6f}")
+            writer.add_scalar("Hyperparameters/physics_loss_weight_continuity", current_physics_loss_weight_continuity, epoch)
+            writer.add_scalar("Hyperparameters/physics_loss_weight_momentum", current_physics_loss_weight_momentum, epoch)
 
         # This controls what indices to use for each epoch.
         train_sampler.set_epoch(epoch)
@@ -835,7 +851,8 @@ def main(cfg: DictConfig) -> None:
             autocast_enabled=cfg.train.amp.enabled,
             grad_clip_enabled=cfg.train.amp.clip_grad,
             grad_max_norm=cfg.train.amp.grad_max_norm,
-            physics_loss_weight=current_physics_loss_weight,  # Use curriculum weight for training
+            physics_loss_weight_continuity=current_physics_loss_weight_continuity,
+            physics_loss_weight_momentum=current_physics_loss_weight_momentum,
         )
         epoch_end_time = time.perf_counter()
         logger.info(
@@ -860,7 +877,8 @@ def main(cfg: DictConfig) -> None:
             add_physics_loss=add_physics_loss,
             log_physics_loss=log_physics_loss,
             autocast_enabled=cfg.train.amp.enabled,
-            physics_loss_weight=1.0,  # Always use 1.0 for validation to ensure consistent comparison
+            physics_loss_weight_continuity=1.0,
+            physics_loss_weight_momentum=1.0,
         )
 
         scheduler.step()
