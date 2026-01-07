@@ -277,7 +277,7 @@ def test_conv_rnn_seq2seq_constructor(device):
 
     for kw_args in arg_list:
         # Construct model
-        model = One2ManyRNN(**kw_args).to(device)
+        model = Seq2SeqRNN(**kw_args).to(device)
 
         bsize = random.randint(1, 4)
         if kw_args["dimension"] == 2:

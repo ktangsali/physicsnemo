@@ -17,10 +17,10 @@
 import pytest
 import torch
 
-from physicsnemo.models.rnn.layers import (
-    _ConvLayer,
-    _ConvResidualBlock,
-    _TransposeConvLayer,
+from physicsnemo.nn.conv_layers import (
+    ConvLayer,
+    ConvResidualBlock,
+    TransposeConvLayer,
 )
 
 
@@ -34,7 +34,7 @@ def test_conv_layer(activation_fn, stride, dimension):
     out_channels = 16
     kernel_size = 3
 
-    layer = _ConvLayer(
+    layer = ConvLayer(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
@@ -67,7 +67,7 @@ def test_transconv_layer(activation_fn, stride, dimension):
     out_channels = 16
     kernel_size = 3
 
-    layer = _TransposeConvLayer(
+    layer = TransposeConvLayer(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
@@ -109,7 +109,7 @@ def test_residual_block_layer(
     out_channels = 16
 
     # Just test constructor
-    layer = _ConvResidualBlock(
+    layer = ConvResidualBlock(
         in_channels=in_channels,
         out_channels=out_channels,
         dimension=dimension,
