@@ -444,9 +444,10 @@ class ConvLayer(Module):
                 _get_same_padding(ih, self.kernel_size, self.stride),
                 _get_same_padding(iw, self.kernel_size, self.stride),
             )
+            # F.pad expects padding in reverse dimension order: [left, right, top, bottom]
             x = F.pad(
                 x,
-                [pad_h // 2, pad_h - pad_h // 2, pad_w // 2, pad_w - pad_w // 2],
+                [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2],
                 mode="constant",
                 value=0.0,
             )
@@ -457,15 +458,16 @@ class ConvLayer(Module):
                 _get_same_padding(ih, self.kernel_size, self.stride),
                 _get_same_padding(iw, self.kernel_size, self.stride),
             )
+            # F.pad expects padding in reverse dimension order: [left, right, top, bottom, front, back]
             x = F.pad(
                 x,
                 [
-                    pad_d // 2,
-                    pad_d - pad_d // 2,
-                    pad_h // 2,
-                    pad_h - pad_h // 2,
                     pad_w // 2,
                     pad_w - pad_w // 2,
+                    pad_h // 2,
+                    pad_h - pad_h // 2,
+                    pad_d // 2,
+                    pad_d - pad_d // 2,
                 ],
                 mode="constant",
                 value=0.0,
