@@ -207,7 +207,10 @@ class Seq2SeqRNN(Module):
                 padding="valid",
             )
 
-    def forward(self, x: Float[Tensor, "batch channels tsteps *spatial"]) -> Float[Tensor, "batch channels tsteps *spatial"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch channels tsteps ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels tsteps ..."]:  # noqa: F722
         r"""
         Forward pass.
 
@@ -235,14 +238,14 @@ class Seq2SeqRNN(Module):
                     f"Expected {expected_ndim}D input tensor, "
                     f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
-            
+
             # Check time dimension matches nr_tsteps
             if x.shape[2] != self.nr_tsteps:
                 raise ValueError(
                     f"Expected input with {self.nr_tsteps} timesteps (dimension 2), "
                     f"got {x.shape[2]} timesteps in tensor with shape {tuple(x.shape)}"
                 )
-        
+
         # Encoding step - encode all input timesteps
         encoded_inputs = []
         for t in range(self.nr_tsteps):
@@ -256,7 +259,9 @@ class Seq2SeqRNN(Module):
         for t in range(x.size(2)):  # time dimension of the input signal
             if t == 0:
                 # Initialize hidden state to zeros
-                h = torch.zeros(list(x_in.size())).to(x.device)  # (B, C_latent, *spatial)
+                h = torch.zeros(list(x_in.size())).to(
+                    x.device
+                )  # (B, C_latent, *spatial)
             x_in_rnn = encoded_inputs[t]
             # Update hidden state with current timestep
             h = self.rnn_layer(x_in_rnn, h)  # (B, C_latent, *spatial)
@@ -276,7 +281,7 @@ class Seq2SeqRNN(Module):
         decoded_output = []
         for t in range(self.nr_tsteps):
             x_out = rnn_output[t]  # (B, C_latent, *spatial)
-            
+
             # Multi-resolution decoding with skip connections
             latent_context_grid = []
             for conv_layer, decoder in zip(self.conv_layers, self.decoder_layers):

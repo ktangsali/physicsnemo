@@ -391,7 +391,10 @@ class ConvLayer(Module):
 
         self.reset_parameters()
 
-    def exec_activation_fn(self, x: Float[Tensor, "batch channels *spatial"]) -> Float[Tensor, "batch channels *spatial"]:
+    def exec_activation_fn(
+        self,
+        x: Float[Tensor, "batch channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
         r"""
         Executes activation function on the input.
 
@@ -414,7 +417,10 @@ class ConvLayer(Module):
         nn.init.constant_(self.conv.bias, 0)
         nn.init.xavier_uniform_(self.conv.weight)
 
-    def forward(self, x: Float[Tensor, "batch in_channels *spatial"]) -> Float[Tensor, "batch out_channels *spatial"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch in_channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch out_channels ..."]:  # noqa: F722
         r"""Forward pass with same padding."""
         ### Input validation
         if not torch.compiler.is_compiling():
@@ -424,7 +430,7 @@ class ConvLayer(Module):
                     f"Expected {self.dimension}D input tensor (excluding batch and channel dims), "
                     f"got {input_length}D tensor with shape {tuple(x.shape)}"
                 )
-        
+
         input_length = len(x.size()) - 2  # exclude channel and batch dims
 
         # Apply same padding based on dimensionality
@@ -553,7 +559,10 @@ class TransposeConvLayer(Module):
 
         self.reset_parameters()
 
-    def exec_activation_fn(self, x: Float[Tensor, "batch channels *spatial"]) -> Float[Tensor, "batch channels *spatial"]:
+    def exec_activation_fn(
+        self,
+        x: Float[Tensor, "batch channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
         r"""
         Executes activation function on the input.
 
@@ -576,7 +585,10 @@ class TransposeConvLayer(Module):
         nn.init.constant_(self.trans_conv.bias, 0)
         nn.init.xavier_uniform_(self.trans_conv.weight)
 
-    def forward(self, x: Float[Tensor, "batch in_channels *spatial"]) -> Float[Tensor, "batch out_channels *spatial"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch in_channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch out_channels ..."]:  # noqa: F722
         r"""Forward pass with transposed convolution and cropping."""
         ### Input validation
         if not torch.compiler.is_compiling():
@@ -586,7 +598,7 @@ class TransposeConvLayer(Module):
                     f"Expected {self.dimension}D input tensor (excluding batch and channel dims), "
                     f"got {input_length}D tensor with shape {tuple(x.shape)}"
                 )
-        
+
         orig_x = x
         input_length = len(orig_x.size()) - 2  # exclude channel and batch dims
 
@@ -696,7 +708,10 @@ class ConvGRULayer(Module):
             dimension=dimension,
         )
 
-    def exec_activation_fn(self, x: Float[Tensor, "batch channels *spatial"]) -> Float[Tensor, "batch channels *spatial"]:
+    def exec_activation_fn(
+        self,
+        x: Float[Tensor, "batch channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
         r"""
         Executes activation function on the input.
 
@@ -714,9 +729,9 @@ class ConvGRULayer(Module):
 
     def forward(
         self,
-        x: Float[Tensor, "batch in_features *spatial"],
-        hidden: Float[Tensor, "batch hidden_size *spatial"]
-    ) -> Float[Tensor, "batch hidden_size *spatial"]:
+        x: Float[Tensor, "batch in_features ..."],  # noqa: F722
+        hidden: Float[Tensor, "batch hidden_size ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch hidden_size ..."]:  # noqa: F722
         r"""Forward pass implementing GRU update."""
         ### Input validation
         if not torch.compiler.is_compiling():
@@ -735,21 +750,21 @@ class ConvGRULayer(Module):
                     f"Input and hidden state must have matching batch size and spatial dims. "
                     f"Got input shape {tuple(x.shape)} and hidden shape {tuple(hidden.shape)}"
                 )
-        
+
         # Concatenate input and hidden state
         concat = torch.cat((x, hidden), dim=1)  # (B, in_features + hidden_size, *)
-        
+
         # Compute reset and update gates
         conv_concat = self.conv_1(concat)  # (B, 2 * hidden_size, *)
         conv_r, conv_z = torch.split(conv_concat, self.hidden_size, 1)
 
         reset_gate = torch.special.expit(conv_r)  # (B, hidden_size, *)
         update_gate = torch.special.expit(conv_z)  # (B, hidden_size, *)
-        
+
         # Compute candidate hidden state
         concat = torch.cat((x, torch.mul(hidden, reset_gate)), dim=1)
         n = self.exec_activation_fn(self.conv_2(concat))  # (B, hidden_size, *)
-        
+
         # Compute next hidden state
         h_next = torch.mul((1 - update_gate), n) + torch.mul(update_gate, hidden)
 
@@ -853,7 +868,10 @@ class ConvResidualBlock(Module):
                 dimension=self.dimension,
             )
 
-    def exec_activation_fn(self, x: Float[Tensor, "batch channels *spatial"]) -> Float[Tensor, "batch channels *spatial"]:
+    def exec_activation_fn(
+        self,
+        x: Float[Tensor, "batch channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
         r"""
         Executes activation function on the input.
 
@@ -869,7 +887,10 @@ class ConvResidualBlock(Module):
         """
         return self.activation_fn(x)
 
-    def forward(self, x: Float[Tensor, "batch in_channels *spatial"]) -> Float[Tensor, "batch out_channels *spatial"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch in_channels ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch out_channels ..."]:  # noqa: F722
         r"""Forward pass with residual connection."""
         ### Input validation
         if not torch.compiler.is_compiling():
@@ -879,7 +900,7 @@ class ConvResidualBlock(Module):
                     f"Expected {self.dimension}D input tensor (excluding batch and channel dims), "
                     f"got {input_length}D tensor with shape {tuple(x.shape)}"
                 )
-        
+
         orig_x = x
 
         # Apply layer normalization and activation at the beginning if specified
@@ -900,7 +921,7 @@ class ConvResidualBlock(Module):
         # Second activation and convolution
         x = self.exec_activation_fn(x)
         x = self.conv_2(x)
-        
+
         # Apply gating if specified
         if self.gated:
             x_1, x_2 = torch.split(x, x.size(1) // 2, 1)
@@ -956,4 +977,3 @@ class ConvResidualBlock(Module):
             pass
 
         return orig_x + x
-

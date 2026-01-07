@@ -206,7 +206,10 @@ class One2ManyRNN(Module):
                 padding="valid",
             )
 
-    def forward(self, x: Float[Tensor, "batch channels 1 *spatial"]) -> Float[Tensor, "batch channels tsteps *spatial"]:
+    def forward(
+        self,
+        x: Float[Tensor, "batch channels 1 ..."],  # noqa: F722
+    ) -> Float[Tensor, "batch channels tsteps ..."]:  # noqa: F722
         r"""
         Forward pass.
 
@@ -233,14 +236,14 @@ class One2ManyRNN(Module):
                     f"Expected {expected_ndim}D input tensor, "
                     f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
-            
+
             # Check time dimension is 1
             if x.shape[2] != 1:
                 raise ValueError(
                     f"Expected input with 1 timestep (dimension 2), "
                     f"got {x.shape[2]} timesteps in tensor with shape {tuple(x.shape)}"
                 )
-        
+
         # Encoding step - encode the single input timestep
         encoded_inputs = []
         for t in range(1):
@@ -255,7 +258,9 @@ class One2ManyRNN(Module):
         for t in range(self.nr_tsteps):
             if t == 0:
                 # Initialize hidden state to zeros
-                h = torch.zeros(list(x_in.size())).to(x.device)  # (B, C_latent, *spatial)
+                h = torch.zeros(list(x_in.size())).to(
+                    x.device
+                )  # (B, C_latent, *spatial)
                 x_in_rnn = encoded_inputs[0]
             # Update hidden state
             h = self.rnn_layer(x_in_rnn, h)  # (B, C_latent, *spatial)
@@ -266,7 +271,7 @@ class One2ManyRNN(Module):
         decoded_output = []
         for t in range(self.nr_tsteps):
             x_out = rnn_output[t]  # (B, C_latent, *spatial)
-            
+
             # Multi-resolution decoding with skip connections
             latent_context_grid = []
             for conv_layer, decoder in zip(self.conv_layers, self.decoder_layers):
