@@ -24,7 +24,6 @@ from jaxtyping import Float
 from torch import Tensor
 
 from physicsnemo.core.module import Module
-
 from physicsnemo.nn.utils.utils import _validate_amp
 from physicsnemo.nn.utils.weight_init import _weight_init
 
