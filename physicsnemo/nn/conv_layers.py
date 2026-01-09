@@ -388,9 +388,9 @@ class ConvLayer(Module):
         else:
             raise ValueError("Only 1D, 2D and 3D dimensions are supported")
 
-        self.reset_parameters()
+        self._reset_parameters()
 
-    def exec_activation_fn(
+    def _exec_activation_fn(
         self,
         x: Float[Tensor, "batch channels ..."],  # noqa: F722
     ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
@@ -409,7 +409,7 @@ class ConvLayer(Module):
         """
         return self.activation_fn(x)
 
-    def reset_parameters(self) -> None:
+    def _reset_parameters(self) -> None:
         r"""
         Initialization for network parameters.
         """
@@ -477,7 +477,7 @@ class ConvLayer(Module):
 
         # Apply activation if not identity
         if self.activation_fn is not nn.Identity():
-            x = self.exec_activation_fn(x)
+            x = self._exec_activation_fn(x)
 
         return x
 
@@ -558,9 +558,9 @@ class TransposeConvLayer(Module):
         else:
             raise ValueError("Only 1D, 2D and 3D dimensions are supported")
 
-        self.reset_parameters()
+        self._reset_parameters()
 
-    def exec_activation_fn(
+    def _exec_activation_fn(
         self,
         x: Float[Tensor, "batch channels ..."],  # noqa: F722
     ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
@@ -579,7 +579,7 @@ class TransposeConvLayer(Module):
         """
         return self.activation_fn(x)
 
-    def reset_parameters(self) -> None:
+    def _reset_parameters(self) -> None:
         r"""
         Initialization for network parameters.
         """
@@ -648,7 +648,7 @@ class TransposeConvLayer(Module):
 
         # Apply activation if not identity
         if self.activation_fn is not nn.Identity():
-            x = self.exec_activation_fn(x)
+            x = self._exec_activation_fn(x)
 
         return x
 
@@ -709,7 +709,7 @@ class ConvGRULayer(Module):
             dimension=dimension,
         )
 
-    def exec_activation_fn(
+    def _exec_activation_fn(
         self,
         x: Float[Tensor, "batch channels ..."],  # noqa: F722
     ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
@@ -764,7 +764,7 @@ class ConvGRULayer(Module):
 
         # Compute candidate hidden state
         concat = torch.cat((x, torch.mul(hidden, reset_gate)), dim=1)
-        n = self.exec_activation_fn(self.conv_2(concat))  # (B, hidden_size, *)
+        n = self._exec_activation_fn(self.conv_2(concat))  # (B, hidden_size, *)
 
         # Compute next hidden state
         h_next = torch.mul((1 - update_gate), n) + torch.mul(update_gate, hidden)
@@ -869,7 +869,7 @@ class ConvResidualBlock(Module):
                 dimension=self.dimension,
             )
 
-    def exec_activation_fn(
+    def _exec_activation_fn(
         self,
         x: Float[Tensor, "batch channels ..."],  # noqa: F722
     ) -> Float[Tensor, "batch channels ..."]:  # noqa: F722
@@ -909,7 +909,7 @@ class ConvResidualBlock(Module):
             if self.layer_normalization:
                 layer_norm = nn.LayerNorm(x.size()[1:], elementwise_affine=False)
                 x = layer_norm(x)
-            x = self.exec_activation_fn(x)
+            x = self._exec_activation_fn(x)
 
         # First convolutional layer
         x = self.conv_1(x)
@@ -920,7 +920,7 @@ class ConvResidualBlock(Module):
             x = layer_norm(x)
 
         # Second activation and convolution
-        x = self.exec_activation_fn(x)
+        x = self._exec_activation_fn(x)
         x = self.conv_2(x)
 
         # Apply gating if specified
