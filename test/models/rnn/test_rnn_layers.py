@@ -22,6 +22,7 @@ from physicsnemo.nn.conv_layers import (
     ConvResidualBlock,
     TransposeConvLayer,
 )
+from test import common
 
 
 @pytest.mark.parametrize("activation_fn", [torch.nn.ReLU(), torch.nn.Identity()])
@@ -129,3 +130,74 @@ def test_residual_block_layer(
     size_out = fig_size
 
     assert outvar.shape == (bsize, out_channels) + dimension * (size_out,)
+
+
+def test_conv_layer_forward_accuracy(device):
+    """Test ConvLayer forward pass accuracy"""
+    torch.manual_seed(0)
+
+    layer = ConvLayer(
+        in_channels=4,
+        out_channels=8,
+        kernel_size=3,
+        stride=1,
+        dimension=2,
+        activation_fn=torch.nn.ReLU(),
+    ).to(device)
+
+    invar = torch.randn(2, 4, 16, 16).to(device)
+
+    assert common.validate_forward_accuracy(
+        layer,
+        (invar,),
+        file_name="models/rnn/data/conv_layer_output.pth",
+        atol=1e-4,
+    )
+
+
+def test_transconv_layer_forward_accuracy(device):
+    """Test TransposeConvLayer forward pass accuracy"""
+    torch.manual_seed(0)
+
+    layer = TransposeConvLayer(
+        in_channels=8,
+        out_channels=4,
+        kernel_size=3,
+        stride=2,
+        dimension=2,
+        activation_fn=torch.nn.ReLU(),
+    ).to(device)
+
+    invar = torch.randn(2, 8, 8, 8).to(device)
+
+    assert common.validate_forward_accuracy(
+        layer,
+        (invar,),
+        file_name="models/rnn/data/transconv_layer_output.pth",
+        atol=1e-4,
+    )
+
+
+def test_residual_block_forward_accuracy(device):
+    """Test ConvResidualBlock forward pass accuracy"""
+    torch.manual_seed(0)
+
+    layer = ConvResidualBlock(
+        in_channels=8,
+        out_channels=8,
+        dimension=2,
+        stride=1,
+        gated=True,
+        layer_normalization=False,
+        activation_fn=torch.nn.ReLU(),
+        begin_activation_fn=True,
+    ).to(device)
+
+    invar = torch.randn(2, 8, 16, 16).to(device)
+
+    assert common.validate_forward_accuracy(
+        layer,
+        (invar,),
+        file_name="models/rnn/data/residual_block_output.pth",
+        atol=1e-3,
+    )
