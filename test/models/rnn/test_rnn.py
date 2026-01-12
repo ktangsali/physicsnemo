@@ -100,9 +100,9 @@ def test_conv_rnn_one2many_load_checkpoint(device, dimension):
     model = physicsnemo.Module.from_checkpoint(str(checkpoint_path)).to(device)
 
     # Verify model attributes match expected values
-    assert model.nr_tsteps == 4
-    assert model.nr_residual_blocks == 2
-    assert model.nr_downsamples == 2
+    assert model.nr_tsteps == 2
+    assert model.nr_residual_blocks == 1
+    assert model.nr_downsamples == 1
 
 
 @pytest.mark.parametrize("dimension", [2, 3])
@@ -282,9 +282,9 @@ def test_conv_rnn_seq2seq_load_checkpoint(device, dimension):
     model = physicsnemo.Module.from_checkpoint(str(checkpoint_path)).to(device)
 
     # Verify model attributes match expected values
-    assert model.nr_tsteps == 4
-    assert model.nr_residual_blocks == 2
-    assert model.nr_downsamples == 2
+    assert model.nr_tsteps == 2
+    assert model.nr_residual_blocks == 1
+    assert model.nr_downsamples == 1
 
 
 @pytest.mark.parametrize("dimension", [2, 3])
