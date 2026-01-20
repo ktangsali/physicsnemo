@@ -20,6 +20,7 @@ from typing import List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from jaxtyping import Float
 from torch import Tensor
 
 # import physicsnemo  # noqa: F401 for docs
@@ -36,26 +37,51 @@ from physicsnemo.models.mlp import FullyConnected
 
 
 class FNO1DEncoder(nn.Module):
-    """1D Spectral encoder for FNO
+    r"""1D Spectral encoder for FNO.
+
+    This encoder applies a lifting network followed by spectral convolution layers
+    in the Fourier domain for 1D input data.
 
     Parameters
     ----------
-    in_channels : int, optional
-        Number of input channels, by default 1
-    num_fno_layers : int, optional
-        Number of spectral convolutional layers, by default 4
-    fno_layer_size : int, optional
-        Latent features size in spectral convolutions, by default 32
-    num_fno_modes : Union[int, List[int]], optional
-        Number of Fourier modes kept in spectral convolutions, by default 16
-    padding :  Union[int, List[int]], optional
-        Domain padding for spectral convolutions, by default 8
-    padding_type : str, optional
-        Type of padding for spectral convolutions, by default "constant"
-    activation_fn : nn.Module, optional
-        Activation function, by default nn.GELU
-    coord_features : bool, optional
-        Use coordinate grid as additional feature map, by default True
+    in_channels : int, optional, default=1
+        Number of input channels.
+    num_fno_layers : int, optional, default=4
+        Number of spectral convolutional layers.
+    fno_layer_size : int, optional, default=32
+        Latent features size in spectral convolutions.
+    num_fno_modes : Union[int, List[int]], optional, default=16
+        Number of Fourier modes kept in spectral convolutions.
+    padding : Union[int, List[int]], optional, default=8
+        Domain padding for spectral convolutions.
+    padding_type : str, optional, default="constant"
+        Type of padding for spectral convolutions.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function.
+    coord_features : bool, optional, default=True
+        Use coordinate grid as additional feature map.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, C_{in}, X)` where :math:`B` is batch size,
+        :math:`C_{in}` is the number of input channels, and :math:`X` is the spatial
+        dimension.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, C_{latent}, X)` where :math:`C_{latent}`
+        is ``fno_layer_size``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> encoder = FNO1DEncoder(in_channels=3, fno_layer_size=32, num_fno_modes=8)
+    >>> x = torch.randn(4, 3, 64)
+    >>> output = encoder(x)
+    >>> output.shape
+    torch.Size([4, 32, 64])
     """
 
     def __init__(
@@ -96,7 +122,7 @@ class FNO1DEncoder(nn.Module):
         self.build_fno(num_fno_modes)
 
     def build_lift_network(self) -> None:
-        """construct network for lifting variables to latent space."""
+        r"""Construct network for lifting variables to latent space."""
         self.lift_network = torch.nn.Sequential()
         self.lift_network.append(
             layers.Conv1dFCLayer(self.in_channels, int(self.fno_width / 2))
@@ -107,12 +133,12 @@ class FNO1DEncoder(nn.Module):
         )
 
     def build_fno(self, num_fno_modes: List[int]) -> None:
-        """construct FNO block.
+        r"""Construct FNO spectral convolution layers.
+
         Parameters
         ----------
         num_fno_modes : List[int]
-            Number of Fourier modes kept in spectral convolutions
-
+            Number of Fourier modes kept in spectral convolutions.
         """
         # Build Neural Fourier Operators
         self.spconv_layers = nn.ModuleList()
@@ -123,15 +149,30 @@ class FNO1DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv1d(self.fno_width, self.fno_width, 1))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self, x: Float[Tensor, "batch in_channels x"]
+    ) -> Float[Tensor, "batch latent_channels x"]:
+        r"""Forward pass of the 1D FNO encoder."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if x.ndim != 3:
+                raise ValueError(
+                    f"Expected 3D input tensor (B, C, X), got {x.ndim}D tensor "
+                    f"with shape {tuple(x.shape)}"
+                )
+
+        # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
+        # Lift input to latent space
         x = self.lift_network(x)
-        # (left, right)
+
+        # Apply padding for spectral convolution
         x = F.pad(x, (0, self.pad[0]), mode=self.padding_type)
-        # Spectral layers
+
+        # Apply spectral convolution layers
         for k, conv_w in enumerate(zip(self.conv_layers, self.spconv_layers)):
             conv, w = conv_w
             if k < len(self.conv_layers) - 1:
@@ -139,23 +180,24 @@ class FNO1DEncoder(nn.Module):
             else:
                 x = conv(x) + w(x)
 
+        # Remove padding
         x = x[..., : self.ipad[0]]
         return x
 
     def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
-        """Creates 1D meshgrid feature
+        r"""Create 1D meshgrid feature.
 
         Parameters
         ----------
         shape : List[int]
-            Tensor shape
+            Tensor shape as ``[batch, channels, x]``.
         device : torch.device
-            Device model is on
+            Device model is on.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Meshgrid tensor of shape :math:`(B, 1, X)`.
         """
         bsize, size_x = shape[0], shape[2]
         grid_x = torch.linspace(0, 1, size_x, dtype=torch.float32, device=device)
@@ -163,35 +205,36 @@ class FNO1DEncoder(nn.Module):
         return grid_x
 
     def grid_to_points(self, value: Tensor) -> Tuple[Tensor, List[int]]:
-        """converting from grid based (image) to point based representation
+        r"""Convert from grid-based (image) to point-based representation.
 
         Parameters
         ----------
-        value : Meshgrid tensor
+        value : Tensor
+            Grid tensor of shape :math:`(B, C, X)`.
 
         Returns
         -------
-        Tuple
-            Tensor, meshgrid shape
+        Tuple[Tensor, List[int]]
+            Tuple of (flattened tensor, original shape).
         """
         y_shape = list(value.size())
         output = torch.permute(value, (0, 2, 1))
         return output.reshape(-1, output.size(-1)), y_shape
 
     def points_to_grid(self, value: Tensor, shape: List[int]) -> Tensor:
-        """converting from point based to grid based (image) representation
+        r"""Convert from point-based to grid-based (image) representation.
 
         Parameters
         ----------
         value : Tensor
-            Tensor
+            Point tensor of shape :math:`(B \times X, C)`.
         shape : List[int]
-            meshgrid shape
+            Original grid shape as ``[B, C, X]``.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Grid tensor of shape :math:`(B, C, X)`.
         """
         output = value.reshape(shape[0], shape[2], value.size(-1))
         return torch.permute(output, (0, 2, 1))
@@ -205,26 +248,51 @@ class FNO1DEncoder(nn.Module):
 
 
 class FNO2DEncoder(nn.Module):
-    """2D Spectral encoder for FNO
+    r"""2D Spectral encoder for FNO.
+
+    This encoder applies a lifting network followed by spectral convolution layers
+    in the Fourier domain for 2D input data.
 
     Parameters
     ----------
-    in_channels : int, optional
-        Number of input channels, by default 1
-    num_fno_layers : int, optional
-        Number of spectral convolutional layers, by default 4
-    fno_layer_size : int, optional
-        Latent features size in spectral convolutions, by default 32
-    num_fno_modes : Union[int, List[int]], optional
-        Number of Fourier modes kept in spectral convolutions, by default 16
-    padding :  Union[int, List[int]], optional
-        Domain padding for spectral convolutions, by default 8
-    padding_type : str, optional
-        Type of padding for spectral convolutions, by default "constant"
-    activation_fn : nn.Module, optional
-        Activation function, by default nn.GELU
-    coord_features : bool, optional
-        Use coordinate grid as additional feature map, by default True
+    in_channels : int, optional, default=1
+        Number of input channels.
+    num_fno_layers : int, optional, default=4
+        Number of spectral convolutional layers.
+    fno_layer_size : int, optional, default=32
+        Latent features size in spectral convolutions.
+    num_fno_modes : Union[int, List[int]], optional, default=16
+        Number of Fourier modes kept in spectral convolutions.
+    padding : Union[int, List[int]], optional, default=8
+        Domain padding for spectral convolutions.
+    padding_type : str, optional, default="constant"
+        Type of padding for spectral convolutions.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function.
+    coord_features : bool, optional, default=True
+        Use coordinate grid as additional feature map.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, C_{in}, H, W)` where :math:`B` is batch size,
+        :math:`C_{in}` is the number of input channels, and :math:`H, W` are spatial
+        dimensions.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, C_{latent}, H, W)` where :math:`C_{latent}`
+        is ``fno_layer_size``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> encoder = FNO2DEncoder(in_channels=3, fno_layer_size=32, num_fno_modes=8)
+    >>> x = torch.randn(4, 3, 32, 32)
+    >>> output = encoder(x)
+    >>> output.shape
+    torch.Size([4, 32, 32, 32])
     """
 
     def __init__(
@@ -265,7 +333,7 @@ class FNO2DEncoder(nn.Module):
         self.build_fno(num_fno_modes)
 
     def build_lift_network(self) -> None:
-        """construct network for lifting variables to latent space."""
+        r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
         self.lift_network.append(
@@ -277,12 +345,12 @@ class FNO2DEncoder(nn.Module):
         )
 
     def build_fno(self, num_fno_modes: List[int]) -> None:
-        """construct FNO block.
+        r"""Construct FNO spectral convolution layers.
+
         Parameters
         ----------
         num_fno_modes : List[int]
-            Number of Fourier modes kept in spectral convolutions
-
+            Number of Fourier modes kept in spectral convolutions.
         """
         # Build Neural Fourier Operators
         self.spconv_layers = nn.ModuleList()
@@ -295,20 +363,30 @@ class FNO2DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv2d(self.fno_width, self.fno_width, 1))
 
-    def forward(self, x: Tensor) -> Tensor:
-        if x.dim() != 4:
-            raise ValueError(
-                "Only 4D tensors [batch, in_channels, grid_x, grid_y] accepted for 2D FNO"
-            )
+    def forward(
+        self, x: Float[Tensor, "batch in_channels height width"]
+    ) -> Float[Tensor, "batch latent_channels height width"]:
+        r"""Forward pass of the 2D FNO encoder."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if x.ndim != 4:
+                raise ValueError(
+                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
+                    f"with shape {tuple(x.shape)}"
+                )
 
+        # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
+        # Lift input to latent space
         x = self.lift_network(x)
-        # (left, right, top, bottom)
+
+        # Apply padding for spectral convolution
         x = F.pad(x, (0, self.pad[1], 0, self.pad[0]), mode=self.padding_type)
-        # Spectral layers
+
+        # Apply spectral convolution layers
         for k, conv_w in enumerate(zip(self.conv_layers, self.spconv_layers)):
             conv, w = conv_w
             if k < len(self.conv_layers) - 1:
@@ -316,25 +394,25 @@ class FNO2DEncoder(nn.Module):
             else:
                 x = conv(x) + w(x)
 
-        # remove padding
+        # Remove padding
         x = x[..., : self.ipad[0], : self.ipad[1]]
 
         return x
 
     def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
-        """Creates 2D meshgrid feature
+        r"""Create 2D meshgrid feature.
 
         Parameters
         ----------
         shape : List[int]
-            Tensor shape
+            Tensor shape as ``[batch, channels, height, width]``.
         device : torch.device
-            Device model is on
+            Device model is on.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Meshgrid tensor of shape :math:`(B, 2, H, W)`.
         """
         bsize, size_x, size_y = shape[0], shape[2], shape[3]
         grid_x = torch.linspace(0, 1, size_x, dtype=torch.float32, device=device)
@@ -345,35 +423,36 @@ class FNO2DEncoder(nn.Module):
         return torch.cat((grid_x, grid_y), dim=1)
 
     def grid_to_points(self, value: Tensor) -> Tuple[Tensor, List[int]]:
-        """converting from grid based (image) to point based representation
+        r"""Convert from grid-based (image) to point-based representation.
 
         Parameters
         ----------
-        value : Meshgrid tensor
+        value : Tensor
+            Grid tensor of shape :math:`(B, C, H, W)`.
 
         Returns
         -------
-        Tuple
-            Tensor, meshgrid shape
+        Tuple[Tensor, List[int]]
+            Tuple of (flattened tensor, original shape).
         """
         y_shape = list(value.size())
         output = torch.permute(value, (0, 2, 3, 1))
         return output.reshape(-1, output.size(-1)), y_shape
 
     def points_to_grid(self, value: Tensor, shape: List[int]) -> Tensor:
-        """converting from point based to grid based (image) representation
+        r"""Convert from point-based to grid-based (image) representation.
 
         Parameters
         ----------
         value : Tensor
-            Tensor
+            Point tensor of shape :math:`(B \times H \times W, C)`.
         shape : List[int]
-            meshgrid shape
+            Original grid shape as ``[B, C, H, W]``.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Grid tensor of shape :math:`(B, C, H, W)`.
         """
         output = value.reshape(shape[0], shape[2], shape[3], value.size(-1))
         return torch.permute(output, (0, 3, 1, 2))
@@ -387,26 +466,51 @@ class FNO2DEncoder(nn.Module):
 
 
 class FNO3DEncoder(nn.Module):
-    """3D Spectral encoder for FNO
+    r"""3D Spectral encoder for FNO.
+
+    This encoder applies a lifting network followed by spectral convolution layers
+    in the Fourier domain for 3D input data.
 
     Parameters
     ----------
-    in_channels : int, optional
-        Number of input channels, by default 1
-    num_fno_layers : int, optional
-        Number of spectral convolutional layers, by default 4
-    fno_layer_size : int, optional
-        Latent features size in spectral convolutions, by default 32
-    num_fno_modes : Union[int, List[int]], optional
-        Number of Fourier modes kept in spectral convolutions, by default 16
-    padding :  Union[int, List[int]], optional
-        Domain padding for spectral convolutions, by default 8
-    padding_type : str, optional
-        Type of padding for spectral convolutions, by default "constant"
-    activation_fn : nn.Module, optional
-        Activation function, by default nn.GELU
-    coord_features : bool, optional
-        Use coordinate grid as additional feature map, by default True
+    in_channels : int, optional, default=1
+        Number of input channels.
+    num_fno_layers : int, optional, default=4
+        Number of spectral convolutional layers.
+    fno_layer_size : int, optional, default=32
+        Latent features size in spectral convolutions.
+    num_fno_modes : Union[int, List[int]], optional, default=16
+        Number of Fourier modes kept in spectral convolutions.
+    padding : Union[int, List[int]], optional, default=8
+        Domain padding for spectral convolutions.
+    padding_type : str, optional, default="constant"
+        Type of padding for spectral convolutions.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function.
+    coord_features : bool, optional, default=True
+        Use coordinate grid as additional feature map.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, C_{in}, D, H, W)` where :math:`B` is batch
+        size, :math:`C_{in}` is the number of input channels, and :math:`D, H, W` are
+        spatial dimensions.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, C_{latent}, D, H, W)` where :math:`C_{latent}`
+        is ``fno_layer_size``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> encoder = FNO3DEncoder(in_channels=3, fno_layer_size=32, num_fno_modes=8)
+    >>> x = torch.randn(4, 3, 16, 16, 16)
+    >>> output = encoder(x)
+    >>> output.shape
+    torch.Size([4, 32, 16, 16, 16])
     """
 
     def __init__(
@@ -448,7 +552,7 @@ class FNO3DEncoder(nn.Module):
         self.build_fno(num_fno_modes)
 
     def build_lift_network(self) -> None:
-        """construct network for lifting variables to latent space."""
+        r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
         self.lift_network.append(
@@ -460,12 +564,12 @@ class FNO3DEncoder(nn.Module):
         )
 
     def build_fno(self, num_fno_modes: List[int]) -> None:
-        """construct FNO block.
+        r"""Construct FNO spectral convolution layers.
+
         Parameters
         ----------
         num_fno_modes : List[int]
-            Number of Fourier modes kept in spectral convolutions
-
+            Number of Fourier modes kept in spectral convolutions.
         """
         # Build Neural Fourier Operators
         self.spconv_layers = nn.ModuleList()
@@ -482,19 +586,34 @@ class FNO3DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv3d(self.fno_width, self.fno_width, 1))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self, x: Float[Tensor, "batch in_channels depth height width"]
+    ) -> Float[Tensor, "batch latent_channels depth height width"]:
+        r"""Forward pass of the 3D FNO encoder."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if x.ndim != 5:
+                raise ValueError(
+                    f"Expected 5D input tensor (B, C, D, H, W), got {x.ndim}D tensor "
+                    f"with shape {tuple(x.shape)}"
+                )
+
+        # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
+        # Lift input to latent space
         x = self.lift_network(x)
-        # (left, right, top, bottom, front, back)
+
+        # Apply padding for spectral convolution
         x = F.pad(
             x,
             (0, self.pad[2], 0, self.pad[1], 0, self.pad[0]),
             mode=self.padding_type,
         )
-        # Spectral layers
+
+        # Apply spectral convolution layers
         for k, conv_w in enumerate(zip(self.conv_layers, self.spconv_layers)):
             conv, w = conv_w
             if k < len(self.conv_layers) - 1:
@@ -502,23 +621,24 @@ class FNO3DEncoder(nn.Module):
             else:
                 x = conv(x) + w(x)
 
+        # Remove padding
         x = x[..., : self.ipad[0], : self.ipad[1], : self.ipad[2]]
         return x
 
     def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
-        """Creates 3D meshgrid feature
+        r"""Create 3D meshgrid feature.
 
         Parameters
         ----------
         shape : List[int]
-            Tensor shape
+            Tensor shape as ``[batch, channels, depth, height, width]``.
         device : torch.device
-            Device model is on
+            Device model is on.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Meshgrid tensor of shape :math:`(B, 3, D, H, W)`.
         """
         bsize, size_x, size_y, size_z = shape[0], shape[2], shape[3], shape[4]
         grid_x = torch.linspace(0, 1, size_x, dtype=torch.float32, device=device)
@@ -531,35 +651,36 @@ class FNO3DEncoder(nn.Module):
         return torch.cat((grid_x, grid_y, grid_z), dim=1)
 
     def grid_to_points(self, value: Tensor) -> Tuple[Tensor, List[int]]:
-        """converting from grid based (image) to point based representation
+        r"""Convert from grid-based (image) to point-based representation.
 
         Parameters
         ----------
-        value : Meshgrid tensor
+        value : Tensor
+            Grid tensor of shape :math:`(B, C, D, H, W)`.
 
         Returns
         -------
-        Tuple
-            Tensor, meshgrid shape
+        Tuple[Tensor, List[int]]
+            Tuple of (flattened tensor, original shape).
         """
         y_shape = list(value.size())
         output = torch.permute(value, (0, 2, 3, 4, 1))
         return output.reshape(-1, output.size(-1)), y_shape
 
     def points_to_grid(self, value: Tensor, shape: List[int]) -> Tensor:
-        """converting from point based to grid based (image) representation
+        r"""Convert from point-based to grid-based (image) representation.
 
         Parameters
         ----------
         value : Tensor
-            Tensor
+            Point tensor of shape :math:`(B \times D \times H \times W, C)`.
         shape : List[int]
-            meshgrid shape
+            Original grid shape as ``[B, C, D, H, W]``.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Grid tensor of shape :math:`(B, C, D, H, W)`.
         """
         output = value.reshape(shape[0], shape[2], shape[3], shape[4], value.size(-1))
         return torch.permute(output, (0, 4, 1, 2, 3))
@@ -573,26 +694,51 @@ class FNO3DEncoder(nn.Module):
 
 
 class FNO4DEncoder(nn.Module):
-    """4D Spectral encoder for FNO
+    r"""4D Spectral encoder for FNO.
+
+    This encoder applies a lifting network followed by spectral convolution layers
+    in the Fourier domain for 4D input data (3D spatial + time).
 
     Parameters
     ----------
-    in_channels : int, optional
-        Number of input channels, by default 1
-    num_fno_layers : int, optional
-        Number of spectral convolutional layers, by default 4
-    fno_layer_size : int, optional
-        Latent features size in spectral convolutions, by default 32
-    num_fno_modes : Union[int, List[int]], optional
-        Number of Fourier modes kept in spectral convolutions, by default 16
-    padding :  Union[int, List[int]], optional
-        Domain padding for spectral convolutions, by default 8
-    padding_type : str, optional
-        Type of padding for spectral convolutions, by default "constant"
-    activation_fn : nn.Module, optional
-        Activation function, by default nn.GELU
-    coord_features : bool, optional
-        Use coordinate grid as additional feature map, by default True
+    in_channels : int, optional, default=1
+        Number of input channels.
+    num_fno_layers : int, optional, default=4
+        Number of spectral convolutional layers.
+    fno_layer_size : int, optional, default=32
+        Latent features size in spectral convolutions.
+    num_fno_modes : Union[int, List[int]], optional, default=16
+        Number of Fourier modes kept in spectral convolutions.
+    padding : Union[int, List[int]], optional, default=8
+        Domain padding for spectral convolutions.
+    padding_type : str, optional, default="constant"
+        Type of padding for spectral convolutions.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function.
+    coord_features : bool, optional, default=True
+        Use coordinate grid as additional feature map.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, C_{in}, X, Y, Z, T)` where :math:`B` is batch
+        size, :math:`C_{in}` is the number of input channels, and :math:`X, Y, Z, T`
+        are spatial and temporal dimensions.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, C_{latent}, X, Y, Z, T)` where
+        :math:`C_{latent}` is ``fno_layer_size``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> encoder = FNO4DEncoder(in_channels=3, fno_layer_size=32, num_fno_modes=4)
+    >>> x = torch.randn(2, 3, 8, 8, 8, 8)
+    >>> output = encoder(x)
+    >>> output.shape
+    torch.Size([2, 32, 8, 8, 8, 8])
     """
 
     def __init__(
@@ -634,7 +780,7 @@ class FNO4DEncoder(nn.Module):
         self.build_fno(num_fno_modes)
 
     def build_lift_network(self) -> None:
-        """construct network for lifting variables to latent space."""
+        r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
         self.lift_network.append(
@@ -646,12 +792,12 @@ class FNO4DEncoder(nn.Module):
         )
 
     def build_fno(self, num_fno_modes: List[int]) -> None:
-        """construct FNO block.
+        r"""Construct FNO spectral convolution layers.
+
         Parameters
         ----------
         num_fno_modes : List[int]
-            Number of Fourier modes kept in spectral convolutions
-
+            Number of Fourier modes kept in spectral convolutions.
         """
         # Build Neural Fourier Operators
         self.spconv_layers = nn.ModuleList()
@@ -671,19 +817,34 @@ class FNO4DEncoder(nn.Module):
                 layers.ConvNdKernel1Layer(self.fno_width, self.fno_width)
             )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self, x: Float[Tensor, "batch in_channels x y z t"]
+    ) -> Float[Tensor, "batch latent_channels x y z t"]:
+        r"""Forward pass of the 4D FNO encoder."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if x.ndim != 6:
+                raise ValueError(
+                    f"Expected 6D input tensor (B, C, X, Y, Z, T), got {x.ndim}D tensor "
+                    f"with shape {tuple(x.shape)}"
+                )
+
+        # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
+        # Lift input to latent space
         x = self.lift_network(x)
-        # (left, right, top, bottom, front, back, past, future)
+
+        # Apply padding for spectral convolution
         x = F.pad(
             x,
             (0, self.pad[3], 0, self.pad[2], 0, self.pad[1], 0, self.pad[0]),
             mode=self.padding_type,
         )
-        # Spectral layers
+
+        # Apply spectral convolution layers
         for k, conv_w in enumerate(zip(self.conv_layers, self.spconv_layers)):
             conv, w = conv_w
             if k < len(self.conv_layers) - 1:
@@ -691,23 +852,24 @@ class FNO4DEncoder(nn.Module):
             else:
                 x = conv(x) + w(x)
 
+        # Remove padding
         x = x[..., : self.ipad[0], : self.ipad[1], : self.ipad[2], : self.ipad[3]]
         return x
 
     def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
-        """Creates 4D meshgrid feature
+        r"""Create 4D meshgrid feature.
 
         Parameters
         ----------
         shape : List[int]
-            Tensor shape
+            Tensor shape as ``[batch, channels, x, y, z, t]``.
         device : torch.device
-            Device model is on
+            Device model is on.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Meshgrid tensor of shape :math:`(B, 4, X, Y, Z, T)`.
         """
         bsize, size_x, size_y, size_z, size_t = (
             shape[0],
@@ -730,35 +892,36 @@ class FNO4DEncoder(nn.Module):
         return torch.cat((grid_x, grid_y, grid_z, grid_t), dim=1)
 
     def grid_to_points(self, value: Tensor) -> Tuple[Tensor, List[int]]:
-        """converting from grid based (image) to point based representation
+        r"""Convert from grid-based (image) to point-based representation.
 
         Parameters
         ----------
-        value : Meshgrid tensor
+        value : Tensor
+            Grid tensor of shape :math:`(B, C, X, Y, Z, T)`.
 
         Returns
         -------
-        Tuple
-            Tensor, meshgrid shape
+        Tuple[Tensor, List[int]]
+            Tuple of (flattened tensor, original shape).
         """
         y_shape = list(value.size())
         output = torch.permute(value, (0, 2, 3, 4, 5, 1))
         return output.reshape(-1, output.size(-1)), y_shape
 
     def points_to_grid(self, value: Tensor, shape: List[int]) -> Tensor:
-        """converting from point based to grid based (image) representation
+        r"""Convert from point-based to grid-based (image) representation.
 
         Parameters
         ----------
         value : Tensor
-            Tensor
+            Point tensor of shape :math:`(B \times X \times Y \times Z \times T, C)`.
         shape : List[int]
-            meshgrid shape
+            Original grid shape as ``[B, C, X, Y, Z, T]``.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor
+            Grid tensor of shape :math:`(B, C, X, Y, Z, T)`.
         """
         output = value.reshape(
             shape[0], shape[2], shape[3], shape[4], shape[5], value.size(-1)
@@ -790,46 +953,65 @@ class MetaData(ModelMetaData):
 
 
 class FNO(Module):
-    """Fourier neural operator (FNO) model.
+    r"""Fourier neural operator (FNO) model.
 
-    Note
-    ----
     The FNO architecture supports options for 1D, 2D, 3D and 4D fields which can
-    be controlled using the `dimension` parameter.
+    be controlled using the ``dimension`` parameter.
 
     Parameters
     ----------
     in_channels : int
-        Number of input channels
+        Number of input channels.
     out_channels : int
-        Number of output channels
-    decoder_layers : int, optional
-        Number of decoder layers, by default 1
-    decoder_layer_size : int, optional
-        Number of neurons in decoder layers, by default 32
-    decoder_activation_fn : str, optional
-        Activation function for decoder, by default "silu"
-    dimension : int
-        Model dimensionality (supports 1, 2, 3).
-    latent_channels : int, optional
-        Latent features size in spectral convolutions, by default 32
-    num_fno_layers : int, optional
-        Number of spectral convolutional layers, by default 4
-    num_fno_modes : Union[int, List[int]], optional
-        Number of Fourier modes kept in spectral convolutions, by default 16
-    padding : int, optional
-        Domain padding for spectral convolutions, by default 8
-    padding_type : str, optional
-        Type of padding for spectral convolutions, by default "constant"
-    activation_fn : str, optional
-        Activation function, by default "gelu"
-    coord_features : bool, optional
-        Use coordinate grid as additional feature map, by default True
+        Number of output channels.
+    decoder_layers : int, optional, default=1
+        Number of decoder layers.
+    decoder_layer_size : int, optional, default=32
+        Number of neurons in decoder layers.
+    decoder_activation_fn : str, optional, default="silu"
+        Activation function for decoder.
+    dimension : int, optional, default=2
+        Model dimensionality (supports 1, 2, 3, 4).
+    latent_channels : int, optional, default=32
+        Latent features size in spectral convolutions.
+    num_fno_layers : int, optional, default=4
+        Number of spectral convolutional layers.
+    num_fno_modes : Union[int, List[int]], optional, default=16
+        Number of Fourier modes kept in spectral convolutions.
+    padding : int, optional, default=8
+        Domain padding for spectral convolutions.
+    padding_type : str, optional, default="constant"
+        Type of padding for spectral convolutions.
+    activation_fn : str, optional, default="gelu"
+        Activation function.
+    coord_features : bool, optional, default=True
+        Use coordinate grid as additional feature map.
 
-    Example
+    Forward
     -------
-    >>> # define the 2d FNO model
+    x : torch.Tensor
+        Input tensor. Shape depends on ``dimension``:
+
+        - 1D: :math:`(B, C_{in}, X)`
+        - 2D: :math:`(B, C_{in}, H, W)`
+        - 3D: :math:`(B, C_{in}, D, H, W)`
+        - 4D: :math:`(B, C_{in}, X, Y, Z, T)`
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor with same spatial dimensions as input:
+
+        - 1D: :math:`(B, C_{out}, X)`
+        - 2D: :math:`(B, C_{out}, H, W)`
+        - 3D: :math:`(B, C_{out}, D, H, W)`
+        - 4D: :math:`(B, C_{out}, X, Y, Z, T)`
+
+    Examples
+    --------
+    >>> import torch
     >>> import physicsnemo
+    >>> # Define a 2D FNO model
     >>> model = physicsnemo.models.fno.FNO(
     ...     in_channels=4,
     ...     out_channels=3,
@@ -840,7 +1022,7 @@ class FNO(Module):
     ...     num_fno_layers=2,
     ...     padding=0,
     ... )
-    >>> input = torch.randn(32, 4, 32, 32) #(N, C, H, W)
+    >>> input = torch.randn(32, 4, 32, 32)  # (N, C, H, W)
     >>> output = model(input)
     >>> output.size()
     torch.Size([32, 3, 32, 32])
@@ -899,9 +1081,18 @@ class FNO(Module):
             coord_features=self.coord_features,
         )
 
-    def getFNOEncoder(self):
-        """
-        Return the correct FNO encoder based on the dimension
+    def getFNOEncoder(self) -> type:
+        r"""Return the correct FNO encoder class based on the dimension.
+
+        Returns
+        -------
+        type
+            The appropriate encoder class for the configured dimension.
+
+        Raises
+        ------
+        NotImplementedError
+            If dimension is not 1, 2, 3, or 4.
         """
         if self.dimension == 1:
             return FNO1DEncoder
@@ -913,21 +1104,32 @@ class FNO(Module):
             return FNO4DEncoder
         else:
             raise NotImplementedError(
-                "Invalid dimensionality. Only 1D, 2D, 3D and 4D FNO implemented"
+                f"Invalid dimensionality {self.dimension}. "
+                "Only 1D, 2D, 3D and 4D FNO implemented"
             )
 
     def forward(self, x: Tensor) -> Tensor:
-        # Fourier encoder
+        r"""Forward pass of the FNO model."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            expected_ndim = self.dimension + 2  # batch + channels + spatial dims
+            if x.ndim != expected_ndim:
+                raise ValueError(
+                    f"Expected {expected_ndim}D input tensor for {self.dimension}D FNO, "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
+                )
+
+        # Encode in Fourier space
         y_latent = self.spec_encoder(x)
 
-        # Reshape to pointwise inputs if not a conv FC model
+        # Reshape to pointwise inputs for decoder
         y_shape = y_latent.shape
         y_latent, y_shape = self.spec_encoder.grid_to_points(y_latent)
 
-        # Decoder
+        # Decode to output channels
         y = self.decoder_net(y_latent)
 
-        # Convert back into grid
+        # Convert back into grid representation
         y = self.spec_encoder.points_to_grid(y, y_shape)
 
         return y

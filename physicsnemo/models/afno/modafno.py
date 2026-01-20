@@ -21,6 +21,7 @@ from typing import List, Literal, Type, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from jaxtyping import Float
 
 import physicsnemo  # noqa: F401 for docs
 import physicsnemo.nn.fft as fft
@@ -34,20 +35,31 @@ Tensor = torch.Tensor
 
 
 class ScaleShiftMlp(nn.Module):
-    """MLP used to compute the scale and shift parameters of the ModAFNO block
+    r"""MLP used to compute the scale and shift parameters of the ModAFNO block.
 
     Parameters
     ----------
     in_features : int
-        Input feature size
+        Input feature size.
     out_features : int
-        Output feature size
+        Output feature size.
     hidden_features : int, optional
-        Hidden feature size, defaults to 2 * out_features
-    hidden_layers : int, optional
-        Number of hidden layers, defaults to 0
-    activation_fn : nn.Module, optional
-        Activation function, by default nn.GELU
+        Hidden feature size. Defaults to ``2 * out_features``.
+    hidden_layers : int, optional, default=0
+        Number of hidden layers.
+    activation_fn : Type[nn.Module], optional, default=nn.GELU
+        Activation function class.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, D_{in})`.
+
+    Outputs
+    -------
+    Tuple[torch.Tensor, torch.Tensor]
+        Tuple of (scale, shift) tensors, each of shape :math:`(B, D_{out})`.
+        Scale is offset by 1, i.e., ``(1 + scale, shift)``.
     """
 
     def __init__(
@@ -68,28 +80,46 @@ class ScaleShiftMlp(nn.Module):
         sequence.append(nn.Linear(hidden_features, out_features * 2))
         self.net = nn.Sequential(*sequence)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor) -> tuple:
+        r"""Forward pass computing scale and shift parameters."""
         (scale, shift) = torch.chunk(self.net(x), 2, dim=1)
         return (1 + scale, shift)
 
 
 class ModAFNOMlp(AFNOMlp):
-    """Modulated MLP used inside ModAFNO
+    r"""Modulated MLP used inside ModAFNO.
+
+    Extends :class:`AFNOMlp` with scale-shift modulation based on a conditioning
+    embedding.
 
     Parameters
     ----------
     in_features : int
-        Input feature size
+        Input feature size.
     latent_features : int
-        Latent feature size
+        Latent feature size.
     out_features : int
-        Output feature size
-    activation_fn :  nn.Module, optional
-        Activation function, by default nn.GELU
-    drop : float, optional
-        Drop out rate, by default 0.0
+        Output feature size.
+    mod_features : int
+        Modulation embedding feature size.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function.
+    drop : float, optional, default=0.0
+        Drop out rate.
     scale_shift_kwargs : dict, optional
-        Options to the MLP that computes the scale-shift parameters
+        Options to the MLP that computes the scale-shift parameters.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(*, D_{in})`.
+    mod_embed : torch.Tensor
+        Modulation embedding of shape :math:`(B, D_{mod})`.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(*, D_{out})`.
     """
 
     def __init__(
@@ -116,12 +146,15 @@ class ModAFNOMlp(AFNOMlp):
         )
 
     def forward(self, x: Tensor, mod_embed: Tensor) -> Tensor:
+        r"""Forward pass with modulation."""
+        # Compute scale and shift from modulation embedding
         (scale, shift) = self.scale_shift(mod_embed)
 
         scale_shift_shape = (scale.shape[0],) + (1,) * (x.ndim - 2) + (scale.shape[1],)
         scale = scale.view(*scale_shift_shape)
         shift = shift.view(*scale_shift_shape)
 
+        # Apply modulated MLP
         x = self.fc1(x)
         x = x * scale + shift
         x = self.act(x)
@@ -132,27 +165,41 @@ class ModAFNOMlp(AFNOMlp):
 
 
 class ModAFNO2DLayer(AFNO2DLayer):
-    """AFNO spectral convolution layer
+    r"""Modulated AFNO spectral convolution layer.
+
+    Extends :class:`AFNO2DLayer` with scale-shift modulation in the spectral domain.
 
     Parameters
     ----------
     hidden_size : int
-        Feature dimensionality
+        Feature dimensionality.
     mod_features : int
-        Number of modulation features
-    num_blocks : int, optional
-        Number of blocks used in the block diagonal weight matrix, by default 8
-    sparsity_threshold : float, optional
-        Sparsity threshold (softshrink) of spectral features, by default 0.01
-    hard_thresholding_fraction : float, optional
-        Threshold for limiting number of modes used [0,1], by default 1
-    hidden_size_factor : int, optional
-        Factor to increase spectral features by after weight multiplication, by default 1
+        Number of modulation features.
+    num_blocks : int, optional, default=8
+        Number of blocks used in the block diagonal weight matrix.
+    sparsity_threshold : float, optional, default=0.01
+        Sparsity threshold (softshrink) of spectral features.
+    hard_thresholding_fraction : float, optional, default=1
+        Threshold for limiting number of modes used, in range ``[0, 1]``.
+    hidden_size_factor : int, optional, default=1
+        Factor to increase spectral features by after weight multiplication.
     scale_shift_kwargs : dict, optional
-        Options to the MLP that computes the scale-shift parameters
-    scale_shift_mode: ["complex", "real"]
-        If 'complex' (default), compute the scale-shift operation using complex
-        operations. If 'real', use real operations.
+        Options to the MLP that computes the scale-shift parameters.
+    scale_shift_mode : Literal["complex", "real"], optional, default="complex"
+        If ``"complex"``, compute the scale-shift operation using complex
+        operations. If ``"real"``, use real operations.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, H, W, C)`.
+    mod_embed : torch.Tensor
+        Modulation embedding of shape :math:`(B, D_{mod})`.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, H, W, C)`.
     """
 
     def __init__(
@@ -189,13 +236,19 @@ class ModAFNO2DLayer(AFNO2DLayer):
             **scale_shift_kwargs,
         )
 
-    def forward(self, x: Tensor, mod_embed: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Float[Tensor, "batch height width channels"],
+        mod_embed: Float[Tensor, "batch mod_features"],
+    ) -> Float[Tensor, "batch height width channels"]:
+        r"""Forward pass with modulation."""
         bias = x
 
         dtype = x.dtype
         x = x.float()
         B, H, W, C = x.shape
-        # Using ONNX friendly FFT functions
+
+        # Apply 2D FFT in the spatial dimensions
         x = fft.rfft2(x, dim=(1, 2), norm="ortho")
         x_real, x_imag = fft.real(x), fft.imag(x)
         x_real = x_real.reshape(B, H, W // 2 + 1, self.num_blocks, self.block_size)
@@ -332,37 +385,49 @@ class ModAFNO2DLayer(AFNO2DLayer):
 
 
 class Block(nn.Module):
-    """AFNO block, spectral convolution and MLP
+    r"""Modulated AFNO block with spectral convolution and MLP.
 
     Parameters
     ----------
     embed_dim : int
-        Embedded feature dimensionality
+        Embedded feature dimensionality.
     mod_dim : int
-        Modululation input dimensionality
-    num_blocks : int, optional
-        Number of blocks used in the block diagonal weight matrix, by default 8
-    mlp_ratio : float, optional
-        Ratio of MLP latent variable size to input feature size, by default 4.0
-    drop : float, optional
-        Drop out rate in MLP, by default 0.0
-    activation_fn: nn.Module, optional
-        Activation function used in MLP, by default nn.GELU
-    norm_layer : nn.Module, optional
-        Normalization function, by default nn.LayerNorm
-    double_skip : bool, optional
-        Residual, by default True
-    sparsity_threshold : float, optional
-        Sparsity threshold (softshrink) of spectral features, by default 0.01
-    hard_thresholding_fraction : float, optional
-        Threshold for limiting number of modes used [0,1], by default 1
-    modulate_filter: bool, optional
-        Whether to compute the modulation for the FFT filter
-    modulate_mlp: bool, optional
-        Whether to compute the modulation for the MLP
-    scale_shift_mode: ["complex", "real"]
-        If 'complex' (default), compute the scale-shift operation using complex
-        operations. If 'real', use real operations.
+        Modulation input dimensionality.
+    num_blocks : int, optional, default=8
+        Number of blocks used in the block diagonal weight matrix.
+    mlp_ratio : float, optional, default=4.0
+        Ratio of MLP latent variable size to input feature size.
+    drop : float, optional, default=0.0
+        Drop out rate in MLP.
+    activation_fn : nn.Module, optional, default=nn.GELU()
+        Activation function used in MLP.
+    norm_layer : nn.Module, optional, default=nn.LayerNorm
+        Normalization function.
+    double_skip : bool, optional, default=True
+        Whether to use double skip connections.
+    sparsity_threshold : float, optional, default=0.01
+        Sparsity threshold (softshrink) of spectral features.
+    hard_thresholding_fraction : float, optional, default=1.0
+        Threshold for limiting number of modes used, in range ``[0, 1]``.
+    modulate_filter : bool, optional, default=True
+        Whether to compute the modulation for the FFT filter.
+    modulate_mlp : bool, optional, default=True
+        Whether to compute the modulation for the MLP.
+    scale_shift_mode : Literal["complex", "real"], optional, default="real"
+        If ``"complex"``, compute the scale-shift operation using complex
+        operations. If ``"real"``, use real operations.
+
+    Forward
+    -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, H, W, C)`.
+    mod_embed : torch.Tensor
+        Modulation embedding of shape :math:`(B, D_{mod})`.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, H, W, C)`.
     """
 
     def __init__(
@@ -424,7 +489,12 @@ class Block(nn.Module):
         self.modulate_filter = modulate_filter
         self.modulate_mlp = modulate_mlp
 
-    def forward(self, x: Tensor, mod_embed: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Float[Tensor, "batch height width channels"],
+        mod_embed: Float[Tensor, "batch mod_dim"],
+    ) -> Float[Tensor, "batch height width channels"]:
+        r"""Forward pass of the modulated AFNO block."""
         residual = x
         x = self.norm1(x)
         x = self.apply_filter(x, mod_embed)
@@ -456,48 +526,61 @@ class MetaData(ModelMetaData):
 
 
 class ModAFNO(Module):
-    """Modulated Adaptive Fourier neural operator (ModAFNO) model.
+    r"""Modulated Adaptive Fourier neural operator (ModAFNO) model.
+
+    ModAFNO extends AFNO with modulation capabilities for conditioning on
+    auxiliary inputs (e.g., time, parameters).
 
     Parameters
     ----------
     inp_shape : List[int]
-        Input image dimensions [height, width]
-    in_channels : int, optional
-        Number of input channels
-    out_channels: int, optional
-        Number of output channels
-    embed_model: dict, optional
-        Dictionary of arguments to pass to the `ModEmbedNet` embedding model
-    patch_size : List[int], optional
-        Size of image patches, by default [16, 16]
-    embed_dim : int, optional
-        Embedded channel size, by default 256
-    mod_dim : int
-        Modululation input dimensionality
-    modulate_filter: bool, optional
-        Whether to compute the modulation for the FFT filter, by default True
-    modulate_mlp: bool, optional
-        Whether to compute the modulation for the MLP, by default True
-    scale_shift_mode: ["complex", "real"]
-        If 'complex' (default), compute the scale-shift operation using complex
-        operations. If 'real', use real operations.
-    depth : int, optional
-        Number of AFNO layers, by default 4
-    mlp_ratio : float, optional
-        Ratio of layer MLP latent variable size to input feature size, by default 4.0
-    drop_rate : float, optional
-        Drop out rate in layer MLPs, by default 0.0
-    num_blocks : int, optional
-        Number of blocks in the block-diag frequency weight matrices, by default 16
-    sparsity_threshold : float, optional
-        Sparsity threshold (softshrink) of spectral features, by default 0.01
-    hard_thresholding_fraction : float, optional
-        Threshold for limiting number of modes used [0,1], by default 1
+        Input image dimensions as ``[height, width]``.
+    in_channels : int, optional, default=155
+        Number of input channels.
+    out_channels : int, optional, default=73
+        Number of output channels.
+    embed_model : dict, optional
+        Dictionary of arguments to pass to the :class:`ModEmbedNet` embedding model.
+    patch_size : List[int], optional, default=[2, 2]
+        Size of image patches as ``[patch_height, patch_width]``.
+    embed_dim : int, optional, default=512
+        Embedded channel size.
+    mod_dim : int, optional, default=64
+        Modulation input dimensionality.
+    modulate_filter : bool, optional, default=True
+        Whether to compute the modulation for the FFT filter.
+    modulate_mlp : bool, optional, default=True
+        Whether to compute the modulation for the MLP.
+    scale_shift_mode : Literal["complex", "real"], optional, default="complex"
+        If ``"complex"``, compute the scale-shift operation using complex
+        operations. If ``"real"``, use real operations.
+    depth : int, optional, default=12
+        Number of AFNO layers.
+    mlp_ratio : float, optional, default=2.0
+        Ratio of layer MLP latent variable size to input feature size.
+    drop_rate : float, optional, default=0.0
+        Drop out rate in layer MLPs.
+    num_blocks : int, optional, default=1
+        Number of blocks in the block-diag frequency weight matrices.
+    sparsity_threshold : float, optional, default=0.01
+        Sparsity threshold (softshrink) of spectral features.
+    hard_thresholding_fraction : float, optional, default=1.0
+        Threshold for limiting number of modes used, in range ``[0, 1]``.
 
-    The default settings correspond to the implementation in the paper cited below.
-
-    Example
+    Forward
     -------
+    x : torch.Tensor
+        Input tensor of shape :math:`(B, C_{in}, H, W)`.
+    mod : torch.Tensor
+        Modulation input of shape :math:`(B, 1)` or :math:`(B,)`.
+
+    Outputs
+    -------
+    torch.Tensor
+        Output tensor of shape :math:`(B, C_{out}, H, W)`.
+
+    Examples
+    --------
     >>> import torch
     >>> from physicsnemo.models.afno import ModAFNO
     >>> model = ModAFNO(
@@ -509,7 +592,7 @@ class ModAFNO(Module):
     ...     depth=2,
     ...     num_blocks=2,
     ... )
-    >>> input = torch.randn(32, 2, 32, 32) #(N, C, H, W)
+    >>> input = torch.randn(32, 2, 32, 32)  # (N, C, H, W)
     >>> time = torch.full((32, 1), 0.5)
     >>> output = model(input, time)
     >>> output.size()
@@ -613,8 +696,14 @@ class ModAFNO(Module):
             embed_model = {} if embed_model is None else embed_model
             self.mod_embed_net = ModEmbedNet(**embed_model)
 
-    def _init_weights(self, m: nn.Module):
-        """Init model weights"""
+    def _init_weights(self, m: nn.Module) -> None:
+        r"""Initialize model weights.
+
+        Parameters
+        ----------
+        m : nn.Module
+            Module to initialize.
+        """
         if isinstance(m, nn.Linear):
             torch.nn.init.trunc_normal_(m.weight, std=0.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -623,34 +712,74 @@ class ModAFNO(Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(self, x: Tensor, mod: Tensor) -> Tensor:
-        """Forward pass of core ModAFNO"""
+    def forward_features(
+        self,
+        x: Float[Tensor, "batch channels height width"],
+        mod: Float[Tensor, "batch mod_input"],
+    ) -> Float[Tensor, "batch h w embed_dim"]:
+        r"""Forward pass of core ModAFNO feature extraction.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape :math:`(B, C_{in}, H, W)`.
+        mod : torch.Tensor
+            Modulation input of shape :math:`(B, 1)` or :math:`(B,)`.
+
+        Returns
+        -------
+        torch.Tensor
+            Features of shape :math:`(B, h, w, D)` where :math:`h, w` are patch
+            grid dimensions and :math:`D` is ``embed_dim``.
+        """
         B = x.shape[0]
+
+        # Embed patches and add positional encoding
         x = self.patch_embed(x)
         x = x + self.pos_embed
         x = self.pos_drop(x)
 
+        # Compute modulation embedding and add to features
         mod_embed = self.mod_embed_net(mod)
         mod_additive = self.mod_additive_proj(mod_embed).unsqueeze(dim=(1))
         x = x + mod_additive
 
+        # Reshape to 2D grid and apply modulated blocks
         x = x.reshape(B, self.h, self.w, self.embed_dim)
         for blk in self.blocks:
             x = blk(x, mod_embed=mod_embed)
 
         return x
 
-    def forward(self, x: Tensor, mod: Tensor) -> Tensor:
-        """The full ModAFNO model logic."""
+    def forward(
+        self,
+        x: Float[Tensor, "batch in_channels height width"],
+        mod: Float[Tensor, "batch mod_input"],
+    ) -> Float[Tensor, "batch out_channels height width"]:
+        r"""Forward pass of the ModAFNO model."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if x.ndim != 4:
+                raise ValueError(
+                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
+                    f"with shape {tuple(x.shape)}"
+                )
+            B, C, H, W = x.shape
+            if H != self.inp_shape[0] or W != self.inp_shape[1]:
+                raise ValueError(
+                    f"Expected input spatial dimensions {self.inp_shape}, "
+                    f"got ({H}, {W})"
+                )
+
+        # Extract features through modulated AFNO blocks
         x = self.forward_features(x, mod)
+
+        # Project to output channels
         x = self.head(x)
 
-        # Correct tensor shape back into [B, C, H, W]
-        # [b h w (p1 p2 c_out)]
+        # Reshape tensor back into [B, C, H, W]
         out = x.view(list(x.shape[:-1]) + [self.patch_size[0], self.patch_size[1], -1])
-        # [b h w p1 p2 c_out]
         out = torch.permute(out, (0, 5, 1, 3, 2, 4))
-        # [b c_out, h, p1, w, p2]
         out = out.reshape(list(out.shape[:2]) + [self.inp_shape[0], self.inp_shape[1]])
-        # [b c_out, (h*p1), (w*p2)]
+
         return out
