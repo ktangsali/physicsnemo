@@ -20,7 +20,6 @@ from typing import List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from jaxtyping import Float
 from torch import Tensor
 
 # import physicsnemo  # noqa: F401 for docs
@@ -149,18 +148,8 @@ class FNO1DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv1d(self.fno_width, self.fno_width, 1))
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels x"]
-    ) -> Float[Tensor, "batch latent_channels x"]:
+    def forward(self, x: Tensor) -> Tensor:
         r"""Forward pass of the 1D FNO encoder."""
-        # Input validation
-        if not torch.compiler.is_compiling():
-            if x.ndim != 3:
-                raise ValueError(
-                    f"Expected 3D input tensor (B, C, X), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-
         # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
@@ -363,17 +352,12 @@ class FNO2DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv2d(self.fno_width, self.fno_width, 1))
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch latent_channels height width"]:
+    def forward(self, x: Tensor) -> Tensor:
         r"""Forward pass of the 2D FNO encoder."""
-        # Input validation
-        if not torch.compiler.is_compiling():
-            if x.ndim != 4:
-                raise ValueError(
-                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
+        if x.dim() != 4:
+            raise ValueError(
+                "Only 4D tensors [batch, in_channels, grid_x, grid_y] accepted for 2D FNO"
+            )
 
         # Add coordinate features if enabled
         if self.coord_features:
@@ -586,18 +570,8 @@ class FNO3DEncoder(nn.Module):
             )
             self.conv_layers.append(nn.Conv3d(self.fno_width, self.fno_width, 1))
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels depth height width"]
-    ) -> Float[Tensor, "batch latent_channels depth height width"]:
+    def forward(self, x: Tensor) -> Tensor:
         r"""Forward pass of the 3D FNO encoder."""
-        # Input validation
-        if not torch.compiler.is_compiling():
-            if x.ndim != 5:
-                raise ValueError(
-                    f"Expected 5D input tensor (B, C, D, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-
         # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
@@ -817,18 +791,8 @@ class FNO4DEncoder(nn.Module):
                 layers.ConvNdKernel1Layer(self.fno_width, self.fno_width)
             )
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels x y z t"]
-    ) -> Float[Tensor, "batch latent_channels x y z t"]:
+    def forward(self, x: Tensor) -> Tensor:
         r"""Forward pass of the 4D FNO encoder."""
-        # Input validation
-        if not torch.compiler.is_compiling():
-            if x.ndim != 6:
-                raise ValueError(
-                    f"Expected 6D input tensor (B, C, X, Y, Z, T), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-
         # Add coordinate features if enabled
         if self.coord_features:
             coord_feat = self.meshgrid(list(x.shape), x.device)
@@ -1110,15 +1074,6 @@ class FNO(Module):
 
     def forward(self, x: Tensor) -> Tensor:
         r"""Forward pass of the FNO model."""
-        # Input validation
-        if not torch.compiler.is_compiling():
-            expected_ndim = self.dimension + 2  # batch + channels + spatial dims
-            if x.ndim != expected_ndim:
-                raise ValueError(
-                    f"Expected {expected_ndim}D input tensor for {self.dimension}D FNO, "
-                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
-                )
-
         # Encode in Fourier space
         y_latent = self.spec_encoder(x)
 
