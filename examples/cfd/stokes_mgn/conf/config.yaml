@@ -51,10 +51,25 @@ wandb_mode: "disabled"
 # Physics-informed constants
 graph_path: "graph_7.vtp"
 
-mlp_hidden_dim: 256
+mlp_hidden_dim: 512
 mlp_num_layers: 6
 mlp_input_dim: 2
 mlp_output_dim: 3
 
 pi_iters: 10000
 pi_lr: 0.001
+pi_use_lr_scheduler: True
+
+# Delta learning options (for pi_fine_tuning_fvm.py)
+# These control how the model preserves initial GNN predictions
+delta_zero_init: True        # Zero-initialize final layer (delta starts at ~0)
+delta_learnable_scale: False  # Learn scaling factors for deltas (starts at initial_scale)
+delta_initial_scale: 0.1     # Initial value for learnable scaling factor
+delta_reg_weight: 0.1        # Weight for delta regularization (penalize large corrections)
+
+# Two-phase training options (for pi_fine_tuning_fvm.py)
+# Phase 1: Reconstruction - model learns to reproduce GNN predictions (warms up features)
+# Phase 2: Physics fine-tuning - freeze early layers, train later layers with physics loss
+use_two_phase: False         # Enable two-phase training (False = use single-phase delta learning)
+phase1_iters: 2000           # Number of iterations for Phase 1 (reconstruction)
+freeze_layers: 2             # Number of hidden layers to freeze in Phase 2
