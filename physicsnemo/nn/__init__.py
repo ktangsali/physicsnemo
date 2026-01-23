@@ -25,6 +25,15 @@ from .activations import (
     Stan,
     get_activation,
 )
+from .afno_layers import (
+    AFNO2DLayer,
+    AFNOMlp,
+    AFNOPatchEmbed,
+    ModAFNO2DLayer,
+    ModAFNOMlp,
+    PatchEmbed,  # Alias for backward compatibility
+    ScaleShiftMlp,
+)
 from .attention_layers import (
     AttentionOp,
     EarthAttention2D,
@@ -43,6 +52,12 @@ from .conv_layers import (
 )
 from .dgm_layers import DGMLayer
 from .embedding_layers import FourierEmbedding, PositionalEmbedding
+from .fno_layers import (
+    FNO1DEncoder,
+    FNO2DEncoder,
+    FNO3DEncoder,
+    FNO4DEncoder,
+)
 from .fourier_layers import (
     FourierFilter,
     FourierLayer,

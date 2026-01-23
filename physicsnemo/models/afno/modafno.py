@@ -16,372 +16,31 @@
 
 from dataclasses import dataclass
 from functools import partial
-from typing import List, Literal, Type, Union
+from typing import List, Literal, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from jaxtyping import Float
 
 import physicsnemo  # noqa: F401 for docs
-import physicsnemo.nn.fft as fft
 from physicsnemo.core.meta import ModelMetaData
 from physicsnemo.core.module import Module
-from physicsnemo.models.afno.afno import AFNO2DLayer, AFNOMlp, PatchEmbed
+
+# Import AFNO layers from physicsnemo.nn
+from physicsnemo.nn import (
+    AFNO2DLayer,
+    AFNOMlp,
+    AFNOPatchEmbed,
+    ModAFNO2DLayer,
+    ModAFNOMlp,
+)
 
 from .modembed import ModEmbedNet
 
 Tensor = torch.Tensor
 
-
-class ScaleShiftMlp(nn.Module):
-    r"""MLP used to compute the scale and shift parameters of the ModAFNO block.
-
-    Parameters
-    ----------
-    in_features : int
-        Input feature size.
-    out_features : int
-        Output feature size.
-    hidden_features : int, optional
-        Hidden feature size. Defaults to ``2 * out_features``.
-    hidden_layers : int, optional, default=0
-        Number of hidden layers.
-    activation_fn : Type[nn.Module], optional, default=nn.GELU
-        Activation function class.
-
-    Forward
-    -------
-    x : torch.Tensor
-        Input tensor of shape :math:`(B, D_{in})`.
-
-    Outputs
-    -------
-    Tuple[torch.Tensor, torch.Tensor]
-        Tuple of (scale, shift) tensors, each of shape :math:`(B, D_{out})`.
-        Scale is offset by 1, i.e., ``(1 + scale, shift)``.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        hidden_features: Union[int, None] = None,
-        hidden_layers: int = 0,
-        activation_fn: Type[nn.Module] = nn.GELU,
-    ):
-        super().__init__()
-        if hidden_features is None:
-            hidden_features = out_features * 2
-
-        sequence = [nn.Linear(in_features, hidden_features), activation_fn()]
-        for _ in range(hidden_layers):
-            sequence += [nn.Linear(hidden_features, hidden_features), activation_fn()]
-        sequence.append(nn.Linear(hidden_features, out_features * 2))
-        self.net = nn.Sequential(*sequence)
-
-    def forward(self, x: Tensor) -> tuple:
-        r"""Forward pass computing scale and shift parameters."""
-        (scale, shift) = torch.chunk(self.net(x), 2, dim=1)
-        return (1 + scale, shift)
-
-
-class ModAFNOMlp(AFNOMlp):
-    r"""Modulated MLP used inside ModAFNO.
-
-    Extends :class:`AFNOMlp` with scale-shift modulation based on a conditioning
-    embedding.
-
-    Parameters
-    ----------
-    in_features : int
-        Input feature size.
-    latent_features : int
-        Latent feature size.
-    out_features : int
-        Output feature size.
-    mod_features : int
-        Modulation embedding feature size.
-    activation_fn : nn.Module, optional, default=nn.GELU()
-        Activation function.
-    drop : float, optional, default=0.0
-        Drop out rate.
-    scale_shift_kwargs : dict, optional
-        Options to the MLP that computes the scale-shift parameters.
-
-    Forward
-    -------
-    x : torch.Tensor
-        Input tensor of shape :math:`(*, D_{in})`.
-    mod_embed : torch.Tensor
-        Modulation embedding of shape :math:`(B, D_{mod})`.
-
-    Outputs
-    -------
-    torch.Tensor
-        Output tensor of shape :math:`(*, D_{out})`.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        latent_features: int,
-        out_features: int,
-        mod_features: int,
-        activation_fn: nn.Module = nn.GELU(),
-        drop: float = 0.0,
-        scale_shift_kwargs: Union[dict, None] = None,
-    ):
-        super().__init__(
-            in_features=in_features,
-            latent_features=latent_features,
-            out_features=out_features,
-            activation_fn=activation_fn,
-            drop=drop,
-        )
-        if scale_shift_kwargs is None:
-            scale_shift_kwargs = {}
-        self.scale_shift = ScaleShiftMlp(
-            mod_features, latent_features, **scale_shift_kwargs
-        )
-
-    def forward(self, x: Tensor, mod_embed: Tensor) -> Tensor:
-        r"""Forward pass with modulation."""
-        # Compute scale and shift from modulation embedding
-        (scale, shift) = self.scale_shift(mod_embed)
-
-        scale_shift_shape = (scale.shape[0],) + (1,) * (x.ndim - 2) + (scale.shape[1],)
-        scale = scale.view(*scale_shift_shape)
-        shift = shift.view(*scale_shift_shape)
-
-        # Apply modulated MLP
-        x = self.fc1(x)
-        x = x * scale + shift
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
-
-
-class ModAFNO2DLayer(AFNO2DLayer):
-    r"""Modulated AFNO spectral convolution layer.
-
-    Extends :class:`AFNO2DLayer` with scale-shift modulation in the spectral domain.
-
-    Parameters
-    ----------
-    hidden_size : int
-        Feature dimensionality.
-    mod_features : int
-        Number of modulation features.
-    num_blocks : int, optional, default=8
-        Number of blocks used in the block diagonal weight matrix.
-    sparsity_threshold : float, optional, default=0.01
-        Sparsity threshold (softshrink) of spectral features.
-    hard_thresholding_fraction : float, optional, default=1
-        Threshold for limiting number of modes used, in range ``[0, 1]``.
-    hidden_size_factor : int, optional, default=1
-        Factor to increase spectral features by after weight multiplication.
-    scale_shift_kwargs : dict, optional
-        Options to the MLP that computes the scale-shift parameters.
-    scale_shift_mode : Literal["complex", "real"], optional, default="complex"
-        If ``"complex"``, compute the scale-shift operation using complex
-        operations. If ``"real"``, use real operations.
-
-    Forward
-    -------
-    x : torch.Tensor
-        Input tensor of shape :math:`(B, H, W, C)`.
-    mod_embed : torch.Tensor
-        Modulation embedding of shape :math:`(B, D_{mod})`.
-
-    Outputs
-    -------
-    torch.Tensor
-        Output tensor of shape :math:`(B, H, W, C)`.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        mod_features: int,
-        num_blocks: int = 8,
-        sparsity_threshold: float = 0.01,
-        hard_thresholding_fraction: float = 1,
-        hidden_size_factor: int = 1,
-        scale_shift_kwargs: Union[dict, None] = None,
-        scale_shift_mode: Literal["complex", "real"] = "complex",
-    ):
-        super().__init__(
-            hidden_size=hidden_size,
-            num_blocks=num_blocks,
-            sparsity_threshold=sparsity_threshold,
-            hard_thresholding_fraction=hard_thresholding_fraction,
-            hidden_size_factor=hidden_size_factor,
-        )
-
-        if scale_shift_mode not in ("complex", "real"):
-            raise ValueError("scale_shift_mode must be 'real' or 'complex'")
-        self.scale_shift_mode = scale_shift_mode
-        self.channel_mul = 1 if scale_shift_mode == "real" else 2
-        if scale_shift_kwargs is None:
-            scale_shift_kwargs = {}
-        self.scale_shift = ScaleShiftMlp(
-            mod_features,
-            self.num_blocks
-            * self.block_size
-            * self.hidden_size_factor
-            * self.channel_mul,
-            **scale_shift_kwargs,
-        )
-
-    def forward(
-        self,
-        x: Float[Tensor, "batch height width channels"],
-        mod_embed: Float[Tensor, "batch mod_features"],
-    ) -> Float[Tensor, "batch height width channels"]:
-        r"""Forward pass with modulation."""
-        bias = x
-
-        dtype = x.dtype
-        x = x.float()
-        B, H, W, C = x.shape
-
-        # Apply 2D FFT in the spatial dimensions
-        x = fft.rfft2(x, dim=(1, 2), norm="ortho")
-        x_real, x_imag = fft.real(x), fft.imag(x)
-        x_real = x_real.reshape(B, H, W // 2 + 1, self.num_blocks, self.block_size)
-        x_imag = x_imag.reshape(B, H, W // 2 + 1, self.num_blocks, self.block_size)
-        o1_shape = (
-            B,
-            H,
-            W // 2 + 1,
-            self.num_blocks,
-            self.block_size * self.hidden_size_factor,
-        )
-        scale_shift_shape = (B, self.channel_mul, 1, o1_shape[3], o1_shape[4])
-
-        o1_real = torch.zeros(o1_shape, device=x.device)
-        o1_imag = torch.zeros(o1_shape, device=x.device)
-        o2 = torch.zeros(x_real.shape + (2,), device=x.device)
-
-        total_modes = min(H, W) // 2 + 1
-        kept_modes = int(total_modes * self.hard_thresholding_fraction)
-
-        o1_re = (
-            torch.einsum(
-                "nyxbi,bio->nyxbo",
-                x_real[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w1[0],
-            )
-            - torch.einsum(
-                "nyxbi,bio->nyxbo",
-                x_imag[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w1[1],
-            )
-            + self.b1[0]
-        )
-
-        o1_im = (
-            torch.einsum(
-                "nyxbi,bio->nyxbo",
-                x_imag[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w1[0],
-            )
-            + torch.einsum(
-                "nyxbi,bio->nyxbo",
-                x_real[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w1[1],
-            )
-            + self.b1[1]
-        )
-
-        # scale-shift operation
-        (scale, shift) = self.scale_shift(mod_embed)
-        scale = scale.view(*scale_shift_shape)
-        shift = shift.view(*scale_shift_shape)
-        if self.scale_shift_mode == "real":
-            o1_re = o1_re * scale + shift
-            o1_im = o1_im * scale + shift
-        elif self.scale_shift_mode == "complex":
-            (scale_re, scale_im) = torch.chunk(scale, 2, dim=1)
-            (shift_re, shift_im) = torch.chunk(shift, 2, dim=1)
-            (o1_re, o1_im) = (
-                o1_re * scale_re - o1_im * scale_im + shift_re,
-                o1_im * scale_re + o1_re * scale_im + shift_im,
-            )
-
-        o1_real[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = (
-            F.relu(o1_re)
-        )
-
-        o1_imag[:, total_modes - kept_modes : total_modes + kept_modes, :kept_modes] = (
-            F.relu(o1_im)
-        )
-
-        o2[
-            :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, ..., 0
-        ] = (
-            torch.einsum(
-                "nyxbi,bio->nyxbo",
-                o1_real[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w2[0],
-            )
-            - torch.einsum(
-                "nyxbi,bio->nyxbo",
-                o1_imag[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w2[1],
-            )
-            + self.b2[0]
-        )
-
-        o2[
-            :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, ..., 1
-        ] = (
-            torch.einsum(
-                "nyxbi,bio->nyxbo",
-                o1_imag[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w2[0],
-            )
-            + torch.einsum(
-                "nyxbi,bio->nyxbo",
-                o1_real[
-                    :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes
-                ],
-                self.w2[1],
-            )
-            + self.b2[1]
-        )
-
-        x = F.softshrink(o2, lambd=self.sparsity_threshold)
-        x = fft.view_as_complex(x)
-        # TODO(akamenev): replace the following branching with
-        # a one-liner, something like x.reshape(..., -1).squeeze(-1),
-        # but this currently fails during ONNX export.
-        if torch.onnx.is_in_onnx_export():
-            x = x.reshape(B, H, W // 2 + 1, C, 2)
-        else:
-            x = x.reshape(B, H, W // 2 + 1, C)
-        # Using ONNX friendly FFT functions
-        x = fft.irfft2(x, s=(H, W), dim=(1, 2), norm="ortho")
-        x = x.type(dtype)
-
-        return x + bias
+# Backward compatibility alias
+PatchEmbed = AFNOPatchEmbed
 
 
 class Block(nn.Module):
@@ -647,7 +306,7 @@ class ModAFNO(Module):
         self.scale_shift_mode = scale_shift_mode
         norm_layer = partial(nn.LayerNorm, eps=1e-6)
 
-        self.patch_embed = PatchEmbed(
+        self.patch_embed = AFNOPatchEmbed(
             inp_shape=inp_shape,
             in_channels=self.in_chans,
             patch_size=self.patch_size,
