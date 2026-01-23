@@ -15,11 +15,10 @@
 # limitations under the License.
 
 """
-Physics-Informed Fine-Tuning using FVM Residuals with Delta Learning.
+Physics-Informed Fine-Tuning using FVM Residuals.
 
-Fine-tunes GNN predictions using FVM residuals computed via Warp kernels.
-Uses delta learning: GNN predictions are model inputs, and the model predicts
-corrections (deltas) to make predictions physically consistent.
+Fine-tunes GNN predictions using Finite Volume Method (FVM) residuals
+computed via Warp kernels with autodiff support.
 """
 
 import os
@@ -136,7 +135,7 @@ def compute_sdf_at_points(polydata_2d, query_points_xy):
     query_polydata = pv.PolyData(query_points_3d)
     
     query_with_dist = query_polydata.compute_implicit_distance(noslip_surface_tri, inplace=False)
-    sdf = np.array(-1 * query_with_dist.point_data["implicit_distance"])
+    sdf = np.tanh(60 * np.array(-1 * query_with_dist.point_data["implicit_distance"]))
     
     print(f"SDF computed: range [{sdf.min():.6f}, {sdf.max():.6f}]")
     return sdf
@@ -188,7 +187,7 @@ def identify_boundary_faces(
 class DNN(torch.nn.Module):
     """MLP with Fourier feature encoding."""
 
-    def __init__(self, layers, fourier_features=64, zero_init_last=False):
+    def __init__(self, layers, fourier_features=64):
         super().__init__()
         self.depth = len(layers) - 1
         self.fourier_features = fourier_features
@@ -202,12 +201,9 @@ class DNN(torch.nn.Module):
             )
             layer_list.append(("activation_%d" % i, self.activation()))
 
-        final_layer = torch.nn.Linear(layers[-2], layers[-1])
-        if zero_init_last:
-            torch.nn.init.zeros_(final_layer.weight)
-            torch.nn.init.zeros_(final_layer.bias)
-        layer_list.append(("layer_%d" % (self.depth - 1), final_layer))
-        
+        layer_list.append(
+            ("layer_%d" % (self.depth - 1), torch.nn.Linear(layers[-2], layers[-1]))
+        )
         layerDict = OrderedDict(layer_list)
         self.layers = torch.nn.Sequential(layerDict)
 
@@ -217,54 +213,19 @@ class DNN(torch.nn.Module):
         return self.layers(x_proj)
 
 
-class StokesFVMDeltaModel(torch.nn.Module):
-    """
-    Delta learning model for Stokes flow. Predicts corrections (Δu, Δv, Δp)
-    given coordinates and GNN predictions. Final output: u = u_gnn + α * Δu.
-    """
+class StokesFVMModel(torch.nn.Module):
+    """Model for Stokes flow that outputs (u, v, p) given (x, y) coordinates."""
 
-    def __init__(
-        self, 
-        layers=[5, 128, 128, 128, 128, 3], 
-        fourier_features=64,
-        zero_init=True,
-        learnable_scale=True,
-        initial_scale=0.1,
-    ):
+    def __init__(self, layers=[2, 128, 128, 128, 128, 3], fourier_features=64):
         super().__init__()
-        self.dnn = DNN(layers, fourier_features, zero_init_last=zero_init)
-        
-        self.learnable_scale = learnable_scale
-        if learnable_scale:
-            self.alpha_vel = torch.nn.Parameter(torch.tensor(initial_scale))
-            self.alpha_p = torch.nn.Parameter(torch.tensor(initial_scale))
-        else:
-            self.register_buffer("alpha_vel", torch.tensor(1.0))
-            self.register_buffer("alpha_p", torch.tensor(1.0))
-        
-        self.zero_init = zero_init
-        self.initial_scale = initial_scale
+        self.dnn = DNN(layers, fourier_features)
 
-    def forward(self, coords_xy, gnn_uvp):
-        x = torch.cat([coords_xy, gnn_uvp], dim=1)
-        delta_raw = self.dnn(x)
-        
-        delta_u_raw = delta_raw[:, 0:1]
-        delta_v_raw = delta_raw[:, 1:2]
-        delta_p_raw = delta_raw[:, 2:3]
-        
-        delta_u = self.alpha_vel * delta_u_raw
-        delta_v = self.alpha_vel * delta_v_raw
-        delta_p = self.alpha_p * delta_p_raw
-        
-        u_final = gnn_uvp[:, 0:1] + delta_u
-        v_final = gnn_uvp[:, 1:2] + delta_v
-        p_final = gnn_uvp[:, 2:3] + delta_p
-        
+    def forward(self, coords_xy):
+        out = self.dnn(coords_xy)
         return {
-            "u": u_final, "v": v_final, "p": p_final,
-            "delta_u": delta_u, "delta_v": delta_v, "delta_p": delta_p,
-            "alpha_vel": self.alpha_vel, "alpha_p": self.alpha_p,
+            "u": out[:, 0:1],
+            "v": out[:, 1:2],
+            "p": out[:, 2:3],
         }
 
 
@@ -344,21 +305,36 @@ def extrude_2d_to_3d(polydata_2d, extrusion_length=1.0):
 
 
 class PhysicsInformedFineTunerFVM:
-    """Physics-informed fine-tuner using FVM residuals with delta learning."""
+    """Physics-informed fine-tuner using FVM residuals computed via Warp kernels."""
 
     def __init__(
         self,
         device,
-        gnn_u_cell, gnn_v_cell, gnn_p_cell,
-        ref_u_cell, ref_v_cell, ref_p_cell,
-        cell_centers, cell_volumes,
-        inflow_face_indices, noslip_face_indices,
-        face_data, n_cells, nu,
-        lr=0.001, total_iters=1000, use_lr_scheduler=True,
-        ref_u_point=None, ref_v_point=None, ref_p_point=None, coords_point=None,
-        gnn_u_point=None, gnn_v_point=None, gnn_p_point=None,
-        zero_init=True, learnable_scale=True, initial_scale=0.1, delta_reg_weight=0.0,
-        sdf_cell=None, use_sdf_weighting=True,
+        gnn_u_cell,
+        gnn_v_cell,
+        gnn_p_cell,
+        ref_u_cell,
+        ref_v_cell,
+        ref_p_cell,
+        cell_centers,
+        cell_volumes,
+        inflow_face_indices,
+        noslip_face_indices,
+        face_data,
+        n_cells,
+        nu,
+        lr=0.001,
+        total_iters=1000,
+        use_lr_scheduler=True,
+        ref_u_point=None,
+        ref_v_point=None,
+        ref_p_point=None,
+        coords_point=None,
+        gnn_u_point=None,
+        gnn_v_point=None,
+        gnn_p_point=None,
+        sdf_cell=None,
+        use_sdf_weighting=True,
     ):
         super().__init__()
 
@@ -368,6 +344,17 @@ class PhysicsInformedFineTunerFVM:
         self.lr = lr
         self.total_iters = total_iters
         self.use_lr_scheduler = use_lr_scheduler
+        
+        # SDF-based weighting for physics residuals
+        self.use_sdf_weighting = use_sdf_weighting
+        if sdf_cell is not None and use_sdf_weighting:
+            sdf_tensor = torch.tensor(sdf_cell, dtype=torch.float32).to(device)
+            sdf_abs = torch.abs(sdf_tensor)
+            sdf_max = torch.max(sdf_abs) + 1e-8
+            self.sdf_weights = sdf_abs / sdf_max
+            print(f"SDF weighting enabled: weights in [{self.sdf_weights.min():.4f}, {self.sdf_weights.max():.4f}]")
+        else:
+            self.sdf_weights = None
 
         self.ref_u_cell = torch.tensor(ref_u_cell).float().to(self.device).reshape(-1, 1)
         self.ref_v_cell = torch.tensor(ref_v_cell).float().to(self.device).reshape(-1, 1)
@@ -376,54 +363,40 @@ class PhysicsInformedFineTunerFVM:
         self.gnn_u_cell = torch.tensor(gnn_u_cell).float().to(self.device).reshape(-1, 1)
         self.gnn_v_cell = torch.tensor(gnn_v_cell).float().to(self.device).reshape(-1, 1)
         self.gnn_p_cell = torch.tensor(gnn_p_cell).float().to(self.device).reshape(-1, 1)
-        
-        self.gnn_uvp_cell = torch.cat([self.gnn_u_cell, self.gnn_v_cell, self.gnn_p_cell], dim=1)
 
         self.cell_centers_3d = cell_centers.astype(np.float32)
-        self.cell_centers_xy = torch.tensor(cell_centers[:, :2], requires_grad=False).float().to(self.device)
+        self.cell_centers_xy = (
+            torch.tensor(cell_centers[:, :2], requires_grad=False).float().to(self.device)
+        )
         self.cell_volumes_np = cell_volumes.astype(np.float32)
 
-        face_centers_np = face_data['face_centers']
-        self.coords_inflow_face = torch.tensor(face_centers_np[inflow_face_indices, :2], requires_grad=False).float().to(self.device)
-        self.coords_noslip_face = torch.tensor(face_centers_np[noslip_face_indices, :2], requires_grad=False).float().to(self.device)
-        
-        # Interpolate GNN predictions to boundary faces
-        cell_xy = cell_centers[:, :2]
-        tree_cells = cKDTree(cell_xy)
-        
-        inflow_face_xy = face_centers_np[inflow_face_indices, :2]
-        _, inflow_nearest_cells = tree_cells.query(inflow_face_xy)
-        self.gnn_uvp_inflow = torch.tensor(
-            np.column_stack([gnn_u_cell[inflow_nearest_cells], gnn_v_cell[inflow_nearest_cells], gnn_p_cell[inflow_nearest_cells]]),
-            requires_grad=False
-        ).float().to(self.device)
-        
-        noslip_face_xy = face_centers_np[noslip_face_indices, :2]
-        _, noslip_nearest_cells = tree_cells.query(noslip_face_xy)
-        self.gnn_uvp_noslip = torch.tensor(
-            np.column_stack([gnn_u_cell[noslip_nearest_cells], gnn_v_cell[noslip_nearest_cells], gnn_p_cell[noslip_nearest_cells]]),
-            requires_grad=False
-        ).float().to(self.device)
+        face_centers = face_data['face_centers']
+        self.coords_inflow_face = (
+            torch.tensor(face_centers[inflow_face_indices, :2], requires_grad=False)
+            .float().to(self.device)
+        )
+        self.coords_noslip_face = (
+            torch.tensor(face_centers[noslip_face_indices, :2], requires_grad=False)
+            .float().to(self.device)
+        )
         
         self.has_point_data = coords_point is not None
         if self.has_point_data:
-            self.coords_point = torch.tensor(coords_point[:, :2], requires_grad=False).float().to(self.device)
+            self.coords_point = (
+                torch.tensor(coords_point[:, :2], requires_grad=False).float().to(self.device)
+            )
             self.ref_u_point = torch.tensor(ref_u_point).float().to(self.device).reshape(-1, 1)
             self.ref_v_point = torch.tensor(ref_v_point).float().to(self.device).reshape(-1, 1)
             self.ref_p_point = torch.tensor(ref_p_point).float().to(self.device).reshape(-1, 1)
             
             if gnn_u_point is not None:
-                self.gnn_uvp_point = torch.tensor(
-                    np.column_stack([np.asarray(gnn_u_point).flatten(), np.asarray(gnn_v_point).flatten(), np.asarray(gnn_p_point).flatten()]),
-                    requires_grad=False
-                ).float().to(self.device)
+                self.gnn_u_point = torch.tensor(np.asarray(gnn_u_point).flatten()).float().to(self.device).reshape(-1, 1)
+                self.gnn_v_point = torch.tensor(np.asarray(gnn_v_point).flatten()).float().to(self.device).reshape(-1, 1)
+                self.gnn_p_point = torch.tensor(np.asarray(gnn_p_point).flatten()).float().to(self.device).reshape(-1, 1)
             else:
-                point_xy = coords_point[:, :2]
-                _, point_nearest_cells = tree_cells.query(point_xy)
-                self.gnn_uvp_point = torch.tensor(
-                    np.column_stack([gnn_u_cell[point_nearest_cells], gnn_v_cell[point_nearest_cells], gnn_p_cell[point_nearest_cells]]),
-                    requires_grad=False
-                ).float().to(self.device)
+                self.gnn_u_point = None
+                self.gnn_v_point = None
+                self.gnn_p_point = None
 
         self.face_data = face_data
         self.all_cell_indices = np.arange(n_cells, dtype=np.int32)
@@ -434,28 +407,9 @@ class PhysicsInformedFineTunerFVM:
             "n_cells": n_cells,
         }
 
-        self.delta_reg_weight = delta_reg_weight
-        self.zero_init = zero_init
-        self.learnable_scale = learnable_scale
-        self.initial_scale = initial_scale
-        
-        # SDF weighting
-        self.use_sdf_weighting = use_sdf_weighting
-        if sdf_cell is not None and use_sdf_weighting:
-            sdf_tensor = torch.tensor(sdf_cell, dtype=torch.float32).to(self.device)
-            sdf_abs = torch.abs(sdf_tensor)
-            sdf_max = torch.max(sdf_abs) + 1e-8
-            self.sdf_weights = sdf_abs / sdf_max
-            print(f"SDF weighting enabled: weights in [{self.sdf_weights.min():.4f}, {self.sdf_weights.max():.4f}]")
-        else:
-            self.sdf_weights = None
-
-        self.model = StokesFVMDeltaModel(
-            layers=[5, 128, 128, 128, 128, 3],
+        self.model = StokesFVMModel(
+            layers=[2, 128, 128, 128, 128, 3],
             fourier_features=64,
-            zero_init=zero_init,
-            learnable_scale=learnable_scale,
-            initial_scale=initial_scale,
         ).to(self.device)
 
         self._setup_optimizer()
@@ -475,14 +429,17 @@ class PhysicsInformedFineTunerFVM:
             base_opt = torch.optim.AdamW(
                 other_params, lr=self.lr, weight_decay=0.0, betas=(0.9, 0.999), eps=1.0e-8,
             ) if other_params else None
+
             muon_opt = torch.optim.Muon(muon_params, lr=self.lr, weight_decay=0.0)
+
             if base_opt is not None:
                 self.optimizer = CombinedOptimizer(optimizers=[muon_opt, base_opt])
             else:
                 self.optimizer = muon_opt
         else:
             self.optimizer = torch.optim.Adam(
-                self.model.parameters(), lr=self.lr,
+                self.model.parameters(),
+                lr=self.lr,
                 fused=True if torch.cuda.is_available() else False,
             )
 
@@ -493,29 +450,27 @@ class PhysicsInformedFineTunerFVM:
 
     def loss(self):
         # Boundary conditions
-        results_inflow = self.model(self.coords_inflow_face, self.gnn_uvp_inflow)
+        results_inflow = self.model(self.coords_inflow_face)
         pred_u_in, pred_v_in = results_inflow["u"], results_inflow["v"]
         u_in, v_in = self.parabolic_inflow(self.coords_inflow_face[:, 1:2])
         loss_u_in = torch.mean((u_in - pred_u_in) ** 2)
         loss_v_in = torch.mean((v_in - pred_v_in) ** 2)
 
-        results_noslip = self.model(self.coords_noslip_face, self.gnn_uvp_noslip)
+        results_noslip = self.model(self.coords_noslip_face)
         pred_u_noslip, pred_v_noslip = results_noslip["u"], results_noslip["v"]
         loss_u_noslip = torch.mean(pred_u_noslip**2)
         loss_v_noslip = torch.mean(pred_v_noslip**2)
 
         # Cell-centered predictions
-        model_out_cell = self.model(self.cell_centers_xy, self.gnn_uvp_cell)
+        model_out_cell = self.model(self.cell_centers_xy)
         pred_u_cell = model_out_cell["u"]
         pred_v_cell = model_out_cell["v"]
         pred_p_cell = model_out_cell["p"]
-        
-        delta_u = model_out_cell["delta_u"]
-        delta_v = model_out_cell["delta_v"]
-        delta_p = model_out_cell["delta_p"]
-        delta_u_mag = torch.mean(torch.abs(delta_u)).detach()
-        delta_v_mag = torch.mean(torch.abs(delta_v)).detach()
-        delta_p_mag = torch.mean(torch.abs(delta_p)).detach()
+
+        # Data loss
+        loss_u = torch.mean((self.gnn_u_cell - pred_u_cell) ** 2)
+        loss_v = torch.mean((self.gnn_v_cell - pred_v_cell) ** 2)
+        loss_p = torch.mean((self.gnn_p_cell - pred_p_cell) ** 2)
 
         # FVM residuals
         velocity_3d = torch.cat([pred_u_cell, pred_v_cell, torch.zeros_like(pred_u_cell)], dim=1)
@@ -542,34 +497,29 @@ class PhysicsInformedFineTunerFVM:
             loss_cont = torch.mean(continuity**2)
             loss_mom_u = torch.mean(momentum_x**2)
             loss_mom_v = torch.mean(momentum_y**2)
-        
-        loss_delta_reg = torch.mean(delta_u**2 + delta_v**2 + delta_p**2)
-        
-        alpha_vel = model_out_cell["alpha_vel"]
-        alpha_p = model_out_cell["alpha_p"]
 
         return (
-            loss_u_in, loss_v_in, loss_u_noslip, loss_v_noslip,
+            loss_u, loss_v, loss_p,
+            loss_u_in, loss_v_in,
+            loss_u_noslip, loss_v_noslip,
             loss_mom_u, loss_mom_v, loss_cont,
-            loss_delta_reg, delta_u_mag, delta_v_mag, delta_p_mag,
-            alpha_vel, alpha_p,
         )
 
     def train_step(self):
         self.model.train()
 
         (
-            loss_u_in, loss_v_in, loss_u_noslip, loss_v_noslip,
+            loss_u, loss_v, loss_p,
+            loss_u_in, loss_v_in,
+            loss_u_noslip, loss_v_noslip,
             loss_mom_u, loss_mom_v, loss_cont,
-            loss_delta_reg, delta_u_mag, delta_v_mag, delta_p_mag,
-            alpha_vel, alpha_p,
         ) = self.loss()
 
         loss = (
-            10000 * loss_u_in + 10000 * loss_v_in
-            + 100 * loss_u_noslip + 100 * loss_v_noslip
-            + 100000 * loss_mom_u + 100000 * loss_mom_v + 10000 * loss_cont
-            + self.delta_reg_weight * loss_delta_reg
+            1 * loss_u + 1 * loss_v + 1 * loss_p
+            + 100 * loss_u_in + 100 * loss_v_in
+            + 1000 * loss_u_noslip + 1000 * loss_v_noslip
+            + 1000000 * loss_mom_u + 1000000 * loss_mom_v + 1000000 * loss_cont
         )
 
         self.optimizer.zero_grad()
@@ -579,16 +529,16 @@ class PhysicsInformedFineTunerFVM:
             self.scheduler.step()
 
         return (
-            loss_u_in, loss_v_in, loss_u_noslip, loss_v_noslip,
+            loss_u, loss_v, loss_p,
+            loss_u_in, loss_v_in,
+            loss_u_noslip, loss_v_noslip,
             loss_mom_u, loss_mom_v, loss_cont,
-            loss_delta_reg, delta_u_mag, delta_v_mag, delta_p_mag,
-            alpha_vel, alpha_p,
         )
 
     def validation(self):
         self.model.eval()
         with torch.no_grad():
-            model_out = self.model(self.coords_point, self.gnn_uvp_point)
+            model_out = self.model(self.coords_point)
             pred_u, pred_v, pred_p = model_out["u"], model_out["v"], model_out["p"]
             error_u = torch.linalg.norm(self.ref_u_point - pred_u) / torch.linalg.norm(self.ref_u_point)
             error_v = torch.linalg.norm(self.ref_v_point - pred_v) / torch.linalg.norm(self.ref_v_point)
@@ -608,7 +558,7 @@ def main(cfg: DictConfig) -> None:
     initialize_wandb(
         project="PhysicsNeMo-Launch",
         entity="PhysicsNeMo",
-        name="Stokes-FVM-Delta-Learning",
+        name="Stokes-FVM-Fine-Tuning",
         group="Stokes-DDP-Group",
         mode=cfg.wandb_mode,
     )
@@ -673,10 +623,6 @@ def main(cfg: DictConfig) -> None:
 
     # Initialize fine-tuner
     use_lr_scheduler = getattr(cfg, 'pi_use_lr_scheduler', True)
-    zero_init = getattr(cfg, 'delta_zero_init', True)
-    learnable_scale = getattr(cfg, 'delta_learnable_scale', True)
-    initial_scale = getattr(cfg, 'delta_initial_scale', 0.1)
-    delta_reg_weight = getattr(cfg, 'delta_reg_weight', 0.0)
     use_sdf_weighting = getattr(cfg, 'use_sdf_weighting', True)
     
     pi_fine_tuner = PhysicsInformedFineTunerFVM(
@@ -689,33 +635,30 @@ def main(cfg: DictConfig) -> None:
         lr=cfg.pi_lr, total_iters=cfg.pi_iters, use_lr_scheduler=use_lr_scheduler,
         ref_u_point=ref_u, ref_v_point=ref_v, ref_p_point=ref_p, coords_point=coords,
         gnn_u_point=gnn_u, gnn_v_point=gnn_v, gnn_p_point=gnn_p,
-        zero_init=zero_init, learnable_scale=learnable_scale,
-        initial_scale=initial_scale, delta_reg_weight=delta_reg_weight,
         sdf_cell=sdf_cell, use_sdf_weighting=use_sdf_weighting,
     )
 
     # Training loop
-    logger.info("Starting delta learning fine-tuning...")
+    logger.info("Starting physics-informed fine-tuning...")
 
     for iters in range(cfg.pi_iters):
         start_iter_time = time.time()
 
         (
-            loss_u_in, loss_v_in, loss_u_noslip, loss_v_noslip,
+            loss_u, loss_v, loss_p,
+            loss_u_in, loss_v_in,
+            loss_u_noslip, loss_v_noslip,
             loss_mom_u, loss_mom_v, loss_cont,
-            loss_delta_reg, delta_u_mag, delta_v_mag, delta_p_mag,
-            alpha_vel, alpha_p,
         ) = pi_fine_tuner.train_step()
 
         if iters % 100 == 0:
             error_u, error_v, error_p = pi_fine_tuner.validation()
 
             logger.info(f"Iteration: {iters}")
-            logger.info(f"BC: inflow u={loss_u_in.detach().cpu().numpy():.3e}, v={loss_v_in.detach().cpu().numpy():.3e}")
-            logger.info(f"BC: noslip u={loss_u_noslip.detach().cpu().numpy():.3e}, v={loss_v_noslip.detach().cpu().numpy():.3e}")
-            logger.info(f"FVM: mom_u={loss_mom_u.detach().cpu().numpy():.3e}, mom_v={loss_mom_v.detach().cpu().numpy():.3e}, cont={loss_cont.detach().cpu().numpy():.3e}")
-            logger.info(f"Delta: reg={loss_delta_reg.detach().cpu().numpy():.3e}, α_vel={alpha_vel.detach().cpu().numpy():.4f}, α_p={alpha_p.detach().cpu().numpy():.4f}")
-            logger.info(f"Mean |Δ|: u={delta_u_mag.cpu().numpy():.3e}, v={delta_v_mag.cpu().numpy():.3e}, p={delta_p_mag.cpu().numpy():.3e}")
+            logger.info(f"Loss u: {loss_u.detach().cpu().numpy():.3e}, v: {loss_v.detach().cpu().numpy():.3e}, p: {loss_p.detach().cpu().numpy():.3e}")
+            logger.info(f"Loss inflow: u={loss_u_in.detach().cpu().numpy():.3e}, v={loss_v_in.detach().cpu().numpy():.3e}")
+            logger.info(f"Loss noslip: u={loss_u_noslip.detach().cpu().numpy():.3e}, v={loss_v_noslip.detach().cpu().numpy():.3e}")
+            logger.info(f"Loss FVM: mom_u={loss_mom_u.detach().cpu().numpy():.3e}, mom_v={loss_mom_v.detach().cpu().numpy():.3e}, cont={loss_cont.detach().cpu().numpy():.3e}")
             logger.info(f"Error: u={error_u:.3e}, v={error_v:.3e}, p={error_p:.3e}")
             logger.info(f"LR: {pi_fine_tuner.optimizer.param_groups[0]['lr']:.3e}, Time: {time.time() - start_iter_time:.2f}s")
             logger.info("-" * 50)
@@ -724,38 +667,28 @@ def main(cfg: DictConfig) -> None:
 
     # Save results
     with torch.no_grad():
-        model_out = pi_fine_tuner.model(pi_fine_tuner.cell_centers_xy, pi_fine_tuner.gnn_uvp_cell)
+        model_out = pi_fine_tuner.model(pi_fine_tuner.cell_centers_xy)
         pred_u_cell = model_out["u"]
         pred_v_cell = model_out["v"]
         pred_p_cell = model_out["p"]
-        delta_u = model_out["delta_u"]
-        delta_v = model_out["delta_v"]
-        delta_p = model_out["delta_p"]
 
         ugrid_3d_cell.cell_data["filtered_u"] = pred_u_cell.cpu().numpy().flatten()
         ugrid_3d_cell.cell_data["filtered_v"] = pred_v_cell.cpu().numpy().flatten()
         ugrid_3d_cell.cell_data["filtered_p"] = pred_p_cell.cpu().numpy().flatten()
-        ugrid_3d_cell.cell_data["delta_u"] = delta_u.cpu().numpy().flatten()
-        ugrid_3d_cell.cell_data["delta_v"] = delta_v.cpu().numpy().flatten()
-        ugrid_3d_cell.cell_data["delta_p"] = delta_p.cpu().numpy().flatten()
 
         # Final comparison
         logger.info("=" * 60)
         logger.info("FINAL RESULTS: GNN vs Refined (wrt Ground Truth)")
         logger.info("=" * 60)
         
-        model_out_point = pi_fine_tuner.model(pi_fine_tuner.coords_point, pi_fine_tuner.gnn_uvp_point)
+        model_out_point = pi_fine_tuner.model(pi_fine_tuner.coords_point)
         pred_u_point = model_out_point["u"]
         pred_v_point = model_out_point["v"]
         pred_p_point = model_out_point["p"]
         
-        gnn_u_point = pi_fine_tuner.gnn_uvp_point[:, 0:1]
-        gnn_v_point = pi_fine_tuner.gnn_uvp_point[:, 1:2]
-        gnn_p_point = pi_fine_tuner.gnn_uvp_point[:, 2:3]
-        
-        gnn_u_error = torch.linalg.norm(pi_fine_tuner.ref_u_point - gnn_u_point) / torch.linalg.norm(pi_fine_tuner.ref_u_point)
-        gnn_v_error = torch.linalg.norm(pi_fine_tuner.ref_v_point - gnn_v_point) / torch.linalg.norm(pi_fine_tuner.ref_v_point)
-        gnn_p_error = torch.linalg.norm(pi_fine_tuner.ref_p_point - gnn_p_point) / torch.linalg.norm(pi_fine_tuner.ref_p_point)
+        gnn_u_error = torch.linalg.norm(pi_fine_tuner.ref_u_point - pi_fine_tuner.gnn_u_point) / torch.linalg.norm(pi_fine_tuner.ref_u_point)
+        gnn_v_error = torch.linalg.norm(pi_fine_tuner.ref_v_point - pi_fine_tuner.gnn_v_point) / torch.linalg.norm(pi_fine_tuner.ref_v_point)
+        gnn_p_error = torch.linalg.norm(pi_fine_tuner.ref_p_point - pi_fine_tuner.gnn_p_point) / torch.linalg.norm(pi_fine_tuner.ref_p_point)
         
         refined_u_error = torch.linalg.norm(pi_fine_tuner.ref_u_point - pred_u_point) / torch.linalg.norm(pi_fine_tuner.ref_u_point)
         refined_v_error = torch.linalg.norm(pi_fine_tuner.ref_v_point - pred_v_point) / torch.linalg.norm(pi_fine_tuner.ref_v_point)
@@ -788,7 +721,7 @@ def main(cfg: DictConfig) -> None:
         ugrid_3d_cell.cell_data["residual_momentum_z"] = momentum_z.cpu().numpy().flatten()
 
         ugrid_3d_point = ugrid_3d_cell.cell_data_to_point_data()
-        output_path = path.replace(".vtp", "_fvm_delta_filtered.vtu")
+        output_path = path.replace(".vtp", "_fvm_filtered.vtu")
         ugrid_3d_point.save(output_path)
         logger.info(f"Saved results to: {output_path}")
 

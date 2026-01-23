@@ -62,14 +62,11 @@ pi_use_lr_scheduler: True
 
 # Delta learning options (for pi_fine_tuning_fvm.py)
 # These control how the model preserves initial GNN predictions
-delta_zero_init: True        # Zero-initialize final layer (delta starts at ~0)
+delta_zero_init: true        # Zero-initialize final layer (delta starts at ~0)
 delta_learnable_scale: False  # Learn scaling factors for deltas (starts at initial_scale)
 delta_initial_scale: 0.1     # Initial value for learnable scaling factor
 delta_reg_weight: 0.1        # Weight for delta regularization (penalize large corrections)
 
-# Two-phase training options (for pi_fine_tuning_fvm.py)
-# Phase 1: Reconstruction - model learns to reproduce GNN predictions (warms up features)
-# Phase 2: Physics fine-tuning - freeze early layers, train later layers with physics loss
-use_two_phase: False         # Enable two-phase training (False = use single-phase delta learning)
-phase1_iters: 2000           # Number of iterations for Phase 1 (reconstruction)
-freeze_layers: 2             # Number of hidden layers to freeze in Phase 2
+# SDF-based weighting for physics residuals
+use_sdf_weighting: true
+
