@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -136,7 +136,7 @@ class Sequence_Trainer:
         self.model = Sequence_Model(C.sequence_dim, C.sequence_context_dim, dist)
 
         if C.jit:
-            self.model = torch.jit.script(self.model).to(dist.device)
+            self.model = torch.compile(self.model.to(dist.device))
         else:
             self.model = self.model.to(dist.device)
         if C.watch_model and not C.jit and dist.rank == 0:

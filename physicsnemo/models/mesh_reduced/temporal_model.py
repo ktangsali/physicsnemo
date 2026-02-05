@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -18,8 +18,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import LayerNorm
 
-from physicsnemo.nn.gnn_layers.mesh_graph_mlp import MeshGraphMLP
-from physicsnemo.nn.transformer_decoder import (
+from physicsnemo.nn.module.gnn_layers.mesh_graph_mlp import MeshGraphMLP
+from physicsnemo.nn.module.transformer_decoder import (
     DecoderOnlyLayer,
     TransformerDecoder,
 )
