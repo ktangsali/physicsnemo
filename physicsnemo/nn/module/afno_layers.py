@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from jaxtyping import Float
 
-import physicsnemo.nn.fft as fft
+import physicsnemo.nn.module.fft as fft
 from physicsnemo.core.module import Module
 
 Tensor = torch.Tensor
@@ -85,7 +85,9 @@ class AFNOMlp(Module):
         self.fc2 = nn.Linear(latent_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self, x: Float[Tensor, "... in_features"]
+    ) -> Float[Tensor, "... out_features"]:
         r"""Forward pass of the MLP."""
         x = self.fc1(x)
         x = self.act(x)
@@ -467,7 +469,9 @@ class ScaleShiftMlp(Module):
         sequence.append(nn.Linear(hidden_features, out_features * 2))
         self.net = nn.Sequential(*sequence)
 
-    def forward(self, x: Tensor) -> tuple:
+    def forward(
+        self, x: Float[Tensor, "batch in_features"]
+    ) -> tuple[Float[Tensor, "batch out_features"], Float[Tensor, "batch out_features"]]:
         r"""Forward pass computing scale and shift parameters."""
         (scale, shift) = torch.chunk(self.net(x), 2, dim=1)
         return (1 + scale, shift)
@@ -544,7 +548,11 @@ class ModAFNOMlp(AFNOMlp):
             mod_features, latent_features, **scale_shift_kwargs
         )
 
-    def forward(self, x: Tensor, mod_embed: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Float[Tensor, "... in_features"],
+        mod_embed: Float[Tensor, "batch mod_features"],
+    ) -> Float[Tensor, "... out_features"]:
         r"""Forward pass with modulation."""
         # Compute scale and shift from modulation embedding
         (scale, shift) = self.scale_shift(mod_embed)

@@ -34,7 +34,7 @@ from .module.activations import (
     Stan,
     get_activation,
 )
-from .afno_layers import (
+from .module.afno_layers import (
     AFNO2DLayer,
     AFNOMlp,
     AFNOPatchEmbed,

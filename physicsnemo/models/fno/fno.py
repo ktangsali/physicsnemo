@@ -17,6 +17,8 @@
 from dataclasses import dataclass
 from typing import List, Union
 
+import torch
+from jaxtyping import Float
 from torch import Tensor
 
 import physicsnemo.nn as layers
@@ -25,7 +27,7 @@ from physicsnemo.core.module import Module
 from physicsnemo.models.mlp import FullyConnected
 
 # Import FNO encoder layers from physicsnemo.nn
-from physicsnemo.nn import (
+from physicsnemo.nn.module.fno_layers import (
     FNO1DEncoder,
     FNO2DEncoder,
     FNO3DEncoder,
@@ -42,7 +44,7 @@ from physicsnemo.nn import (
 @dataclass
 class MetaData(ModelMetaData):
     # Optimization
-    jit: bool = True
+    jit: bool = False
     cuda_graphs: bool = True
     amp: bool = False
     # Inference
@@ -215,8 +217,17 @@ class FNO(Module):
                 "Only 1D, 2D, 3D and 4D FNO implemented"
             )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Float[Tensor, "batch channels ..."]) -> Float[Tensor, "batch out_channels ..."]:
         r"""Forward pass of the FNO model."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            expected_ndim = self.dimension + 2  # batch + channels + spatial dims
+            if x.ndim != expected_ndim:
+                raise ValueError(
+                    f"Expected {expected_ndim}D input tensor for {self.dimension}D FNO, "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
+                )
+
         # Encode in Fourier space
         y_latent = self.spec_encoder(x)
 
