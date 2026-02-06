@@ -23,7 +23,6 @@ import torch.nn as nn
 from jaxtyping import Float
 
 import physicsnemo  # noqa: F401 for docs
-import physicsnemo.nn.module.fft as fft
 from physicsnemo.core.meta import ModelMetaData
 from physicsnemo.core.module import Module
 
