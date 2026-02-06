@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import inspect
 import io
 import json
@@ -35,7 +36,7 @@ import torch
 
 from physicsnemo.core.filesystem import _download_cached, _get_fs
 from physicsnemo.core.meta import ModelMetaData
-from physicsnemo.core.registry import ModelRegistry
+from physicsnemo.core.registry import _ENTRYPOINT_TYPES, ModelRegistry
 
 # Used for saving checkpoints of nested modules
 _BASE_CKPT_PREFIX = "__physicsnemo.Module__"
@@ -65,6 +66,21 @@ def _load_state_dict_with_logging(
             f"Unexpected keys when loading {module.__class__.__name__}: {unexpected_keys}"
         )
     return missing_keys, unexpected_keys
+
+
+def _ignore_device_buffer_keys(module, incompatible_keys):
+    """Post-hook to ignore device_buffer in missing/unexpected keys.
+
+    The device_buffer is a non-persistent buffer used for device tracking.
+    Old checkpoints (before v2.0.0) may have it saved (when it was persistent), and new
+    checkpoints won't have it. This hook ensures backward compatibility.
+    """
+    incompatible_keys.missing_keys[:] = [
+        k for k in incompatible_keys.missing_keys if not k.endswith("device_buffer")
+    ]
+    incompatible_keys.unexpected_keys[:] = [
+        k for k in incompatible_keys.unexpected_keys if not k.endswith("device_buffer")
+    ]
 
 
 class Module(torch.nn.Module):
@@ -209,8 +225,10 @@ class Module(torch.nn.Module):
     def __init__(self, meta: Union[ModelMetaData, None] = None):
         super().__init__()
         self.meta = meta
-        self.register_buffer("device_buffer", torch.empty(0))
+        self.register_buffer("device_buffer", torch.empty(0), persistent=False)
         self._setup_logger()
+        # Register hook to handle device_buffer compatibility with old checkpoints
+        self.register_load_state_dict_post_hook(_ignore_device_buffer_keys)
 
     def __init_subclass__(cls, *, register=False, **kwargs):
         """
@@ -352,11 +370,8 @@ class Module(torch.nn.Module):
                 # Cross fingers and hope for the best (maybe the class name changed)
                 _cls = cls
 
-        # This works with the importlib.metadata.EntryPoint
-        # if isinstance(_cls, importlib.metadata.EntryPoint):
-        if "EntryPoint" in str(type(_cls)):
-            # I hate myself for this.  Somehow, we've got crossvoer pollution from
-            # importlib_metadata.EntryPoint.
+        # This works with both importlib.metadata.EntryPoint and importlib_metadata.EntryPoint
+        if isinstance(_cls, _ENTRYPOINT_TYPES):
             _cls = _cls.load()
 
         return _cls
@@ -384,6 +399,8 @@ class Module(torch.nn.Module):
 
         Examples
         --------
+        >>> import warnings
+        >>> warnings.filterwarnings("ignore")
         >>> from physicsnemo.core.module import Module
         >>> # Define the argument dictionary with the three required keys
         >>> arg_dict = {

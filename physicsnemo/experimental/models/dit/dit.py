@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -87,7 +87,7 @@ class DiT(Module):
     mlp_ratio (float, optional):
         The ratio of the MLP hidden dimension to the embedding dimension. Defaults to 4.0.
     attention_backend (Literal["timm", "transformer_engine", "natten2d"], optional):
-        The attention backend to use. Defaults to 'transformer_engine'. You may provide:
+        The attention backend to use. Defaults to 'timm'. You may provide:
         - A string in {"timm", "transformer_engine", "natten2d"} to select a built-in backend.
           See :class:`physicsnemo.experimental.models.dit.layers.DiTBlock` for a description of each built-in backend.
     layernorm_backend (Literal["apex", "torch"], optional):
@@ -161,7 +161,7 @@ class DiT(Module):
         depth: int = 12,
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
-        attention_backend: Literal["timm", "transformer_engine", "natten2d"] = "transformer_engine",
+        attention_backend: Literal["timm", "transformer_engine", "natten2d"] = "timm",
         layernorm_backend: Literal["apex", "torch"] = "torch",
         condition_dim: Optional[int] = None,
         dit_initialization: Optional[int] = True,
@@ -182,6 +182,14 @@ class DiT(Module):
         self.patch_size = patch_size if isinstance(patch_size, (tuple, list)) else (patch_size, patch_size)
         self.num_heads = num_heads
         self.condition_dim = condition_dim
+        if attention_backend == "natten2d":
+            latent_hw = (
+                self.input_size[0] // self.patch_size[0],
+                self.input_size[1] // self.patch_size[1]
+            )
+            self.attn_kwargs_forward = {"latent_hw": latent_hw}
+        else:
+            self.attn_kwargs_forward = {}
 
         # Input validation
         if attention_backend not in ["timm", "transformer_engine", "natten2d"]:
@@ -318,7 +326,7 @@ class DiT(Module):
             c = t  # (B, D)
         
         for block in self.blocks:
-            x = block(x, c, p_dropout=p_dropout, attn_kwargs=attn_kwargs)  # (B, L, D)
+            x = block(x, c, p_dropout=p_dropout, attn_kwargs={**self.attn_kwargs_forward, **(attn_kwargs or {})})  # (B, L, D)
 
         # De-tokenize: (B, L, D) -> (B, C, H, W)
         if self.force_tokenization_fp32:
