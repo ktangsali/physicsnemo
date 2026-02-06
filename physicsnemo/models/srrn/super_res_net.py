@@ -36,6 +36,7 @@ import math
 from dataclasses import dataclass
 
 import torch
+from jaxtyping import Float
 from torch import nn
 
 import physicsnemo  # noqa: F401 for docs
@@ -49,7 +50,7 @@ Tensor = torch.Tensor
 @dataclass
 class MetaData(ModelMetaData):
     # Optimization
-    jit: bool = True
+    jit: bool = False
     cuda_graphs: bool = False  # TODO: Investigate this
     amp_cpu: bool = False
     amp_gpu: bool = False
@@ -199,8 +200,23 @@ class SRResNet(Module):
             batch_norm=False,
         )
 
-    def forward(self, in_vars: Tensor) -> Tensor:
+    def forward(
+        self, in_vars: Float[Tensor, "batch in_channels depth height width"]
+    ) -> Float[Tensor, "batch out_channels depth_out height_out width_out"]:
         r"""Forward pass of SRResNet."""
+        # Input validation
+        if not torch.compiler.is_compiling():
+            if in_vars.ndim != 5:
+                raise ValueError(
+                    f"Expected 5D input tensor (B, C, D, H, W), "
+                    f"got {in_vars.ndim}D tensor with shape {tuple(in_vars.shape)}"
+                )
+            if in_vars.shape[1] != self.in_channels:
+                raise ValueError(
+                    f"Expected {self.in_channels} input channels, "
+                    f"got {in_vars.shape[1]} channels"
+                )
+
         output = self.conv_block1(in_vars)  # (B, conv_layer_size, D, H, W)
         residual = output  # (B, conv_layer_size, D, H, W)
         output = self.residual_blocks(output)  # (B, conv_layer_size, D, H, W)
@@ -277,7 +293,9 @@ class ConvolutionalBlock3d(nn.Module):
         # Put together the convolutional block as a sequence of the layers
         self.conv_block = nn.Sequential(*layers)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(
+        self, input: Float[Tensor, "batch in_channels depth height width"]
+    ) -> Float[Tensor, "batch out_channels depth_out height_out width_out"]:
         r"""Forward pass of the convolutional block."""
         output = self.activation_fn(self.conv_block(input))
         return output  # (B, out_channels, D', H', W')
@@ -314,7 +332,9 @@ class PixelShuffle3d(nn.Module):
         super().__init__()
         self.scale = scale
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(
+        self, input: Float[Tensor, "batch channels_in depth height width"]
+    ) -> Float[Tensor, "batch channels_out depth_out height_out width_out"]:
         r"""Forward pass of pixel shuffle."""
         batch_size, channels, in_depth, in_height, in_width = input.size()
         nOut = int(channels // self.scale**3)
@@ -381,7 +401,9 @@ class SubPixel_ConvolutionalBlock3d(nn.Module):
         self.pixel_shuffle = PixelShuffle3d(scaling_factor)
         self.prelu = nn.PReLU()
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(
+        self, input: Float[Tensor, "batch channels depth height width"]
+    ) -> Float[Tensor, "batch channels depth_out height_out width_out"]:
         r"""Forward pass of sub-pixel convolutional block."""
         output = self.conv(input)  # (B, C * s^3, D, H, W)
         output = self.pixel_shuffle(output)  # (B, C, D*s, H*s, W*s)
@@ -446,7 +468,9 @@ class ResidualConvBlock3d(nn.Module):
 
         self.conv_layers = nn.Sequential(*layers)
 
-    def forward(self, input: Tensor) -> Tensor:
+    def forward(
+        self, input: Float[Tensor, "batch channels depth height width"]
+    ) -> Float[Tensor, "batch channels depth height width"]:
         r"""Forward pass of residual block."""
         residual = input  # (B, C, D, H, W)
         output = self.conv_layers(input)  # (B, C, D, H, W)
