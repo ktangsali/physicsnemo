@@ -217,7 +217,9 @@ class FNO(Module):
                 "Only 1D, 2D, 3D and 4D FNO implemented"
             )
 
-    def forward(self, x: Float[Tensor, "batch channels ..."]) -> Float[Tensor, "batch out_channels ..."]:
+    def forward(
+        self, x: Float[Tensor, "batch channels ..."]
+    ) -> Float[Tensor, "batch out_channels ..."]:
         r"""Forward pass of the FNO model."""
         # Input validation
         if not torch.compiler.is_compiling():

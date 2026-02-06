@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 - 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-FileCopyrightText: All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -471,7 +471,9 @@ class ScaleShiftMlp(Module):
 
     def forward(
         self, x: Float[Tensor, "batch in_features"]
-    ) -> tuple[Float[Tensor, "batch out_features"], Float[Tensor, "batch out_features"]]:
+    ) -> tuple[
+        Float[Tensor, "batch out_features"], Float[Tensor, "batch out_features"]
+    ]:
         r"""Forward pass computing scale and shift parameters."""
         (scale, shift) = torch.chunk(self.net(x), 2, dim=1)
         return (1 + scale, shift)
