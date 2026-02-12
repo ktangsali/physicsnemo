@@ -20,8 +20,10 @@ import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 
+from physicsnemo.core.module import Module
 
-class PositionalEmbedding(nn.Module):
+
+class PositionalEmbedding(Module):
     r"""Module for generating sinusoidal positional embeddings based on timesteps.
 
     Parameters
@@ -50,14 +52,14 @@ class PositionalEmbedding(nn.Module):
         )
         self.register_buffer("freqs", freqs)
 
-    def forward(self, x: Float[Tensor, "batch ..."]) -> Float[Tensor, "batch dim"]:
+    def forward(self, x: Float[Tensor, "B ..."]) -> Float[Tensor, "B D"]:
         r"""Forward pass computing sinusoidal embeddings."""
         x = x.view(-1).outer(self.freqs.to(x.dtype))
         x = torch.cat([x.cos(), x.sin()], dim=1)
         return x
 
 
-class OneHotEmbedding(nn.Module):
+class OneHotEmbedding(Module):
     r"""Module for generating soft one-hot embeddings based on timesteps.
 
     The embedding uses a soft one-hot encoding where the value at each position
@@ -88,13 +90,13 @@ class OneHotEmbedding(nn.Module):
         ind = ind.view(1, len(ind))
         self.register_buffer("indices", ind)
 
-    def forward(self, t: Float[Tensor, "batch ..."]) -> Float[Tensor, "batch dim"]:
+    def forward(self, t: Float[Tensor, "B ..."]) -> Float[Tensor, "B D"]:
         r"""Forward pass computing soft one-hot embeddings."""
         ind = t * (self.num_channels - 1)
         return torch.clamp(1 - torch.abs(ind - self.indices), min=0)
 
 
-class ModEmbedNet(nn.Module):
+class ModEmbedNet(Module):
     r"""Network that generates a timestep embedding and processes it with an MLP.
 
     Parameters
@@ -157,7 +159,7 @@ class ModEmbedNet(nn.Module):
             blocks.extend([nn.Linear(dim, dim), activation_fn()])
         self.mlp = nn.Sequential(*blocks)
 
-    def forward(self, t: Float[Tensor, "batch ..."]) -> Float[Tensor, "batch dim"]:
+    def forward(self, t: Float[Tensor, "B ..."]) -> Float[Tensor, "B D"]:
         r"""Forward pass computing the modulation embedding."""
         # Normalize time to [0, 1]
         t = t / self.max_time

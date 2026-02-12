@@ -43,7 +43,7 @@ Tensor = torch.Tensor
 PatchEmbed = AFNOPatchEmbed
 
 
-class Block(nn.Module):
+class Block(Module):
     r"""Modulated AFNO block with spectral convolution and MLP.
 
     Parameters
@@ -150,9 +150,9 @@ class Block(nn.Module):
 
     def forward(
         self,
-        x: Float[Tensor, "batch height width channels"],
-        mod_embed: Float[Tensor, "batch mod_dim"],
-    ) -> Float[Tensor, "batch height width channels"]:
+        x: Float[Tensor, "B H W C"],
+        mod_embed: Float[Tensor, "B D_mod"],
+    ) -> Float[Tensor, "B H W C"]:
         r"""Forward pass of the modulated AFNO block."""
         residual = x
         x = self.norm1(x)
@@ -371,11 +371,11 @@ class ModAFNO(Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(
+    def _forward_features(
         self,
-        x: Float[Tensor, "batch channels height width"],
-        mod: Float[Tensor, "batch mod_input"],
-    ) -> Float[Tensor, "batch h w embed_dim"]:
+        x: Float[Tensor, "B C H W"],
+        mod: Float[Tensor, "B mod_in"],
+    ) -> Float[Tensor, "B H W D"]:
         r"""Forward pass of core ModAFNO feature extraction.
 
         Parameters
@@ -412,9 +412,9 @@ class ModAFNO(Module):
 
     def forward(
         self,
-        x: Float[Tensor, "batch in_channels height width"],
-        mod: Float[Tensor, "batch mod_input"],
-    ) -> Float[Tensor, "batch out_channels height width"]:
+        x: Float[Tensor, "B C_in H W"],
+        mod: Float[Tensor, "B mod_in"],
+    ) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the ModAFNO model."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -431,7 +431,7 @@ class ModAFNO(Module):
                 )
 
         # Extract features through modulated AFNO blocks
-        x = self.forward_features(x, mod)
+        x = self._forward_features(x, mod)
 
         # Project to output channels
         x = self.head(x)

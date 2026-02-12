@@ -35,7 +35,7 @@ Tensor = torch.Tensor
 PatchEmbed = AFNOPatchEmbed
 
 
-class Block(nn.Module):
+class Block(Module):
     r"""AFNO block consisting of spectral convolution and MLP.
 
     Parameters
@@ -99,9 +99,7 @@ class Block(nn.Module):
         )
         self.double_skip = double_skip
 
-    def forward(
-        self, x: Float[Tensor, "batch height width channels"]
-    ) -> Float[Tensor, "batch height width channels"]:
+    def forward(self, x: Float[Tensor, "B H W C"]) -> Float[Tensor, "B H W C"]:
         r"""Forward pass of the AFNO block."""
         residual = x
         x = self.norm1(x)
@@ -290,9 +288,9 @@ class AFNO(Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward_features(
-        self, x: Float[Tensor, "batch channels height width"]
-    ) -> Float[Tensor, "batch h w embed_dim"]:
+    def _forward_features(
+        self, x: Float[Tensor, "B C H W"]
+    ) -> Float[Tensor, "B H W D"]:
         r"""Forward pass of core AFNO feature extraction.
 
         Parameters
@@ -320,9 +318,7 @@ class AFNO(Module):
 
         return x
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch out_channels height width"]:
+    def forward(self, x: Float[Tensor, "B C_in H W"]) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the AFNO model."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -339,7 +335,7 @@ class AFNO(Module):
                 )
 
         # Extract features through AFNO blocks
-        x = self.forward_features(x)
+        x = self._forward_features(x)
 
         # Project to output channels
         x = self.head(x)

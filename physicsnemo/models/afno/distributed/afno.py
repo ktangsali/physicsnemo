@@ -50,7 +50,7 @@ from physicsnemo.models.afno.distributed.layers import (
 logger = logging.getLogger(__name__)
 
 
-class DistributedBlock(nn.Module):
+class DistributedBlock(physicsnemo.Module):
     r"""Distributed AFNO transformer block.
 
     This block combines distributed AFNO spectral convolution with distributed MLP
@@ -150,9 +150,7 @@ class DistributedBlock(nn.Module):
         )
         self.double_skip = double_skip
 
-    def forward(
-        self, x: Float[Tensor, "batch channels height width"]
-    ) -> Float[Tensor, "batch channels height width"]:
+    def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B C H W"]:
         r"""Forward pass of the distributed block."""
         # Scatter input across model parallel group if needed
         if not self.input_is_matmul_parallel:
@@ -185,7 +183,7 @@ class DistributedBlock(nn.Module):
         return x
 
 
-class DistributedAFNONet(nn.Module):
+class DistributedAFNONet(physicsnemo.Module):
     r"""Internal distributed AFNO network implementation.
 
     This class contains the core distributed AFNO architecture with patch embedding,
@@ -346,7 +344,7 @@ class DistributedAFNONet(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     @torch.jit.ignore
-    def no_weight_decay(self) -> set:
+    def _no_weight_decay(self) -> set:
         r"""Return set of parameters that should not have weight decay.
 
         Returns
@@ -356,9 +354,9 @@ class DistributedAFNONet(nn.Module):
         """
         return {"pos_embed", "cls_token"}
 
-    def forward_features(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch embed_dim_local h w"]:
+    def _forward_features(
+        self, x: Float[Tensor, "B C_in H W"]
+    ) -> Float[Tensor, "B C H W"]:
         r"""Extract features through patch embedding and transformer blocks.
 
         Parameters
@@ -387,12 +385,10 @@ class DistributedAFNONet(nn.Module):
 
         return x
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch out_channels height width"]:
+    def forward(self, x: Float[Tensor, "B C_in H W"]) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the distributed AFNO network."""
         # Extract features through transformer blocks
-        x = self.forward_features(x)
+        x = self._forward_features(x)
 
         # Handle distributed head computation
         if self.output_is_matmul_parallel:
@@ -525,8 +521,8 @@ class DistributedAFNO(physicsnemo.Module):
         )
 
     def forward(
-        self, in_vars: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch out_channels height width"]:
+        self, in_vars: Float[Tensor, "B C_in H W"]
+    ) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the distributed AFNO model."""
         # Input validation
         if not torch.compiler.is_compiling():

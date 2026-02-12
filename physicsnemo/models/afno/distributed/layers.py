@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import Tensor
 
+import physicsnemo
 from physicsnemo.distributed.manager import DistributedManager
 from physicsnemo.distributed.mappings import (
     copy_to_parallel_region,
@@ -157,7 +158,7 @@ def drop_path(
     return output
 
 
-class DropPath(nn.Module):
+class DropPath(physicsnemo.Module):
     r"""Drop paths (Stochastic Depth) per sample.
 
     When applied in the main path of residual blocks, this implements
@@ -188,7 +189,7 @@ class DropPath(nn.Module):
         return drop_path(x, self.drop_prob, self.training)
 
 
-class DistributedMLP(nn.Module):
+class DistributedMLP(physicsnemo.Module):
     r"""Distributed MLP layer for model-parallel training.
 
     This MLP distributes the hidden layer computation across the model parallel
@@ -272,9 +273,7 @@ class DistributedMLP(nn.Module):
         trunc_normal_(self.w2, std=0.02)
         nn.init.constant_(self.b2, 0.0)
 
-    def forward(
-        self, x: Float[Tensor, "batch channels height width"]
-    ) -> Float[Tensor, "batch out_channels height width"]:
+    def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the distributed MLP."""
         # Gather if input is model parallel
         if self.input_is_matmul_parallel:
@@ -299,7 +298,7 @@ class DistributedMLP(nn.Module):
         return x
 
 
-class DistributedPatchEmbed(nn.Module):
+class DistributedPatchEmbed(physicsnemo.Module):
     r"""Distributed patch embedding layer for model-parallel training.
 
     Converts 2D patches into a 1D vector sequence, distributed across
@@ -384,9 +383,7 @@ class DistributedPatchEmbed(nn.Module):
         self.proj.weight.is_shared_spatial = True
         self.proj.bias.is_shared_spatial = True
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch embed_dim num_patches"]:
+    def forward(self, x: Float[Tensor, "B C_in H W"]) -> Float[Tensor, "B C N"]:
         r"""Forward pass of the distributed patch embedding."""
         # Gather input if model parallel
         if self.input_parallel:
@@ -475,7 +472,7 @@ def compl_mul_add_fwd_c(
     return torch.view_as_real(res)
 
 
-class DistributedAFNO2D(nn.Module):
+class DistributedAFNO2D(physicsnemo.Module):
     r"""Distributed AFNO 2D spectral convolution layer.
 
     This layer performs spectral mixing using block-diagonal weight matrices
@@ -592,9 +589,7 @@ class DistributedAFNO2D(nn.Module):
         self.w2.is_shared_spatial = True
         self.b2.is_shared_spatial = True
 
-    def forward(
-        self, x: Float[Tensor, "batch channels height width"]
-    ) -> Float[Tensor, "batch channels height width"]:
+    def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B C H W"]:
         r"""Forward pass of the distributed AFNO spectral layer."""
         # Scatter input across model parallel group if needed
         if not self.input_is_matmul_parallel:
