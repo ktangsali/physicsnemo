@@ -44,7 +44,7 @@ from physicsnemo.models.afno.distributed.layers import (
     DistributedMLP,
     DistributedPatchEmbed,
     DropPath,
-    trunc_normal_,
+    _trunc_normal_,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,7 +324,7 @@ class DistributedAFNONet(physicsnemo.Module):
         self.synchronized_head = False
 
         # init weights
-        trunc_normal_(self.pos_embed, std=0.02)
+        _trunc_normal_(self.pos_embed, std=0.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, m: nn.Module) -> None:
@@ -336,7 +336,7 @@ class DistributedAFNONet(physicsnemo.Module):
             Module to initialize.
         """
         if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
-            trunc_normal_(m.weight, std=0.02)
+            _trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -422,6 +422,8 @@ class DistributedAFNO(physicsnemo.Module):
     This model implements a distributed version of AFNO for model-parallel
     training across multiple GPUs. AFNO is designed for 2D images only.
 
+    See :class:`~physicsnemo.models.afno.AFNO` for the non-distributed version.
+
     .. note::
         This model requires the model parallel group to be initialized via
         :class:`~physicsnemo.distributed.DistributedManager` before instantiation.
@@ -473,6 +475,13 @@ class DistributedAFNO(physicsnemo.Module):
     >>> # output = model(x)
     >>> # output.shape
     >>> # torch.Size([4, 2, 64, 64])
+
+    See Also
+    --------
+    :class:`~physicsnemo.models.afno.AFNO` :
+        Non-distributed AFNO model.
+    `Adaptive Fourier Neural Operator (AFNO) <https://arxiv.org/abs/2111.13587>`_ :
+        Original AFNO paper.
     """
 
     def __init__(
@@ -524,19 +533,25 @@ class DistributedAFNO(physicsnemo.Module):
         self, in_vars: Float[Tensor, "B C_in H W"]
     ) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the distributed AFNO model."""
-        # Input validation
+        # Input validation: single check against expected shape (B, in_channels, H, W)
         if not torch.compiler.is_compiling():
-            if in_vars.ndim != 4:
-                raise ValueError(
-                    f"Expected 4D input tensor (B, C, H, W), got {in_vars.ndim}D "
-                    f"tensor with shape {tuple(in_vars.shape)}"
+            expected = (
+                self.in_channels,
+                self.inp_shape[0],
+                self.inp_shape[1],
+            )
+            if (
+                in_vars.ndim != 4
+                or (
+                    in_vars.shape[1],
+                    in_vars.shape[2],
+                    in_vars.shape[3],
                 )
-
-            B, C, H, W = in_vars.shape
-            if H != self.inp_shape[0] or W != self.inp_shape[1]:
+                != expected
+            ):
                 raise ValueError(
-                    f"Expected input spatial dimensions ({self.inp_shape[0]}, "
-                    f"{self.inp_shape[1]}), got ({H}, {W})"
+                    f"Expected input shape (B, {expected[0]}, {expected[1]}, {expected[2]}), "
+                    f"got {tuple(in_vars.shape)}"
                 )
 
         return self._impl(in_vars)

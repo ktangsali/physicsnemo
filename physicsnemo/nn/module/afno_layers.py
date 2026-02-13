@@ -85,9 +85,7 @@ class AFNOMlp(Module):
         self.fc2 = nn.Linear(latent_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(
-        self, x: Float[Tensor, "... in_features"]
-    ) -> Float[Tensor, "... out_features"]:
+    def forward(self, x: Float[Tensor, "*dims D_in"]) -> Float[Tensor, "*dims D_out"]:
         r"""Forward pass of the MLP."""
         x = self.fc1(x)
         x = self.act(x)
@@ -185,9 +183,7 @@ class AFNO2DLayer(Module):
             self.scale * torch.randn(2, self.num_blocks, self.block_size)
         )
 
-    def forward(
-        self, x: Float[Tensor, "batch height width channels"]
-    ) -> Float[Tensor, "batch height width channels"]:
+    def forward(self, x: Float[Tensor, "B H W C"]) -> Float[Tensor, "B H W C"]:
         r"""Forward pass of the AFNO spectral layer."""
         bias = x
 
@@ -334,7 +330,7 @@ class AFNOPatchEmbed(Module):
     r"""Patch embedding layer for AFNO.
 
     Converts 2D patches into a 1D vector sequence for input to AFNO.
-    This differs from the patch embedding in ``physicsnemo.nn.utils.patch_embed``
+    This differs from :class:`~physicsnemo.nn.module.utils.patch_embed.PatchEmbed2D`
     as it flattens the output to a sequence format.
 
     Parameters
@@ -394,9 +390,7 @@ class AFNOPatchEmbed(Module):
             in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
         )
 
-    def forward(
-        self, x: Float[Tensor, "batch channels height width"]
-    ) -> Float[Tensor, "batch num_patches embed_dim"]:
+    def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B N D"]:
         r"""Forward pass of patch embedding."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -470,10 +464,8 @@ class ScaleShiftMlp(Module):
         self.net = nn.Sequential(*sequence)
 
     def forward(
-        self, x: Float[Tensor, "batch in_features"]
-    ) -> tuple[
-        Float[Tensor, "batch out_features"], Float[Tensor, "batch out_features"]
-    ]:
+        self, x: Float[Tensor, "B D_in"]
+    ) -> tuple[Float[Tensor, "B D_out"], Float[Tensor, "B D_out"]]:
         r"""Forward pass computing scale and shift parameters."""
         (scale, shift) = torch.chunk(self.net(x), 2, dim=1)
         return (1 + scale, shift)
@@ -552,9 +544,9 @@ class ModAFNOMlp(AFNOMlp):
 
     def forward(
         self,
-        x: Float[Tensor, "... in_features"],
-        mod_embed: Float[Tensor, "batch mod_features"],
-    ) -> Float[Tensor, "... out_features"]:
+        x: Float[Tensor, "*dims D_in"],
+        mod_embed: Float[Tensor, "B D_mod"],
+    ) -> Float[Tensor, "*dims D_out"]:
         r"""Forward pass with modulation."""
         # Compute scale and shift from modulation embedding
         (scale, shift) = self.scale_shift(mod_embed)
@@ -657,9 +649,9 @@ class ModAFNO2DLayer(AFNO2DLayer):
 
     def forward(
         self,
-        x: Float[Tensor, "batch height width channels"],
-        mod_embed: Float[Tensor, "batch mod_features"],
-    ) -> Float[Tensor, "batch height width channels"]:
+        x: Float[Tensor, "B H W C"],
+        mod_embed: Float[Tensor, "B D_mod"],
+    ) -> Float[Tensor, "B H W C"]:
         r"""Forward pass with modulation."""
         bias = x
 

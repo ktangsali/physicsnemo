@@ -193,10 +193,12 @@ class AFNO(Module):
     >>> output.size()
     torch.Size([32, 1, 32, 32])
 
-    Note
-    ----
-    Reference: Guibas, John, et al. "Adaptive fourier neural operators:
-    Efficient token mixers for transformers." arXiv preprint arXiv:2111.13587 (2021).
+    See Also
+    --------
+    :class:`~physicsnemo.models.afno.distributed.DistributedAFNO` :
+        Distributed (model-parallel) AFNO for multi-GPU training.
+    `Adaptive Fourier Neural Operator (AFNO) <https://arxiv.org/abs/2111.13587>`_ :
+        Original AFNO paper.
     """
 
     def __init__(
@@ -320,18 +322,17 @@ class AFNO(Module):
 
     def forward(self, x: Float[Tensor, "B C_in H W"]) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the AFNO model."""
-        # Input validation
+        # Input validation: single check against expected shape (B, in_channels, H, W)
         if not torch.compiler.is_compiling():
-            if x.ndim != 4:
+            expected = (
+                self.in_channels,
+                self.inp_shape[0],
+                self.inp_shape[1],
+            )
+            if x.ndim != 4 or (x.shape[1], x.shape[2], x.shape[3]) != expected:
                 raise ValueError(
-                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            B, C, H, W = x.shape
-            if H != self.inp_shape[0] or W != self.inp_shape[1]:
-                raise ValueError(
-                    f"Expected input spatial dimensions {self.inp_shape}, "
-                    f"got ({H}, {W})"
+                    f"Expected input shape (B, {expected[0]}, {expected[1]}, {expected[2]}), "
+                    f"got {tuple(x.shape)}"
                 )
 
         # Extract features through AFNO blocks

@@ -97,7 +97,7 @@ class FNO(Module):
     x : torch.Tensor
         Input tensor. Shape depends on ``dimension``:
 
-        - 1D: :math:`(B, C_{in}, X)`
+        - 1D: :math:`(B, C_{in}, L)` where :math:`L` is sequence length
         - 2D: :math:`(B, C_{in}, H, W)`
         - 3D: :math:`(B, C_{in}, D, H, W)`
         - 4D: :math:`(B, C_{in}, X, Y, Z, T)`
@@ -107,7 +107,7 @@ class FNO(Module):
     torch.Tensor
         Output tensor with same spatial dimensions as input:
 
-        - 1D: :math:`(B, C_{out}, X)`
+        - 1D: :math:`(B, C_{out}, L)`
         - 2D: :math:`(B, C_{out}, H, W)`
         - 3D: :math:`(B, C_{out}, D, H, W)`
         - 4D: :math:`(B, C_{out}, X, Y, Z, T)`
@@ -132,10 +132,10 @@ class FNO(Module):
     >>> output.size()
     torch.Size([32, 3, 32, 32])
 
-    Note
-    ----
-    Reference: Li, Zongyi, et al. "Fourier neural operator for parametric
-    partial differential equations." arXiv preprint arXiv:2010.08895 (2020).
+    See Also
+    --------
+    `Fourier Neural Operator (FNO) <https://arxiv.org/abs/2010.08895>`_ :
+        Original FNO paper.
     """
 
     def __init__(
@@ -177,7 +177,7 @@ class FNO(Module):
             activation_fn=decoder_activation_fn,
         )
 
-        FNOModel = self.getFNOEncoder()
+        FNOModel = self._getFNOEncoder()
 
         self.spec_encoder = FNOModel(
             in_channels,
@@ -190,7 +190,7 @@ class FNO(Module):
             coord_features=self.coord_features,
         )
 
-    def getFNOEncoder(self) -> type:
+    def _getFNOEncoder(self) -> type:
         r"""Return the correct FNO encoder class based on the dimension.
 
         Returns
@@ -217,7 +217,7 @@ class FNO(Module):
                 "Only 1D, 2D, 3D and 4D FNO implemented"
             )
 
-    def forward(self, x: Float[Tensor, "B C ..."]) -> Float[Tensor, "B C_out ..."]:
+    def forward(self, x: Float[Tensor, "B C *dims"]) -> Float[Tensor, "B C_out *dims"]:
         r"""Forward pass of the FNO model."""
         # Input validation
         if not torch.compiler.is_compiling():

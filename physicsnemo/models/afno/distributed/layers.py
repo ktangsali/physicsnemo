@@ -20,6 +20,8 @@ This module provides distributed versions of AFNO building blocks for
 model-parallel training across multiple GPUs.
 """
 
+from __future__ import annotations
+
 import math
 import warnings
 from typing import Tuple
@@ -80,7 +82,7 @@ def _no_grad_trunc_normal_(tensor, mean, std, a, b):
         return tensor
 
 
-def trunc_normal_(
+def _trunc_normal_(
     tensor: Tensor,
     mean: float = 0.0,
     std: float = 1.0,
@@ -114,15 +116,15 @@ def trunc_normal_(
     Examples
     --------
     >>> w = torch.empty(3, 5)
-    >>> o = trunc_normal_(w)
+    >>> o = _trunc_normal_(w)
     """
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
 
 @torch.compile
 def drop_path(
-    x: torch.Tensor, drop_prob: float = 0.0, training: bool = False
-) -> torch.Tensor:
+    x: Float[Tensor, "*dims"], drop_prob: float = 0.0, training: bool = False
+) -> Float[Tensor, "*dims"]:
     r"""Drop paths (Stochastic Depth) per sample.
 
     When applied in the main path of residual blocks, this implements
@@ -226,8 +228,8 @@ class DistributedMLP(physicsnemo.Module):
     def __init__(
         self,
         in_features: int,
-        hidden_features: int = None,
-        out_features: int = None,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
         act_layer: type = nn.GELU,
         drop: float = 0.0,
         input_is_matmul_parallel: bool = False,
@@ -268,9 +270,9 @@ class DistributedMLP(physicsnemo.Module):
 
     def _init_weights(self) -> None:
         r"""Initialize weights using truncated normal distribution."""
-        trunc_normal_(self.w1, std=0.02)
+        _trunc_normal_(self.w1, std=0.02)
         nn.init.constant_(self.b1, 0.0)
-        trunc_normal_(self.w2, std=0.02)
+        _trunc_normal_(self.w2, std=0.02)
         nn.init.constant_(self.b2, 0.0)
 
     def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B C_out H W"]:
@@ -395,13 +397,18 @@ class DistributedPatchEmbed(physicsnemo.Module):
         if self.output_parallel:
             x = copy_to_parallel_region(x, group="model_parallel")
 
-        # Input validation
+        # Input validation (single check: shape must match expected)
         if not torch.compiler.is_compiling():
-            B, C, H, W = x.shape
-            if H != self.inp_shape[0] or W != self.inp_shape[1]:
+            expected_spatial = (self.inp_shape[0], self.inp_shape[1])
+            expected_chans = self.proj.in_channels
+            if (
+                x.ndim != 4
+                or x.shape[1] != expected_chans
+                or (x.shape[2], x.shape[3]) != expected_spatial
+            ):
                 raise ValueError(
-                    f"Expected input spatial dimensions ({self.inp_shape[0]}, "
-                    f"{self.inp_shape[1]}), got ({H}, {W})"
+                    f"Expected input shape (B, {expected_chans}, {expected_spatial[0]}, "
+                    f"{expected_spatial[1]}), got {tuple(x.shape)}"
                 )
 
         # Apply patch embedding: (B, C_in, H, W) -> (B, C_embed, num_patches)
@@ -410,7 +417,7 @@ class DistributedPatchEmbed(physicsnemo.Module):
 
 
 @torch.compile
-def compl_mul_add_fwd(
+def _compl_mul_add_fwd(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
 ) -> torch.Tensor:
     r"""Complex multiplication and addition using real representation.
@@ -443,7 +450,7 @@ def compl_mul_add_fwd(
 
 
 @torch.compile
-def compl_mul_add_fwd_c(
+def _compl_mul_add_fwd_c(
     a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
 ) -> torch.Tensor:
     r"""Complex multiplication and addition using native complex tensors.
@@ -541,8 +548,8 @@ class DistributedAFNO2D(physicsnemo.Module):
         self.hidden_size_factor = hidden_size_factor
         self.scale = 0.02
         use_complex_mult = False
-        self.mult_handle = (
-            compl_mul_add_fwd_c if use_complex_mult else compl_mul_add_fwd
+        self._mult_handle = (
+            _compl_mul_add_fwd_c if use_complex_mult else _compl_mul_add_fwd
         )
 
         # model parallelism
@@ -615,7 +622,7 @@ class DistributedAFNO2D(physicsnemo.Module):
 
         # Apply first block-diagonal weight matrix with ReLU
         o1 = F.relu(
-            self.mult_handle(
+            self._mult_handle(
                 x[
                     :,
                     :,
@@ -632,7 +639,7 @@ class DistributedAFNO2D(physicsnemo.Module):
         # Apply second block-diagonal weight matrix
         o2[
             :, :, :, total_modes - kept_modes : total_modes + kept_modes, :kept_modes, :
-        ] = self.mult_handle(o1, self.w2, self.b2)
+        ] = self._mult_handle(o1, self.w2, self.b2)
 
         # Apply soft shrinkage for sparsity and inverse FFT
         x = F.softshrink(o2, lambd=self.sparsity_threshold)

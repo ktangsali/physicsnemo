@@ -35,6 +35,7 @@ class PositionalEmbedding(Module):
     -------
     x : torch.Tensor
         Input tensor of shape :math:`(B,)` or :math:`(B, 1)` containing timesteps.
+        Type hint ``B ...`` accepts both shapes.
 
     Outputs
     -------
@@ -80,7 +81,7 @@ class OneHotEmbedding(Module):
     -------
     torch.Tensor
         Soft one-hot embedding of shape :math:`(B, D)` where :math:`D` is
-        ``num_channels``.
+        ``num_channels``. Type hint ``B ...`` accepts :math:`(B,)` or :math:`(B, 1)`.
     """
 
     def __init__(self, num_channels: int):
@@ -132,6 +133,12 @@ class ModEmbedNet(Module):
     >>> embedding = embed_net(t)
     >>> embedding.shape
     torch.Size([3, 64])
+
+    See Also
+    --------
+    :mod:`~physicsnemo.nn.module.embedding_layers` :
+        Other embedding layers (e.g. :class:`~physicsnemo.nn.module.embedding_layers.FourierEmbedding`,
+        :class:`~physicsnemo.nn.module.embedding_layers.PositionalEmbedding`).
     """
 
     def __init__(

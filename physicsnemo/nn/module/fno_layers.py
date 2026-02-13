@@ -60,14 +60,14 @@ class FNO1DEncoder(Module):
     Forward
     -------
     x : torch.Tensor
-        Input tensor of shape :math:`(B, C_{in}, X)` where :math:`B` is batch size,
-        :math:`C_{in}` is the number of input channels, and :math:`X` is the spatial
-        dimension.
+        Input tensor of shape :math:`(B, C_{in}, L)` where :math:`B` is batch size,
+        :math:`C_{in}` is the number of input channels, and :math:`L` is the
+        sequence length (spatial dimension).
 
     Outputs
     -------
     torch.Tensor
-        Output tensor of shape :math:`(B, C_{latent}, X)` where :math:`C_{latent}`
+        Output tensor of shape :math:`(B, C_{latent}, L)` where :math:`C_{latent}`
         is ``fno_layer_size``.
 
     Examples
@@ -93,6 +93,7 @@ class FNO1DEncoder(Module):
     ) -> None:
         super().__init__()
 
+        self._input_channels = in_channels
         self.in_channels = in_channels
         self.num_fno_layers = num_fno_layers
         self.fno_width = fno_layer_size
@@ -114,10 +115,10 @@ class FNO1DEncoder(Module):
             num_fno_modes = [num_fno_modes]
 
         # build lift
-        self.build_lift_network()
-        self.build_fno(num_fno_modes)
+        self._build_lift_network()
+        self._build_fno(num_fno_modes)
 
-    def build_lift_network(self) -> None:
+    def _build_lift_network(self) -> None:
         r"""Construct network for lifting variables to latent space."""
         self.lift_network = torch.nn.Sequential()
         self.lift_network.append(
@@ -128,7 +129,7 @@ class FNO1DEncoder(Module):
             layers.Conv1dFCLayer(int(self.fno_width / 2), self.fno_width)
         )
 
-    def build_fno(self, num_fno_modes: List[int]) -> None:
+    def _build_fno(self, num_fno_modes: List[int]) -> None:
         r"""Construct FNO spectral convolution layers.
 
         Parameters
@@ -145,21 +146,23 @@ class FNO1DEncoder(Module):
             )
             self.conv_layers.append(nn.Conv1d(self.fno_width, self.fno_width, 1))
 
-    def forward(
-        self, x: Float[Tensor, "batch in_channels x"]
-    ) -> Float[Tensor, "batch latent_channels x"]:
+    def forward(self, x: Float[Tensor, "B C_in L"]) -> Float[Tensor, "B C_latent L"]:
         r"""Forward pass of the 1D FNO encoder."""
         # Input validation
         if not torch.compiler.is_compiling():
             if x.ndim != 3:
                 raise ValueError(
-                    f"Expected 3D input tensor (B, C, X), got {x.ndim}D tensor "
+                    f"Expected 3D input tensor (B, C, L), got {x.ndim}D tensor "
                     f"with shape {tuple(x.shape)}"
+                )
+            if x.shape[1] != self._input_channels:
+                raise ValueError(
+                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
                 )
 
         # Add coordinate features if enabled
         if self.coord_features:
-            coord_feat = self.meshgrid(list(x.shape), x.device)
+            coord_feat = self._meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
         # Lift input to latent space
@@ -180,20 +183,20 @@ class FNO1DEncoder(Module):
         x = x[..., : self.ipad[0]]
         return x
 
-    def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
+    def _meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
         r"""Create 1D meshgrid feature.
 
         Parameters
         ----------
         shape : List[int]
-            Tensor shape as ``[batch, channels, x]``.
+            Tensor shape as ``[batch, channels, L]``.
         device : torch.device
             Device model is on.
 
         Returns
         -------
         Tensor
-            Meshgrid tensor of shape :math:`(B, 1, X)`.
+            Meshgrid tensor of shape :math:`(B, 1, L)`.
         """
         bsize, size_x = shape[0], shape[2]
         grid_x = torch.linspace(0, 1, size_x, dtype=torch.float32, device=device)
@@ -206,7 +209,7 @@ class FNO1DEncoder(Module):
         Parameters
         ----------
         value : Tensor
-            Grid tensor of shape :math:`(B, C, X)`.
+            Grid tensor of shape :math:`(B, C, L)`.
 
         Returns
         -------
@@ -225,12 +228,12 @@ class FNO1DEncoder(Module):
         value : Tensor
             Point tensor of shape :math:`(B \times X, C)`.
         shape : List[int]
-            Original grid shape as ``[B, C, X]``.
+            Original grid shape as ``[B, C, L]``.
 
         Returns
         -------
         Tensor
-            Grid tensor of shape :math:`(B, C, X)`.
+            Grid tensor of shape :math:`(B, C, L)`.
         """
         output = value.reshape(shape[0], shape[2], value.size(-1))
         return torch.permute(output, (0, 2, 1))
@@ -318,10 +321,10 @@ class FNO2DEncoder(Module):
             num_fno_modes = [num_fno_modes, num_fno_modes]
 
         # build lift
-        self.build_lift_network()
-        self.build_fno(num_fno_modes)
+        self._build_lift_network()
+        self._build_fno(num_fno_modes)
 
-    def build_lift_network(self) -> None:
+    def _build_lift_network(self) -> None:
         r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
@@ -333,7 +336,7 @@ class FNO2DEncoder(Module):
             layers.Conv2dFCLayer(int(self.fno_width / 2), self.fno_width)
         )
 
-    def build_fno(self, num_fno_modes: List[int]) -> None:
+    def _build_fno(self, num_fno_modes: List[int]) -> None:
         r"""Construct FNO spectral convolution layers.
 
         Parameters
@@ -353,8 +356,8 @@ class FNO2DEncoder(Module):
             self.conv_layers.append(nn.Conv2d(self.fno_width, self.fno_width, 1))
 
     def forward(
-        self, x: Float[Tensor, "batch in_channels height width"]
-    ) -> Float[Tensor, "batch latent_channels height width"]:
+        self, x: Float[Tensor, "B C_in H W"]
+    ) -> Float[Tensor, "B C_latent H W"]:
         r"""Forward pass of the 2D FNO encoder."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -366,7 +369,7 @@ class FNO2DEncoder(Module):
 
         # Add coordinate features if enabled
         if self.coord_features:
-            coord_feat = self.meshgrid(list(x.shape), x.device)
+            coord_feat = self._meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
         # Lift input to latent space
@@ -388,7 +391,7 @@ class FNO2DEncoder(Module):
 
         return x
 
-    def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
+    def _meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
         r"""Create 2D meshgrid feature.
 
         Parameters
@@ -530,10 +533,10 @@ class FNO3DEncoder(Module):
             num_fno_modes = [num_fno_modes, num_fno_modes, num_fno_modes]
 
         # build lift
-        self.build_lift_network()
-        self.build_fno(num_fno_modes)
+        self._build_lift_network()
+        self._build_fno(num_fno_modes)
 
-    def build_lift_network(self) -> None:
+    def _build_lift_network(self) -> None:
         r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
@@ -545,7 +548,7 @@ class FNO3DEncoder(Module):
             layers.Conv3dFCLayer(int(self.fno_width / 2), self.fno_width)
         )
 
-    def build_fno(self, num_fno_modes: List[int]) -> None:
+    def _build_fno(self, num_fno_modes: List[int]) -> None:
         r"""Construct FNO spectral convolution layers.
 
         Parameters
@@ -569,8 +572,8 @@ class FNO3DEncoder(Module):
             self.conv_layers.append(nn.Conv3d(self.fno_width, self.fno_width, 1))
 
     def forward(
-        self, x: Float[Tensor, "batch in_channels depth height width"]
-    ) -> Float[Tensor, "batch latent_channels depth height width"]:
+        self, x: Float[Tensor, "B C_in D H W"]
+    ) -> Float[Tensor, "B C_latent D H W"]:
         r"""Forward pass of the 3D FNO encoder."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -582,7 +585,7 @@ class FNO3DEncoder(Module):
 
         # Add coordinate features if enabled
         if self.coord_features:
-            coord_feat = self.meshgrid(list(x.shape), x.device)
+            coord_feat = self._meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
         # Lift input to latent space
@@ -607,7 +610,7 @@ class FNO3DEncoder(Module):
         x = x[..., : self.ipad[0], : self.ipad[1], : self.ipad[2]]
         return x
 
-    def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
+    def _meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
         r"""Create 3D meshgrid feature.
 
         Parameters
@@ -751,10 +754,10 @@ class FNO4DEncoder(Module):
             num_fno_modes = [num_fno_modes, num_fno_modes, num_fno_modes, num_fno_modes]
 
         # build lift
-        self.build_lift_network()
-        self.build_fno(num_fno_modes)
+        self._build_lift_network()
+        self._build_fno(num_fno_modes)
 
-    def build_lift_network(self) -> None:
+    def _build_lift_network(self) -> None:
         r"""Construct network for lifting variables to latent space."""
         # Initial lift network
         self.lift_network = torch.nn.Sequential()
@@ -766,7 +769,7 @@ class FNO4DEncoder(Module):
             layers.ConvNdFCLayer(int(self.fno_width / 2), self.fno_width)
         )
 
-    def build_fno(self, num_fno_modes: List[int]) -> None:
+    def _build_fno(self, num_fno_modes: List[int]) -> None:
         r"""Construct FNO spectral convolution layers.
 
         Parameters
@@ -793,8 +796,8 @@ class FNO4DEncoder(Module):
             )
 
     def forward(
-        self, x: Float[Tensor, "batch in_channels x y z t"]
-    ) -> Float[Tensor, "batch latent_channels x y z t"]:
+        self, x: Float[Tensor, "B C_in X Y Z T"]
+    ) -> Float[Tensor, "B C_latent X Y Z T"]:
         r"""Forward pass of the 4D FNO encoder."""
         # Input validation
         if not torch.compiler.is_compiling():
@@ -806,7 +809,7 @@ class FNO4DEncoder(Module):
 
         # Add coordinate features if enabled
         if self.coord_features:
-            coord_feat = self.meshgrid(list(x.shape), x.device)
+            coord_feat = self._meshgrid(list(x.shape), x.device)
             x = torch.cat((x, coord_feat), dim=1)
 
         # Lift input to latent space
@@ -831,7 +834,7 @@ class FNO4DEncoder(Module):
         x = x[..., : self.ipad[0], : self.ipad[1], : self.ipad[2], : self.ipad[3]]
         return x
 
-    def meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
+    def _meshgrid(self, shape: List[int], device: torch.device) -> Tensor:
         r"""Create 4D meshgrid feature.
 
         Parameters
