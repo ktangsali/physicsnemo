@@ -29,6 +29,7 @@ from jaxtyping import Float
 
 import physicsnemo.nn.module.fft as fft
 from physicsnemo.core.module import Module
+from physicsnemo.nn.module.mlp_layers import Mlp
 
 Tensor = torch.Tensor
 
@@ -449,6 +450,11 @@ class ScaleShiftMlp(Module):
     >>> scale, shift = mlp(x)
     >>> scale.shape, shift.shape
     (torch.Size([4, 128]), torch.Size([4, 128]))
+
+    See Also
+    --------
+    :class:`~physicsnemo.nn.module.mlp_layers.Mlp` :
+        The MLP used internally to produce the concatenated (scale, shift) vector.
     """
 
     def __init__(
@@ -462,12 +468,16 @@ class ScaleShiftMlp(Module):
         super().__init__()
         if hidden_features is None:
             hidden_features = out_features * 2
-
-        sequence = [nn.Linear(in_features, hidden_features), activation_fn()]
-        for _ in range(hidden_layers):
-            sequence += [nn.Linear(hidden_features, hidden_features), activation_fn()]
-        sequence.append(nn.Linear(hidden_features, out_features * 2))
-        self.net = nn.Sequential(*sequence)
+        # Build hidden dims: one layer by default, plus hidden_layers extra
+        hidden_dims = [hidden_features] * (hidden_layers + 1)
+        self.net = Mlp(
+            in_features=in_features,
+            hidden_features=hidden_dims,
+            out_features=out_features * 2,
+            act_layer=activation_fn,
+            drop=0.0,
+            final_dropout=False,
+        )
 
     def forward(
         self, x: Float[Tensor, "B D_in"]
