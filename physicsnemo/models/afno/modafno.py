@@ -87,6 +87,17 @@ class Block(Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, H, W, C)`.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.models.afno.modafno import Block
+    >>> block = Block(embed_dim=64, mod_dim=32, num_blocks=8)
+    >>> x = torch.randn(2, 8, 8, 64)
+    >>> mod_embed = torch.randn(2, 32)
+    >>> out = block(x, mod_embed)
+    >>> out.shape
+    torch.Size([2, 8, 8, 64])
     """
 
     def __init__(
@@ -416,18 +427,17 @@ class ModAFNO(Module):
         mod: Float[Tensor, "B mod_in"],
     ) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the ModAFNO model."""
-        # Input validation
+        # Input validation: single check for shape (B, in_channels, H, W)
         if not torch.compiler.is_compiling():
-            if x.ndim != 4:
+            expected = (
+                self.in_chans,
+                self.inp_shape[0],
+                self.inp_shape[1],
+            )
+            if x.ndim != 4 or (x.shape[1], x.shape[2], x.shape[3]) != expected:
                 raise ValueError(
-                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            B, C, H, W = x.shape
-            if H != self.inp_shape[0] or W != self.inp_shape[1]:
-                raise ValueError(
-                    f"Expected input spatial dimensions {self.inp_shape}, "
-                    f"got ({H}, {W})"
+                    f"Expected input shape (B, {expected[0]}, {expected[1]}, {expected[2]}), "
+                    f"got {tuple(x.shape)}"
                 )
 
         # Extract features through modulated AFNO blocks

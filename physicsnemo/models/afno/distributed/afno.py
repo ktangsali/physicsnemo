@@ -96,6 +96,20 @@ class DistributedBlock(physicsnemo.Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, C, H, W)`.
+
+    Examples
+    --------
+    Requires a distributed environment with model parallel group initialized.
+
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed.afno import DistributedBlock  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> block = DistributedBlock(h=4, w=4, dim=256, num_blocks=8)  # doctest: +SKIP
+    >>> x = torch.randn(2, 256, 4, 4)  # doctest: +SKIP
+    >>> out = block(x)  # doctest: +SKIP
+    >>> out.shape  # doctest: +SKIP
+    torch.Size([2, 256, 4, 4])
     """
 
     def __init__(
@@ -229,6 +243,20 @@ class DistributedAFNONet(physicsnemo.Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, C_{out}, H, W)`.
+
+    Examples
+    --------
+    Requires a distributed environment with model parallel group initialized.
+
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed.afno import DistributedAFNONet  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> net = DistributedAFNONet(inp_shape=(64, 64), in_chans=2, out_chans=2, depth=2)  # doctest: +SKIP
+    >>> x = torch.randn(2, 2, 64, 64)  # doctest: +SKIP
+    >>> out = net(x)  # doctest: +SKIP
+    >>> out.shape  # doctest: +SKIP
+    torch.Size([2, 2, 64, 64])
     """
 
     def __init__(

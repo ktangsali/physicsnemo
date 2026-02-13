@@ -392,13 +392,19 @@ class AFNOPatchEmbed(Module):
 
     def forward(self, x: Float[Tensor, "B C H W"]) -> Float[Tensor, "B N D"]:
         r"""Forward pass of patch embedding."""
-        # Input validation
+        # Input validation: single check for shape (B, C, H, W)
         if not torch.compiler.is_compiling():
-            B, C, H, W = x.shape
-            if not (H == self.inp_shape[0] and W == self.inp_shape[1]):
+            expected_c = self.proj.in_channels
+            expected_h, expected_w = self.inp_shape[0], self.inp_shape[1]
+            if (
+                x.ndim != 4
+                or x.shape[1] != expected_c
+                or x.shape[2] != expected_h
+                or x.shape[3] != expected_w
+            ):
                 raise ValueError(
-                    f"Input image size ({H}*{W}) doesn't match model "
-                    f"({self.inp_shape[0]}*{self.inp_shape[1]})."
+                    f"Expected input shape (B, {expected_c}, {expected_h}, {expected_w}), "
+                    f"got {tuple(x.shape)}"
                 )
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x

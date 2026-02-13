@@ -41,6 +41,16 @@ class PositionalEmbedding(Module):
     -------
     torch.Tensor
         Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.models.afno.modembed import PositionalEmbedding
+    >>> emb = PositionalEmbedding(num_channels=64)
+    >>> t = torch.tensor([0.0, 0.5, 1.0])
+    >>> out = emb(t)
+    >>> out.shape
+    torch.Size([3, 64])
     """
 
     def __init__(self, num_channels: int):
@@ -80,6 +90,16 @@ class OneHotEmbedding(Module):
     -------
     torch.Tensor
         Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.models.afno.modembed import OneHotEmbedding
+    >>> emb = OneHotEmbedding(num_channels=64)
+    >>> t = torch.tensor([[0.0], [0.5], [1.0]])  # normalized in [0, 1]
+    >>> out = emb(t)
+    >>> out.shape
+    torch.Size([3, 64])
     """
 
     def __init__(self, num_channels: int):

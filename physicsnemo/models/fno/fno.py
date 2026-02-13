@@ -160,6 +160,7 @@ class FNO(Module):
         jit_enabled = dimension != 4
         super().__init__(meta=MetaData(jit=jit_enabled))
 
+        self.in_channels = in_channels
         self.num_fno_layers = num_fno_layers
         self.num_fno_modes = num_fno_modes
         self.padding = padding
@@ -219,13 +220,13 @@ class FNO(Module):
 
     def forward(self, x: Float[Tensor, "B C *dims"]) -> Float[Tensor, "B C_out *dims"]:
         r"""Forward pass of the FNO model."""
-        # Input validation
+        # Input validation: single check for ndim and channels
         if not torch.compiler.is_compiling():
             expected_ndim = self.dimension + 2  # batch + channels + spatial dims
-            if x.ndim != expected_ndim:
+            if x.ndim != expected_ndim or x.shape[1] != self.in_channels:
                 raise ValueError(
-                    f"Expected {expected_ndim}D input tensor for {self.dimension}D FNO, "
-                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
+                    f"Expected {expected_ndim}D input (B, {self.in_channels}, ...) for "
+                    f"{self.dimension}D FNO, got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
 
         # Encode in Fourier space

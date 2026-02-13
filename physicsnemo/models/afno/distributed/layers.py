@@ -180,6 +180,16 @@ class DropPath(physicsnemo.Module):
     -------
     torch.Tensor
         Output tensor with same shape as input.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.models.afno.distributed.layers import DropPath
+    >>> layer = DropPath(drop_prob=0.1)
+    >>> x = torch.randn(2, 64, 8, 8)
+    >>> out = layer(x)
+    >>> out.shape
+    torch.Size([2, 64, 8, 8])
     """
 
     def __init__(self, drop_prob: float = None):
@@ -223,6 +233,20 @@ class DistributedMLP(physicsnemo.Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, C_{out}, H, W)`.
+
+    Examples
+    --------
+    Requires a distributed environment with model parallel group initialized.
+
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed.layers import DistributedMLP  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> mlp = DistributedMLP(in_features=256, hidden_features=1024, out_features=256)  # doctest: +SKIP
+    >>> x = torch.randn(2, 256, 4, 4)  # doctest: +SKIP
+    >>> out = mlp(x)  # doctest: +SKIP
+    >>> out.shape  # doctest: +SKIP
+    torch.Size([2, 256, 4, 4])
     """
 
     def __init__(
@@ -331,6 +355,23 @@ class DistributedPatchEmbed(physicsnemo.Module):
     torch.Tensor
         Output tensor of shape :math:`(B, C_{embed}, N)` where :math:`N` is
         the number of patches.
+
+    Examples
+    --------
+    Requires a distributed environment with model parallel group initialized.
+
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed.layers import DistributedPatchEmbed  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> embed = DistributedPatchEmbed(  # doctest: +SKIP
+    ...     inp_shape=(64, 64), in_chans=2, embed_dim=256,
+    ...     output_is_matmul_parallel=False,
+    ... )
+    >>> x = torch.randn(2, 2, 64, 64)  # doctest: +SKIP
+    >>> out = embed(x)  # doctest: +SKIP
+    >>> out.shape  # doctest: +SKIP
+    torch.Size([2, 256, 16])  # 16 = num_patches
     """
 
     def __init__(
@@ -511,6 +552,20 @@ class DistributedAFNO2D(physicsnemo.Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, C, H, W)`.
+
+    Examples
+    --------
+    Requires a distributed environment with model parallel group initialized.
+
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed.layers import DistributedAFNO2D  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> layer = DistributedAFNO2D(hidden_size=256, num_blocks=8)  # doctest: +SKIP
+    >>> x = torch.randn(2, 256, 4, 4)  # doctest: +SKIP
+    >>> out = layer(x)  # doctest: +SKIP
+    >>> out.shape  # doctest: +SKIP
+    torch.Size([2, 256, 4, 4])
     """
 
     def __init__(

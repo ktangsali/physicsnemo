@@ -148,16 +148,12 @@ class FNO1DEncoder(Module):
 
     def forward(self, x: Float[Tensor, "B C_in L"]) -> Float[Tensor, "B C_latent L"]:
         r"""Forward pass of the 1D FNO encoder."""
-        # Input validation
+        # Input validation: single check for ndim and channels
         if not torch.compiler.is_compiling():
-            if x.ndim != 3:
+            if x.ndim != 3 or x.shape[1] != self._input_channels:
                 raise ValueError(
-                    f"Expected 3D input tensor (B, C, L), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            if x.shape[1] != self._input_channels:
-                raise ValueError(
-                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
+                    f"Expected 3D input (B, {self._input_channels}, L), "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
 
         # Add coordinate features if enabled
@@ -360,16 +356,12 @@ class FNO2DEncoder(Module):
         self, x: Float[Tensor, "B C_in H W"]
     ) -> Float[Tensor, "B C_latent H W"]:
         r"""Forward pass of the 2D FNO encoder."""
-        # Input validation
+        # Input validation: single check for ndim and channels
         if not torch.compiler.is_compiling():
-            if x.ndim != 4:
+            if x.ndim != 4 or x.shape[1] != self._input_channels:
                 raise ValueError(
-                    f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            if x.shape[1] != self._input_channels:
-                raise ValueError(
-                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
+                    f"Expected 4D input (B, {self._input_channels}, H, W), "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
 
         # Add coordinate features if enabled
@@ -581,16 +573,12 @@ class FNO3DEncoder(Module):
         self, x: Float[Tensor, "B C_in D H W"]
     ) -> Float[Tensor, "B C_latent D H W"]:
         r"""Forward pass of the 3D FNO encoder."""
-        # Input validation
+        # Input validation: single check for ndim and channels
         if not torch.compiler.is_compiling():
-            if x.ndim != 5:
+            if x.ndim != 5 or x.shape[1] != self._input_channels:
                 raise ValueError(
-                    f"Expected 5D input tensor (B, C, D, H, W), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            if x.shape[1] != self._input_channels:
-                raise ValueError(
-                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
+                    f"Expected 5D input (B, {self._input_channels}, D, H, W), "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
 
         # Add coordinate features if enabled
@@ -810,16 +798,12 @@ class FNO4DEncoder(Module):
         self, x: Float[Tensor, "B C_in X Y Z T"]
     ) -> Float[Tensor, "B C_latent X Y Z T"]:
         r"""Forward pass of the 4D FNO encoder."""
-        # Input validation
+        # Input validation: single check for ndim and channels
         if not torch.compiler.is_compiling():
-            if x.ndim != 6:
+            if x.ndim != 6 or x.shape[1] != self._input_channels:
                 raise ValueError(
-                    f"Expected 6D input tensor (B, C, X, Y, Z, T), got {x.ndim}D tensor "
-                    f"with shape {tuple(x.shape)}"
-                )
-            if x.shape[1] != self._input_channels:
-                raise ValueError(
-                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
+                    f"Expected 6D input (B, {self._input_channels}, X, Y, Z, T), "
+                    f"got {x.ndim}D tensor with shape {tuple(x.shape)}"
                 )
 
         # Add coordinate features if enabled

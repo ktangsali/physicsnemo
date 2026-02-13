@@ -69,6 +69,16 @@ class Block(Module):
     -------
     torch.Tensor
         Output tensor of shape :math:`(B, H, W, C)`.
+
+    Examples
+    --------
+    >>> import torch
+    >>> from physicsnemo.models.afno.afno import Block
+    >>> block = Block(embed_dim=64, num_blocks=8)
+    >>> x = torch.randn(2, 8, 8, 64)  # (B, H, W, C)
+    >>> out = block(x)
+    >>> out.shape
+    torch.Size([2, 8, 8, 64])
     """
 
     def __init__(
@@ -322,10 +332,10 @@ class AFNO(Module):
 
     def forward(self, x: Float[Tensor, "B C_in H W"]) -> Float[Tensor, "B C_out H W"]:
         r"""Forward pass of the AFNO model."""
-        # Input validation: single check against expected shape (B, in_channels, H, W)
+        # Input validation: single check against expected shape (B, in_chans, H, W)
         if not torch.compiler.is_compiling():
             expected = (
-                self.in_channels,
+                self.in_chans,
                 self.inp_shape[0],
                 self.inp_shape[1],
             )
