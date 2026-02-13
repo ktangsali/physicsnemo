@@ -34,14 +34,13 @@ class PositionalEmbedding(Module):
     Forward
     -------
     x : torch.Tensor
-        Input tensor of shape :math:`(B,)` or :math:`(B, 1)` containing timesteps.
-        Type hint ``B ...`` accepts both shapes.
+        Input tensor, shape ``B ...`` (e.g. :math:`(B,)` or :math:`(B, 1)`),
+        containing timesteps.
 
     Outputs
     -------
     torch.Tensor
-        Positional embedding of shape :math:`(B, D)` where :math:`D` is
-        ``num_channels``.
+        Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
     """
 
     def __init__(self, num_channels: int):
@@ -74,14 +73,13 @@ class OneHotEmbedding(Module):
     Forward
     -------
     t : torch.Tensor
-        Input tensor of shape :math:`(B,)` or :math:`(B, 1)` containing normalized
-        timesteps in range ``[0, 1]``.
+        Input tensor, shape ``B ...`` (e.g. :math:`(B,)` or :math:`(B, 1)`),
+        containing normalized timesteps in range ``[0, 1]``.
 
     Outputs
     -------
     torch.Tensor
-        Soft one-hot embedding of shape :math:`(B, D)` where :math:`D` is
-        ``num_channels``. Type hint ``B ...`` accepts :math:`(B,)` or :math:`(B, 1)`.
+        Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
     """
 
     def __init__(self, num_channels: int):
@@ -117,13 +115,13 @@ class ModEmbedNet(Module):
     Forward
     -------
     t : torch.Tensor
-        Input tensor of shape :math:`(B,)` or :math:`(B, 1)` containing timesteps
-        in range ``[0, max_time]``.
+        Input tensor, shape ``B ...`` (e.g. :math:`(B,)` or :math:`(B, 1)`),
+        containing timesteps in range ``[0, max_time]``.
 
     Outputs
     -------
     torch.Tensor
-        Embedding of shape :math:`(B, D)` where :math:`D` is ``dim``.
+        Output tensor, shape ``B D``, where :math:`D` is ``dim``.
 
     Examples
     --------

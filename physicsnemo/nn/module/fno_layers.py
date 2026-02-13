@@ -299,6 +299,7 @@ class FNO2DEncoder(Module):
         coord_features: bool = True,
     ) -> None:
         super().__init__()
+        self._input_channels = in_channels
         self.in_channels = in_channels
         self.num_fno_layers = num_fno_layers
         self.fno_width = fno_layer_size
@@ -365,6 +366,10 @@ class FNO2DEncoder(Module):
                 raise ValueError(
                     f"Expected 4D input tensor (B, C, H, W), got {x.ndim}D tensor "
                     f"with shape {tuple(x.shape)}"
+                )
+            if x.shape[1] != self._input_channels:
+                raise ValueError(
+                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
                 )
 
         # Add coordinate features if enabled
@@ -511,6 +516,7 @@ class FNO3DEncoder(Module):
     ) -> None:
         super().__init__()
 
+        self._input_channels = in_channels
         self.in_channels = in_channels
         self.num_fno_layers = num_fno_layers
         self.fno_width = fno_layer_size
@@ -581,6 +587,10 @@ class FNO3DEncoder(Module):
                 raise ValueError(
                     f"Expected 5D input tensor (B, C, D, H, W), got {x.ndim}D tensor "
                     f"with shape {tuple(x.shape)}"
+                )
+            if x.shape[1] != self._input_channels:
+                raise ValueError(
+                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
                 )
 
         # Add coordinate features if enabled
@@ -732,6 +742,7 @@ class FNO4DEncoder(Module):
     ) -> None:
         super().__init__()
 
+        self._input_channels = in_channels
         self.in_channels = in_channels
         self.num_fno_layers = num_fno_layers
         self.fno_width = fno_layer_size
@@ -805,6 +816,10 @@ class FNO4DEncoder(Module):
                 raise ValueError(
                     f"Expected 6D input tensor (B, C, X, Y, Z, T), got {x.ndim}D tensor "
                     f"with shape {tuple(x.shape)}"
+                )
+            if x.shape[1] != self._input_channels:
+                raise ValueError(
+                    f"Expected input channels {self._input_channels}, got {x.shape[1]}"
                 )
 
         # Add coordinate features if enabled
