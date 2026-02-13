@@ -145,11 +145,18 @@ class PositionalEmbedding(torch.nn.Module):
 class SinusoidalTimestepEmbedding(Module):
     r"""Sinusoidal embedding for timesteps (e.g. for modulation / diffusion).
 
-    Uses fixed frequencies :math:`\pi, 2\pi, \ldots, (d/2)\pi` and outputs
-    :math:`[\cos(x \cdot \omega_k), \sin(x \cdot \omega_k)]`. This is a simpler
-    scheme than :class:`PositionalEmbedding` (which uses geometric frequencies
-    and optional learnable MLP). Prefer this for timestep conditioning in
-    ModAFNO-style models.
+    For input :math:`x` (timestep) and :math:`D =` ``num_channels`` (even), the
+    frequencies are :math:`\omega_k = k\pi` for :math:`k = 1, \ldots, D/2`, and
+    the output is the concatenation of cosines and sines:
+
+    .. math::
+
+        \mathrm{embed}(x) = \big[ \cos(x \omega_1), \ldots, \cos(x \omega_{D/2}),
+        \sin(x \omega_1), \ldots, \sin(x \omega_{D/2}) \big] \in \mathbb{R}^D.
+
+    This is a simpler scheme than :class:`PositionalEmbedding` (which uses
+    geometric frequencies and optional learnable MLP). Prefer this for timestep
+    conditioning in ModAFNO-style models.
 
     Parameters
     ----------
