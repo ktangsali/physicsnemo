@@ -155,8 +155,8 @@ class SinusoidalTimestepEmbedding(Module):
         \sin(x \omega_1), \ldots, \sin(x \omega_{D/2}) \big] \in \mathbb{R}^D.
 
     This is a simpler scheme than :class:`PositionalEmbedding` (which uses
-    geometric frequencies and optional learnable MLP). Prefer this for timestep
-    conditioning in ModAFNO-style models.
+    geometric frequencies and optional learnable MLP) which works well for timestep
+    conditioning in ModAFNO model.
 
     Parameters
     ----------
