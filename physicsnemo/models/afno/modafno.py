@@ -268,10 +268,10 @@ class ModAFNO(Module):
     >>> output.size()
     torch.Size([32, 1, 32, 32])
 
-    Note
-    ----
-    Reference: Leinonen et al. "Modulated Adaptive Fourier Neural Operators
-    for Temporal Interpolation of Weather Forecasts." arXiv preprint arXiv:TODO (2024).
+    See Also
+    --------
+    `Modulated Adaptive Fourier Neural Operators for Temporal Interpolation of Weather Forecasts <https://arxiv.org/abs/2410.18904>`_ :
+        Leinonen et al., arXiv:2410.18904 (2024).
     """
 
     def __init__(
