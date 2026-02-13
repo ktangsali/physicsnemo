@@ -46,6 +46,10 @@ from physicsnemo.models.afno.distributed.layers import (
     DropPath,
     _trunc_normal_,
 )
+from physicsnemo.nn.module.layer_norm import get_layer_norm_class
+
+# LayerNorm class (TE or PyTorch) for default norm_layer and _init_weights
+_LayerNormClass = get_layer_norm_class()
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +76,10 @@ class DistributedBlock(physicsnemo.Module):
         Stochastic depth rate.
     act_layer : nn.Module, optional, default=nn.GELU
         Activation layer class.
-    norm_layer : nn.Module, optional, default=nn.LayerNorm
-        Normalization layer class.
+    norm_layer : callable, optional
+        Normalization layer factory (e.g. ``partial(LayerNorm, eps=1e-6)``).
+        Defaults to the same mechanism as :func:`~physicsnemo.nn.module.layer_norm.get_layer_norm_class`
+        (Transformer Engine if available, else PyTorch).
     double_skip : bool, optional, default=True
         Whether to use double skip connections.
     num_blocks : int, optional, default=8
@@ -121,7 +127,7 @@ class DistributedBlock(physicsnemo.Module):
         drop: float = 0.0,
         drop_path: float = 0.0,
         act_layer: type = nn.GELU,
-        norm_layer: type = nn.LayerNorm,
+        norm_layer: Union[type, None] = None,
         double_skip: bool = True,
         num_blocks: int = 8,
         sparsity_threshold: float = 0.01,
@@ -130,6 +136,9 @@ class DistributedBlock(physicsnemo.Module):
         output_is_matmul_parallel: bool = False,
     ):
         super().__init__()
+
+        if norm_layer is None:
+            norm_layer = partial(_LayerNormClass, eps=1e-6)
 
         # model parallelism
         # matmul parallelism
@@ -289,7 +298,7 @@ class DistributedAFNONet(physicsnemo.Module):
         self.num_blocks = num_blocks
         self.input_is_matmul_parallel = input_is_matmul_parallel
         self.output_is_matmul_parallel = output_is_matmul_parallel
-        norm_layer = partial(nn.LayerNorm, eps=1e-6)
+        norm_layer = partial(_LayerNormClass, eps=1e-6)
 
         self.patch_embed = DistributedPatchEmbed(
             inp_shape=inp_shape,
@@ -367,7 +376,7 @@ class DistributedAFNONet(physicsnemo.Module):
             _trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
+        elif isinstance(m, _LayerNormClass):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
@@ -494,15 +503,17 @@ class DistributedAFNO(physicsnemo.Module):
 
     Examples
     --------
-    Note: This example requires a distributed environment with model parallelism.
+    Requires a distributed environment with model parallel group initialized.
 
-    >>> # from physicsnemo.distributed import DistributedManager
-    >>> # DistributedManager.initialize()
-    >>> # model = DistributedAFNO(inp_shape=(64, 64), in_channels=2)
-    >>> # x = torch.randn(4, 2, 64, 64)
-    >>> # output = model(x)
-    >>> # output.shape
-    >>> # torch.Size([4, 2, 64, 64])
+    >>> import torch  # doctest: +SKIP
+    >>> from physicsnemo.models.afno.distributed import DistributedAFNO  # doctest: +SKIP
+    >>> from physicsnemo.distributed.manager import DistributedManager  # doctest: +SKIP
+    >>> DistributedManager.initialize()  # doctest: +SKIP
+    >>> model = DistributedAFNO(inp_shape=(64, 64), in_channels=2)  # doctest: +SKIP
+    >>> x = torch.randn(4, 2, 64, 64)  # doctest: +SKIP
+    >>> output = model(x)  # doctest: +SKIP
+    >>> output.shape  # doctest: +SKIP
+    torch.Size([4, 2, 64, 64])
 
     See Also
     --------
