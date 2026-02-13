@@ -52,7 +52,12 @@ from .module.conv_layers import (
 )
 from .module.dgm_layers import DGMLayer
 from .module.drop import DropPath
-from .module.embedding_layers import FourierEmbedding, PositionalEmbedding
+from .module.embedding_layers import (
+    FourierEmbedding,
+    OneHotEmbedding,
+    PositionalEmbedding,
+    SinusoidalTimestepEmbedding,
+)
 from .module.fourier_layers import (
     FourierFilter,
     FourierLayer,

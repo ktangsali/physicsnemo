@@ -16,103 +16,18 @@
 
 from typing import Type
 
-import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 
 from physicsnemo.core.module import Module
+from physicsnemo.nn.module.embedding_layers import (
+    OneHotEmbedding,
+    SinusoidalTimestepEmbedding,
+)
 
-
-class PositionalEmbedding(Module):
-    r"""Module for generating sinusoidal positional embeddings based on timesteps.
-
-    Parameters
-    ----------
-    num_channels : int
-        Number of channels for the embedding. Should be even.
-
-    Forward
-    -------
-    x : torch.Tensor
-        Input tensor, shape ``B ...`` (e.g. :math:`(B,)` or :math:`(B, 1)`),
-        containing timesteps.
-
-    Outputs
-    -------
-    torch.Tensor
-        Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
-
-    Examples
-    --------
-    >>> import torch
-    >>> from physicsnemo.models.afno.modembed import PositionalEmbedding
-    >>> emb = PositionalEmbedding(num_channels=64)
-    >>> t = torch.tensor([0.0, 0.5, 1.0])
-    >>> out = emb(t)
-    >>> out.shape
-    torch.Size([3, 64])
-    """
-
-    def __init__(self, num_channels: int):
-        super().__init__()
-        self.num_channels = num_channels
-
-        freqs = torch.pi * torch.arange(
-            start=1, end=self.num_channels // 2 + 1, dtype=torch.float32
-        )
-        self.register_buffer("freqs", freqs)
-
-    def forward(self, x: Float[Tensor, "B ..."]) -> Float[Tensor, "B D"]:
-        r"""Forward pass computing sinusoidal embeddings."""
-        x = x.view(-1).outer(self.freqs.to(x.dtype))
-        x = torch.cat([x.cos(), x.sin()], dim=1)
-        return x
-
-
-class OneHotEmbedding(Module):
-    r"""Module for generating soft one-hot embeddings based on timesteps.
-
-    The embedding uses a soft one-hot encoding where the value at each position
-    is based on the distance to the timestep.
-
-    Parameters
-    ----------
-    num_channels : int
-        Number of channels for the embedding.
-
-    Forward
-    -------
-    t : torch.Tensor
-        Input tensor, shape ``B ...`` (e.g. :math:`(B,)` or :math:`(B, 1)`),
-        containing normalized timesteps in range ``[0, 1]``.
-
-    Outputs
-    -------
-    torch.Tensor
-        Output tensor, shape ``B D``, where :math:`D` is ``num_channels``.
-
-    Examples
-    --------
-    >>> import torch
-    >>> from physicsnemo.models.afno.modembed import OneHotEmbedding
-    >>> emb = OneHotEmbedding(num_channels=64)
-    >>> t = torch.tensor([[0.0], [0.5], [1.0]])  # normalized in [0, 1]
-    >>> out = emb(t)
-    >>> out.shape
-    torch.Size([3, 64])
-    """
-
-    def __init__(self, num_channels: int):
-        super().__init__()
-        self.num_channels = num_channels
-        ind = torch.arange(num_channels)
-        ind = ind.view(1, len(ind))
-        self.register_buffer("indices", ind)
-
-    def forward(self, t: Float[Tensor, "B ..."]) -> Float[Tensor, "B D"]:
-        r"""Forward pass computing soft one-hot embeddings."""
-        ind = t * (self.num_channels - 1)
-        return torch.clamp(1 - torch.abs(ind - self.indices), min=0)
+# Backward compatibility: modembed used "PositionalEmbedding" for the sinusoidal
+# timestep embedding (distinct from nn.embedding_layers.PositionalEmbedding).
+PositionalEmbedding = SinusoidalTimestepEmbedding
 
 
 class ModEmbedNet(Module):
@@ -155,8 +70,9 @@ class ModEmbedNet(Module):
     See Also
     --------
     :mod:`~physicsnemo.nn.module.embedding_layers` :
-        Other embedding layers (e.g. :class:`~physicsnemo.nn.module.embedding_layers.FourierEmbedding`,
-        :class:`~physicsnemo.nn.module.embedding_layers.PositionalEmbedding`).
+        Embedding layers; this module uses
+        :class:`~physicsnemo.nn.module.embedding_layers.SinusoidalTimestepEmbedding`
+        and :class:`~physicsnemo.nn.module.embedding_layers.OneHotEmbedding`.
     """
 
     def __init__(
@@ -173,7 +89,7 @@ class ModEmbedNet(Module):
         if method == "onehot":
             self.onehot_embed = OneHotEmbedding(dim)
         elif method == "sinusoidal":
-            self.sinusoid_embed = PositionalEmbedding(dim)
+            self.sinusoid_embed = SinusoidalTimestepEmbedding(dim)
         else:
             raise ValueError(f"Embedding '{method}' not supported")
 
