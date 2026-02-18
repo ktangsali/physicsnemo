@@ -167,7 +167,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$PYGLIB_AMD64_WHEEL" != "unkn
         uv pip install --no-build-isolation "git+https://github.com/pyg-team/pyg-lib.git@0.5.0"; \
     fi
 
-# Install torch_cluster (wheel or build from source)
+# Install torch_cluster
 ARG TORCH_CLUSTER_ARM64_WHEEL
 ENV TORCH_CLUSTER_ARM64_WHEEL=${TORCH_CLUSTER_ARM64_WHEEL:-unknown}
 
@@ -244,6 +244,9 @@ RUN uv pip uninstall mlflow wandb
 # Set Git Hash as a environment variable
 ARG PHYSICSNEMO_GIT_HASH
 ENV PHYSICSNEMO_GIT_HASH=${PHYSICSNEMO_GIT_HASH:-unknown}
+
+# Remove uv cache to save image size
+RUN uv cache clean
 
 #######################################################################
 # Docs image: deploy + docs build dependencies
