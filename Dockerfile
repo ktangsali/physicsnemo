@@ -17,7 +17,7 @@
 # Image stages: builder -> ci | deploy -> docs
 # Builder: all custom if-else deps + all pyproject extras (no dev), project installed non-editable.
 # Deploy: uninstall mlflow/wandb only; physicsnemo stays non-editable from builder.
-# CI: add dev group, netcdf4 hack, FigNet/Makani, other CI-only packages; physicsnemo reinstalled editable.
+# CI: add dev group, netcdf4 hack, FigNet/Makani, other CI-only packages; physicsnemo uninstalled
 # Python packages use uv (UV_SYSTEM_PYTHON=1). Optional: RUN --mount=type=cache,target=/root/.cache/uv and ENV UV_LINK_MODE=copy for faster rebuilds.
 
 ARG BASE_CONTAINER=nvcr.io/nvidia/pytorch:26.01-py3
@@ -26,7 +26,7 @@ FROM ${BASE_CONTAINER} AS builder
 ARG TARGETPLATFORM
 
 # Install uv (use system Python for installs; set so --system is default)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.10.3 /uv /uvx /bin/
 ENV UV_SYSTEM_PYTHON=1
 # Base image Python is PEP 668 externally-managed; allow system installs in container
 ENV UV_BREAK_SYSTEM_PACKAGES=1
@@ -57,6 +57,8 @@ RUN FILE="/etc/pip/constraint.txt" && \
     fi
 
 # Tell uv to respect the container's constraint file (inherited by all stages)
+# Create an empty constraint file if one does not exist to avoid uv errors
+RUN [ -f /etc/pip/constraint.txt ] || touch /etc/pip/constraint.txt
 ENV UV_CONSTRAINT=/etc/pip/constraint.txt
 
 # Install pyspng for arm64
@@ -193,7 +195,10 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$TORCH_CLUSTER_AMD64_WHEEL" !
 
 
 # natten and torch_sparse need torch at build time (--no-build-isolation)
-RUN uv pip install --no-build-isolation "natten" "torch_sparse"
+ENV NATTEN_CUDA_ARCH="8.0;8.6;9.0;10.0;12.0+PTX"
+
+RUN uv pip install --no-build-isolation "natten"
+RUN uv pip install --no-build-isolation "torch_sparse"
 
 # All pyproject extras (no dev); installs physicsnemo non-editable
 RUN cd /physicsnemo && uv pip install ".[cu13,utils-extras,mesh-extras,datapipes-extras,gnns,perf]"
@@ -202,7 +207,7 @@ RUN cd /physicsnemo && uv pip install ".[cu13,utils-extras,mesh-extras,datapipes
 RUN rm -rf /physicsnemo/
 
 #######################################################################
-# CI image: builder + dev group + netcdf4 hack + FigNet/Makani + CI-only packages, editable install
+# CI image: builder + dev group + netcdf4 hack + FigNet/Makani + CI-only packages
 #######################################################################
 FROM builder AS ci
 
@@ -214,21 +219,23 @@ RUN uv pip install "netcdf4>=1.6.3,<1.7.1"
 COPY . /physicsnemo/
 
 # Dev dependency-group (pytest, ruff, etc.)
-RUN cd /physicsnemo && uv pip install --group dev
+RUN cd /physicsnemo && uv export --group dev --no-emit-project --no-hashes | uv pip install -r -
 
 # FigNet/Makani and related CI-only deps
 RUN uv pip install "torch-harmonics>=0.6.5,<0.7.1" "tensorly>=0.8.1" "tensorly-torch>=0.4.0" "torchinfo>=1.8" "webdataset>=0.2"
-# TODO(akamenev): install Makani via direct URL, see comments in pyproject.toml.
-RUN uv pip install --no-deps "git+https://github.com/NVIDIA/modulus-makani.git@v0.1.0#egg=makani"
+# Install Makani via direct URL
+RUN uv pip install --no-deps "git+https://github.com/NVIDIA/makani.git@v0.2.1#egg=makani"
 
 # Other CI-only specs (moto, scikit-image, etc.)
 RUN uv pip install "moto[s3]>=5.0.28"
 RUN uv pip install "numpy-stl" "scikit-image>=0.24.0" "sparse-dot-mkl" "shapely"
 RUN uv pip install "multi-storage-client[boto3]>=0.33.0"
 
-# Uninstall the non-editable physicsnemo from builder, then install editable for CI
+# E2Grid install
+RUN uv pip install --no-deps --no-build-isolation "git+https://github.com/NVlabs/earth2grid.git@11dcf1b0787a7eb6a8497a3a5a5e1fdcc31232d3"
+
+# Uninstall the non-editable physicsnemo from builder
 RUN uv pip uninstall nvidia-physicsnemo
-RUN cd /physicsnemo && uv pip install -e .
 
 # Cleanup
 RUN rm -rf /physicsnemo/
