@@ -222,7 +222,7 @@ COPY . /physicsnemo/
 RUN cd /physicsnemo && uv export --group dev --no-emit-project --no-hashes | uv pip install -r -
 
 # FigNet/Makani and related CI-only deps
-RUN uv pip install "torch-harmonics>=0.6.5,<0.7.1" "tensorly>=0.8.1" "tensorly-torch>=0.4.0" "torchinfo>=1.8" "webdataset>=0.2"
+RUN uv pip install "torch-harmonics>0.7.1" "tensorly>=0.8.1" "tensorly-torch>=0.4.0" "torchinfo>=1.8" "webdataset>=0.2"
 # Install Makani via direct URL
 RUN uv pip install --no-deps "git+https://github.com/NVIDIA/makani.git@v0.2.1#egg=makani"
 
