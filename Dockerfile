@@ -195,7 +195,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$TORCH_CLUSTER_AMD64_WHEEL" !
 
 
 # natten and torch_sparse need torch at build time (--no-build-isolation)
-ENV NATTEN_CUDA_ARCH="8.0;8.6;9.0;10.0;12.0+PTX"
+ENV NATTEN_CUDA_ARCH="8.0;8.6;9.0;10.0;12.0"
 
 RUN uv pip install --no-build-isolation "natten"
 RUN uv pip install --no-build-isolation "torch_sparse"
