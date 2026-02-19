@@ -50,12 +50,14 @@ from collections.abc import Sequence
 from typing import Any, Callable
 
 import torch
+from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._dtensor_spec import TensorMeta
 from torch.distributed.tensor.placement_types import Placement, Replicate, Shard
 
 from physicsnemo.domain_parallel._shard_tensor_spec import (
     ShardTensorSpec,
     _stride_from_contiguous_shape_C_style,
+    compute_sharding_shapes_from_chunking_global_shape,
 )
 from physicsnemo.domain_parallel.shard_tensor import ShardTensor
 
@@ -452,6 +454,9 @@ def _sharded_view_forward(
     ShardTensor
         Viewed/reshaped ShardTensor.
     """
+    is_plain_dtensor = isinstance(tensor, DTensor) and not isinstance(
+        tensor, ShardTensor
+    )
     spec = tensor._spec
     local_tensor = tensor._local_tensor
 
@@ -476,8 +481,20 @@ def _sharded_view_forward(
     new_placements = _compute_view_placements(
         global_old, local_old, global_new, spec.placements
     )
+    if is_plain_dtensor:
+        # DTensorSpec does not carry ShardTensorSpec._sharding_shapes. Reconstruct
+        # per-rank shapes from mesh/placements/global shape using chunk semantics.
+        old_sharding = compute_sharding_shapes_from_chunking_global_shape(
+            spec.mesh, spec.placements, global_old
+        )
+        old_sharding = {
+            mesh_dim: tuple(rank_shapes)
+            for mesh_dim, rank_shapes in old_sharding.items()
+        }
+    else:
+        old_sharding = spec._sharding_shapes
     new_sharding = _compute_view_sharding_shapes(
-        spec._sharding_shapes, global_old, global_new, spec.placements
+        old_sharding, global_old, global_new, spec.placements
     )
 
     # Build new spec — no communication required.
@@ -668,32 +685,51 @@ def sharded_view(tensor: ShardTensor, target_shape: Sequence[int]) -> ShardTenso
 
 
 # ---------------------------------------------------------------------------
-# __torch_function__ handlers
+# __torch_function__ handlers: argument repackaging
 # ---------------------------------------------------------------------------
 
 
-def _extract_view_shape(args: tuple[Any, ...]) -> tuple[ShardTensor, tuple[int, ...]]:
-    r"""Extract tensor and target shape from ``__torch_function__`` args.
+def _reshape_args(*shape_args: Any) -> tuple[int, ...]:
+    r"""Normalize shape arguments to a single tuple of ints.
 
-    Handles both ``x.view(a, b, c)`` and ``x.view((a, b, c))`` calling
-    conventions.
+    Handles both a single sequence (e.g. ``(2, 3, 4)``) and variadic ints
+    (e.g. ``2, 3, 4``) as used by ``Tensor.view`` and ``Tensor.reshape``.
+    """
+    if len(shape_args) == 1 and isinstance(shape_args[0], (tuple, list, torch.Size)):
+        return tuple(shape_args[0])
+    return tuple(shape_args)
 
-    Parameters
-    ----------
-    args : tuple
-        Positional arguments from ``__torch_function__``.
 
-    Returns
-    -------
-    tuple[ShardTensor, tuple[int, ...]]
-        The input tensor and the target shape.
+def extract_view_and_reshape_arguments(
+    *args: Any, **kwargs: Any
+) -> tuple[
+    ShardTensor,
+    tuple[int, ...] | None,
+    torch.dtype | None,
+]:
+    r"""Extract (tensor, shape, dtype) from view/reshape __torch_function__ args.
+
+    Used by Tensor.view, Tensor.reshape, torch.reshape, and aten.view.default.
+    For view(dtype), returns (tensor, None, dtype). Otherwise returns
+    (tensor, shape, None) with shape normalized to tuple[int, ...].
     """
     tensor = args[0]
-    if len(args) == 2 and isinstance(args[1], (tuple, list, torch.Size)):
-        shape = tuple(args[1])
-    else:
-        shape = tuple(args[1:])
-    return tensor, shape
+    # If there is a dtype, catch and exit early:
+    if len(args) == 2 and isinstance(args[1], torch.dtype):
+        # Honestly this execution path makes no sense to me ...
+        return (tensor, None, args[1])
+    # If it's in kwargs, use that:
+    shape = kwargs.get("shape", None)
+    if shape is not None:
+        return (tensor, shape, None)
+    # Otherwise, all remaning args get massaged into a tuple:
+    shape = _reshape_args(*args[1:])
+    return (tensor, shape, None)
+
+
+# ---------------------------------------------------------------------------
+# __torch_function__ handlers
+# ---------------------------------------------------------------------------
 
 
 def view_wrapper(
@@ -703,9 +739,13 @@ def view_wrapper(
     kwargs: dict[str, Any],
 ) -> ShardTensor:
     r"""``__torch_function__`` handler for ``torch.Tensor.view``."""
-    if len(args) == 2 and isinstance(args[1], torch.dtype):
-        return _sharded_view_dtype(args[0], args[1])
-    tensor, shape = _extract_view_shape(args)
+    tensor, shape, dtype = extract_view_and_reshape_arguments(*args, **kwargs)
+    if dtype is not None:
+        return _sharded_view_dtype(tensor, dtype)
+    if shape is None:
+        raise ValueError(
+            "ShardTensor.view_wrapper: Shape is required for view operation"
+        )
     return sharded_view(tensor, shape)
 
 
@@ -716,7 +756,15 @@ def reshape_wrapper(
     kwargs: dict[str, Any],
 ) -> ShardTensor:
     r"""``__torch_function__`` handler for ``torch.Tensor.reshape``."""
-    tensor, shape = _extract_view_shape(args)
+    tensor, shape, dtype = extract_view_and_reshape_arguments(*args, **kwargs)
+    if dtype is not None:
+        raise ValueError(
+            "ShardTensor.reshape_wrapper: Dtype is not supported for reshape operation"
+        )
+    if shape is None:
+        raise ValueError(
+            "ShardTensor.reshape_wrapper: Shape is required for reshape operation"
+        )
     return sharded_view(tensor, shape)
 
 
@@ -727,7 +775,11 @@ def torch_reshape_wrapper(
     kwargs: dict[str, Any],
 ) -> ShardTensor:
     r"""``__torch_function__`` handler for ``torch.reshape``."""
-    tensor, shape = _extract_view_shape(args)
+    tensor, shape, _ = extract_view_and_reshape_arguments(*args, **kwargs)
+    if shape is None:
+        raise ValueError(
+            "ShardTensor.torch_reshape_wrapper: Shape is required for reshape operation"
+        )
     return sharded_view(tensor, shape)
 
 
@@ -789,8 +841,11 @@ def aten_view_wrapper(
     ShardTensor
         Viewed ShardTensor.
     """
-    tensor = args[0]
-    shape = args[1]
+    tensor, shape, _ = extract_view_and_reshape_arguments(*args, **kwargs)
+    if shape is None:
+        raise ValueError(
+            "ShardTensor.aten_view_wrapper: Shape is required for view operation"
+        )
     return sharded_view(tensor, shape)
 
 
