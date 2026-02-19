@@ -197,7 +197,29 @@ RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$TORCH_CLUSTER_AMD64_WHEEL" !
 # natten and torch_sparse need torch at build time (--no-build-isolation)
 ENV NATTEN_CUDA_ARCH="8.0;8.6;9.0;10.0;12.0"
 
-RUN uv pip install --no-build-isolation "natten"
+ARG NATTEN_ARM64_WHEEL
+ENV NATTEN_ARM64_WHEEL=${NATTEN_ARM64_WHEEL:-unknown}
+
+ARG NATTEN_AMD64_WHEEL
+ENV NATTEN_AMD64_WHEEL=${NATTEN_AMD64_WHEEL:-unknown}
+
+RUN if [ "$TARGETPLATFORM" = "linux/amd64" ] && [ "$NATTEN_AMD64_WHEEL" != "unknown" ]; then \
+        echo "Installing natten for: $TARGETPLATFORM" && \
+        uv pip install --reinstall /physicsnemo/deps/${NATTEN_AMD64_WHEEL}; \
+    elif [ "$TARGETPLATFORM" = "linux/arm64" ] && [ "$NATTEN_ARM64_WHEEL" != "unknown" ]; then \
+        echo "Installing natten for: $TARGETPLATFORM" && \
+        uv pip install --reinstall /physicsnemo/deps/${NATTEN_ARM64_WHEEL}; \
+    else \
+        echo "No custom wheel present for natten, building from source"; \
+        mkdir -p /physicsnemo/deps/; \
+        cd /physicsnemo/deps/; \
+        git clone --recursive --branch v0.21.5 --depth 1 https://github.com/SHI-Labs/NATTEN.git; \
+        cd NATTEN; \
+        MAX_JOBS=64 python setup.py bdist_wheel && \
+        uv pip install --reinstall dist/*.whl && \
+        cd ../ && rm -r NATTEN; \
+    fi
+
 RUN uv pip install --no-build-isolation "torch_sparse"
 
 # All pyproject extras (no dev); installs physicsnemo non-editable
@@ -213,16 +235,21 @@ FROM builder AS ci
 
 ARG TARGETPLATFORM
 
+# UV: use system Python and respect container constraint (same as builder)
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+ENV UV_CONSTRAINT=/etc/pip/constraint.txt
+
 # TODO: Remove hacky downgrade of netCDF4. netCDF4 v1.7.1 issue: https://github.com/Unidata/netcdf4-python/issues/1343
 RUN uv pip install "netcdf4>=1.6.3,<1.7.1"
 
 COPY . /physicsnemo/
 
 # Dev dependency-group (pytest, ruff, etc.)
-RUN cd /physicsnemo && uv export --group dev --no-emit-project --no-hashes | uv pip install -r -
+RUN cd /physicsnemo && uv pip install --group dev
 
 # FigNet/Makani and related CI-only deps
-RUN FORCE_CUDA_EXTENSION=1 uv pip install "torch-harmonics==0.8.0" --no-build-isolation
+RUN FORCE_CUDA_EXTENSION=1 uv pip install --no-build-isolation "torch-harmonics==0.8.0"
 RUN uv pip install "tensorly>=0.8.1" "tensorly-torch>=0.4.0" "torchinfo>=1.8" "webdataset>=0.2"
 # Install Makani via direct URL
 RUN uv pip install --no-deps "git+https://github.com/NVIDIA/makani.git@v0.2.1#egg=makani"
@@ -246,6 +273,11 @@ RUN rm -rf /physicsnemo/
 #######################################################################
 FROM builder AS deploy
 
+# UV: use system Python and respect container constraint (same as builder)
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+ENV UV_CONSTRAINT=/etc/pip/constraint.txt
+
 # Remove mlflow and wandb (CVE concerns)
 RUN uv pip uninstall mlflow wandb
 
@@ -262,6 +294,11 @@ RUN uv cache clean
 FROM deploy AS docs
 
 ARG TARGETPLATFORM
+
+# UV: use system Python and respect container constraint (same as builder)
+ENV UV_SYSTEM_PYTHON=1
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+ENV UV_CONSTRAINT=/etc/pip/constraint.txt
 
 # Install packages for Sphinx build
 RUN uv pip install "protobuf==3.20.3"
