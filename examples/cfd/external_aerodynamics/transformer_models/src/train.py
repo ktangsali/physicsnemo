@@ -305,12 +305,13 @@ def forward_pass(
         if "geometry" in batch.keys():
             local_positions = embeddings[:, :, :3]
             # This is the Typhon path
-            outputs = model(
+            outputs, learned_embeddings = model(
                 global_embedding=features,
                 local_embedding=embeddings,
                 geometry=geometry,
                 local_positions=local_positions,
             )
+            print(f"Learned Embeddings from Training Script: {learned_embeddings[0].shape}")
 
             outputs = unpad_output_for_fp8(outputs, output_pad_size)
             # Loss per point cloud:

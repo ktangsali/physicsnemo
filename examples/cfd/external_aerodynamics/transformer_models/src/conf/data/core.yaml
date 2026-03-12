@@ -16,9 +16,9 @@
 
 # Paths to your data:
 train:
-  data_path:  /lustre/fsw/portfolios/coreai/projects/coreai_modulus_cae/datasets/drivaer_aws/domino/train/
+  data_path:  /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data/
 val:
-  data_path: /lustre/fsw/portfolios/coreai/projects/coreai_modulus_cae/datasets/drivaer_aws/domino/val/
+  data_path: /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data/
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"
@@ -29,8 +29,9 @@ preload_depth: 1
 # Pin memory for GPU transfers?
 pin_memory: true
 
-# Sampling resolution of the point clouds:
-resolution: 200_000
+# Sampling resolution of the point clouds (number of surface points per sample).
+# Lower this if you hit OOM; 100_000 is very large. Try 8192 or 4096 for a 44GB GPU.
+resolution: 50_000
 
 # Surface / Volume / (combined, if supported)
 mode: ???

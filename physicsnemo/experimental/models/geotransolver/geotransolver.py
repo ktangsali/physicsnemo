@@ -547,6 +547,9 @@ class GeoTransolver(Module):
         for block in self.blocks:
             x = block(tuple(x), embedding_states)
 
+        learned_embeddings = x
+        # print(f"Embeddings Shape: {len(x)}")    # This is 1
+        # print(f"Embeddings shape: {x[0].shape}")
         # Project to output dimensions: (B, N, n_hidden) -> (B, N, out_dim)
         x = [self.ln_mlp_out[i](x[i]) for i in range(len(x))]
 
@@ -556,4 +559,4 @@ class GeoTransolver(Module):
         else:
             x = tuple(x)
 
-        return x
+        return x, learned_embeddings
