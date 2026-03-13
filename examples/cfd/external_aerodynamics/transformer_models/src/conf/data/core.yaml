@@ -16,9 +16,9 @@
 
 # Paths to your data:
 train:
-  data_path:  /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data/
+  data_path:  /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data_new/
 val:
-  data_path: /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data/
+  data_path: /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data_new/
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"
@@ -57,5 +57,5 @@ broadcast_global_features: true
 
 # Return the mesh areas and normals?  You don't usually want this for training.
 # We switch it on automatically for inference.
-return_mesh_features: false
+return_mesh_features: true
 

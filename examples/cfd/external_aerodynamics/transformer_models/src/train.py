@@ -311,7 +311,7 @@ def forward_pass(
                 geometry=geometry,
                 local_positions=local_positions,
             )
-            print(f"Learned Embeddings from Training Script: {learned_embeddings[0].shape}")
+            # print(f"Learned Embeddings from Training Script: {learned_embeddings[0].shape}")
 
             outputs = unpad_output_for_fp8(outputs, output_pad_size)
             # Loss per point cloud:

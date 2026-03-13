@@ -517,6 +517,15 @@ class TransolverDataPipe(Dataset):
         if self.config.return_mesh_features:
             outputs["surface_areas"] = data_dict["surface_areas"]
             outputs["surface_normals"] = data_dict["surface_normals"]
+            # Full-mesh fields (same scaling as subsampled) for drag/force computation
+            if self.config.model_type in ("surface", "combined"):
+                if self.config.scaling_type is not None:
+                    outputs["fields_full"] = self.scale_model_targets(
+                        data_dict["surface_fields"],
+                        self.config.surface_factors,
+                    )
+                else:
+                    outputs["fields_full"] = data_dict["surface_fields"]
 
         if "air_density" in data_dict:
             outputs["air_density"] = data_dict["air_density"]

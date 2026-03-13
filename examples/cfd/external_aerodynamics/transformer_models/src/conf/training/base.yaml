@@ -16,6 +16,8 @@
 
 num_epochs: 501
 save_interval: 25
+# Number of micro-batches to accumulate before optimizer.step() (e.g. for GP training)
+gradient_accumulation_steps: 8
 
 scheduler:
   name: "StepLR"

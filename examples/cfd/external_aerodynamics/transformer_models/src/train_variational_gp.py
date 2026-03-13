@@ -1,0 +1,761 @@
+# Core python imports:
+import os
+import time
+from pathlib import Path
+from typing import Literal, Any, Callable, Sequence
+import collections
+from contextlib import nullcontext
+
+from collections.abc import Sequence
+
+# Configuration:
+import hydra
+import omegaconf
+from omegaconf import DictConfig
+
+# Pytorch imports:
+import torch
+from torch import nn
+from torch.optim import Optimizer
+from torch.amp import autocast, GradScaler
+from torch.utils.tensorboard import SummaryWriter
+
+import torch.distributed as dist
+
+# For metrics and model printouts:
+from tabulate import tabulate
+import torchinfo
+
+# For loading dataset stats:
+import numpy as np
+
+# Physicsnemo imports ...
+import fsspec
+import physicsnemo
+from physicsnemo.utils import load_checkpoint, save_checkpoint
+from physicsnemo.utils.checkpoint import (
+    _get_checkpoint_filename,
+    _unique_model_names,
+    checkpoint_logging,
+)
+from physicsnemo.utils.logging import PythonLogger, RankZeroLoggingWrapper
+from physicsnemo.distributed import DistributedManager
+from physicsnemo.utils.profiling import profile, Profiler
+from physicsnemo.datapipes.cae.transolver_datapipe import (
+    create_transolver_dataset,
+    TransolverDataPipe,
+)
+from physicsnemo.models.domino.utils import unstandardize
+
+# Local folder imports for this example
+from metrics import metrics_fn
+
+# tensorwise is to handle single-point-cloud or multi-point-cloud running.
+# it's a decorator that will automatically unzip one or more of a list of tensors,
+# run the funtcion, and rezip the results.
+from utils import tensorwise
+
+# Special import, if transformer engine is available:
+from physicsnemo.core.version_check import check_version_spec
+
+TE_AVAILABLE = check_version_spec("transformer_engine", hard_fail=False)
+
+if TE_AVAILABLE:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import Format, DelayedScaling
+else:
+    te, Format, DelayedScaling = None, None, None
+
+# GPyTorch related stuff
+
+import gpytorch
+from gpytorch.models import ApproximateGP
+from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
+from gpytorch.mlls import VariationalELBO
+
+
+# Allowlist OmegaConf and related types for torch.load(weights_only=True) when loading
+# checkpoints that were saved with config/metadata containing these types (PyTorch 2.6+).
+torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
+torch.serialization.add_safe_globals([omegaconf.base.ContainerMetadata])
+torch.serialization.add_safe_globals([Any])
+torch.serialization.add_safe_globals([list])
+torch.serialization.add_safe_globals([collections.defaultdict])
+torch.serialization.add_safe_globals([dict])
+torch.serialization.add_safe_globals([int])
+torch.serialization.add_safe_globals([omegaconf.nodes.AnyNode])
+torch.serialization.add_safe_globals([omegaconf.base.Metadata])
+
+
+class CombinedOptimizer(Optimizer):
+    """Combine multiple PyTorch optimizers into a single Optimizer-like interface.
+
+    The wrapper concatenates the *param_groups* from all contained optimizers so
+    that learning-rate schedulers (e.g., ReduceLROnPlateau, CosineAnnealingLR)
+    operate transparently across every parameter. Only a minimal subset of the
+    *torch.optim.Optimizer* API is implemented—extend as needed.
+
+    Note:
+        This will get upstreamed to physicsnemo shortly.  Don't count on this
+        class existing here in the future!
+
+        In other words, this is already marked for deprecation!
+    """
+
+    def __init__(
+        self,
+        optimizers: Sequence[Optimizer],
+        torch_compile_kwargs: dict[str, Any] | None = None,
+    ):
+        if not optimizers:
+            raise ValueError("`optimizers` must contain at least one optimizer.")
+
+        self.optimizers = optimizers
+
+        # Collect parameter groups from all optimizers. We pass an empty
+        # *defaults* dict because hyper-parameters are managed by the inner
+        # optimizers, not this wrapper.
+        param_groups = [g for opt in optimizers for g in opt.param_groups]
+        super().__init__(param_groups, defaults={})
+
+        if torch_compile_kwargs is None:
+            self.step_fns: list[Callable] = [opt.step for opt in optimizers]
+        else:
+            self.step_fns: list[Callable] = [
+                torch.compile(opt.step, **torch_compile_kwargs) for opt in optimizers
+            ]
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        """Nullify gradients"""
+        for opt in self.optimizers:
+            opt.zero_grad(*args, **kwargs)
+
+    def step(self, closure=None) -> None:
+        for step_fn in self.step_fns:
+            if closure is None:
+                step_fn()
+            else:
+                step_fn(closure)
+
+    def state_dict(self):
+        return {"optimizers": [opt.state_dict() for opt in self.optimizers]}
+
+    def load_state_dict(self, state_dict):
+        for opt, sd in zip(self.optimizers, state_dict["optimizers"]):
+            opt.load_state_dict(sd)
+
+        self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
+
+
+def update_model_params_for_fp8(cfg, logger) -> tuple | None:
+    """
+    Adjusts model configuration parameters to ensure compatibility with FP8 computations.
+
+    The output shape will be padded to a multiple of 16.  The input shape
+    is padded dynamically in the forward pass, but that is printed here
+    for information.
+
+    Args:
+        cfg: Configuration object with model and training attributes.
+        logger: Logger object for info messages.
+
+    Returns:
+        tuple: (cfg, output_pad_size) if precision is "float8", where output_pad_size is the amount
+               of padding added to the output dimension (or None if no padding was needed).
+    """
+    # we have to manipulate the output shape
+    # to enable fp8 computations with transformer_engine.
+    # need the input and output to be divisible by 16.
+    # if (cfg.model.embedding_dim + cfg.model.functional_dim) % 16 != 0:
+
+    output_pad_size = None
+    if cfg.precision == "float8":
+        if cfg.model.out_dim % 16 != 0:
+            # pad the output:
+            output_pad_size = 16 - (cfg.model.out_dim % 16)
+            cfg.model.out_dim += output_pad_size
+            logger.info(
+                f"Padding output dimension to {cfg.model.out_dim} for fp8 autocast"
+            )
+
+        # This part is informational only:
+        if (cfg.model.functional_dim + cfg.model.embedding_dim) % 16 != 0:
+            input_pad_size = 16 - (
+                (cfg.model.functional_dim + cfg.model.embedding_dim) % 16
+            )
+            cfg.model.functional_dim += input_pad_size
+            logger.info(
+                f"Padding input dimension to {cfg.model.functional_dim} and {cfg.model.embedding_dim} for fp8 autocast"
+            )
+
+    return cfg, output_pad_size
+
+
+def load_pretrained_model_only(
+    model: torch.nn.Module,
+    path: str,
+    epoch: int | None = None,
+) -> bool:
+    """Load only the model state from a checkpoint path (e.g. pretrained GeoTransolver).
+    Does not load optimizer/scheduler or training-state .pt file.
+
+    Returns:
+        True if at least one model was loaded, False otherwise.
+    """
+    fs = fsspec.filesystem(fsspec.utils.get_protocol(path))
+    if not fs.exists(path):
+        checkpoint_logging.warning(
+            f"Pretrained checkpoint path does not exist: {path}, skipping load"
+        )
+        return False
+    models_dict = _unique_model_names([model], loading=True)
+    loaded_any = False
+    for name, m in models_dict.items():
+        if not isinstance(m, physicsnemo.core.Module):
+            continue
+        file_name = _get_checkpoint_filename(
+            path, base_name=name, index=epoch, model_type="mdlus"
+        )
+        if fs.exists(file_name):
+            m.load(file_name)
+            checkpoint_logging.success(
+                f"Loaded pretrained model state: {file_name}"
+            )
+            loaded_any = True
+        else:
+            checkpoint_logging.warning(
+                f"Could not find pretrained model file: {file_name}, skipping"
+            )
+    return loaded_any
+
+
+@tensorwise
+def cast_precisions(tensor: torch.Tensor, precision: str) -> torch.Tensor:
+    """
+    Casts the tensors to the specified precision.
+
+    We are careful to take either a tensor or list of tensors, and return the same format.
+    """
+
+    match precision:
+        case "float16":
+            dtype = torch.float16
+        case "bfloat16":
+            dtype = torch.bfloat16
+        case _:
+            dtype = None
+
+    if dtype is not None:
+        return tensor.to(dtype)
+    else:
+        return tensor
+
+
+# Fixed reference for drag coefficient: A (m²), U (m/s), ρ (kg/m³)
+# coeff = 2 / (A * ρ * U²) for dimensionless force coefficient
+FRONTAL_AREA = 1.85
+REFERENCE_VELOCITY = 40.0
+REFERENCE_DENSITY = 1.225
+DRAG_COEFF_SCALE = 0.35  # scale drag target for GP (target = Cd / DRAG_COEFF_SCALE)
+
+
+def compute_force_coefficients_torch(
+    normals: torch.Tensor,
+    area: torch.Tensor,
+    coeff: float,
+    p: torch.Tensor,
+    wss: torch.Tensor,
+    force_direction: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Computes force coefficients (e.g. drag) from surface pressure and wall shear stress.
+    All tensors on same device; normals (N, 3), area (N,) or (N,1), p (N,), wss (N, 3).
+    Returns c_total, c_p, c_f (scalars).
+    """
+    if force_direction is None:
+        force_direction = torch.tensor(
+            [1.0, 0.0, 0.0], device=normals.device, dtype=normals.dtype
+        )
+    area = area.view(-1)
+    # (N, 3) @ (3,) -> (N,) for normals · force_direction
+    n_dot_f = (normals * force_direction).sum(dim=-1)
+    c_p = coeff * (n_dot_f * area * p).sum()
+    wss_dot_f = (wss * force_direction).sum(dim=-1)
+    c_f = -coeff * (wss_dot_f * area).sum()
+    c_total = c_p + c_f
+    return c_total, c_p, c_f
+
+
+def compute_drag_target_from_batch(
+    batch: dict,
+    surface_factors: dict,
+    device: torch.device,
+    drag_scale: float = DRAG_COEFF_SCALE,
+) -> torch.Tensor:
+    """
+    From dataloader batch (normalized fields, surface_normals, surface_areas),
+    unnormalize fields, compute drag coefficient, return target scaled for GP (Cd / drag_scale).
+    Uses full-mesh fields (batch["fields_full"]) when present so drag is computed on the
+    entire surface; otherwise uses batch["fields"] (subsampled, shapes must match normals/areas).
+    Returns tensor of shape (1,) on device for use as GP target.
+    """
+    # Prefer full-mesh fields for drag so normals/areas (full mesh) match
+    if "fields_full" in batch:
+        fields = batch["fields_full"]
+    else:
+        fields = batch["fields"]
+    if isinstance(fields, list):
+        fields = fields[0]
+    # (B, N, 4) -> unstandardize per channel
+    mean = surface_factors["mean"]
+    std = surface_factors["std"]
+    fields_phys = unstandardize(fields, mean, std)
+    # Single sample: (1, N, 4)
+    fields_phys = fields_phys.squeeze(0)
+    p = fields_phys[:, 0]
+    wss = fields_phys[:, 1:4]
+
+    normals = batch["surface_normals"].squeeze(0).to(device, dtype=fields_phys.dtype)
+    area = batch["surface_areas"].squeeze(0).to(device, dtype=fields_phys.dtype)
+    p = p.to(device)
+    wss = wss.to(device)
+
+    coeff = 2.0 / (
+        FRONTAL_AREA * REFERENCE_DENSITY * (REFERENCE_VELOCITY ** 2)
+    )
+    c_total, _c_p, _c_f = compute_force_coefficients_torch(
+        normals, area, coeff, p, wss
+    )
+    # Scale for GP target
+    target = (c_total / drag_scale).unsqueeze(0)
+    return target
+
+
+class AttentionPooling(nn.Module):
+    """
+    Learns per-point importance weights before aggregating.
+    """
+    def __init__(self, feat_dim=448, embed_dim=32, hidden=128):
+        super().__init__()
+        # Attention scores per point
+        self.attention = nn.Sequential(
+            nn.Linear(feat_dim, hidden), nn.Tanh(),
+            nn.Linear(hidden, 1),  # scalar score per point
+        )
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, 256), nn.ReLU(),
+            nn.Linear(256, embed_dim),
+        )
+
+    def forward(self, point_feats):
+        # point_feats: (B, 50000, 448)
+        attn_scores = self.attention(point_feats)              # (B, 50000, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)      # (B, 50000, 1)
+        weighted_sum = (attn_weights * point_feats).sum(dim=1) # (B, 448)
+        return self.projector(weighted_sum)                    # (B, 32)
+
+class DKLGPLayer(ApproximateGP):
+    def __init__(self, inducing_points, embed_dim=32):
+        variational_distribution = CholeskyVariationalDistribution(
+            inducing_points.size(0)
+        )
+        variational_strategy = VariationalStrategy(
+            self, inducing_points, variational_distribution,
+            learn_inducing_locations=True
+        )
+        super().__init__(variational_strategy)
+        self.mean_module = gpytorch.means.ConstantMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(ard_num_dims=embed_dim)
+        )
+
+    def forward(self, x):
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
+
+class DragGP(nn.Module):
+    def __init__(self, embed_dim=32, n_inducing=64, n_train=None):
+        super().__init__()
+        assert n_train is not None, "Must specify total number of training geometries"
+
+        inducing_points = torch.randn(n_inducing, embed_dim)
+        self.gp_layer = DKLGPLayer(inducing_points, embed_dim)
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        self.mll = VariationalELBO(self.likelihood, self.gp_layer, num_data=n_train)
+
+    def forward(self, embedding):
+        """
+        Args:
+            embedding: (1, 32) global embedding from your encoder
+        Returns:
+            dist: MultivariateNormal — GP predictive distribution
+        """
+        return self.gp_layer(embedding)
+
+    def loss(self, embedding, drag_target):
+        """
+        Args:
+            embedding:   (1, 32) global embedding
+            drag_target: (1,) scalar drag value
+        Returns:
+            neg_elbo: scalar loss to backprop through encoder + GP jointly
+        """
+        dist = self.forward(embedding)
+        return -self.mll(dist, drag_target)
+
+    @torch.no_grad()
+    def predict(self, embedding):
+        """
+        Args:
+            embedding: (1, 32) or (B, 32)
+        Returns:
+            mean:     (B,)
+            variance: (B,)
+            lower_95: (B,)
+            upper_95: (B,)
+        """
+        self.eval()
+        self.likelihood.eval()
+        with gpytorch.settings.fast_pred_var():
+            dist = self.forward(embedding)
+            pred = self.likelihood(dist)
+            mean = pred.mean
+            var = pred.variance
+            lower = mean - 1.96 * var.sqrt()
+            upper = mean + 1.96 * var.sqrt()
+        return mean, var, lower, upper
+
+
+
+def main(cfg: DictConfig):
+    """Main training function
+
+    Args:
+        cfg: Hydra configuration object
+    """
+
+    DistributedManager.initialize()
+
+    # Set up distributed training
+    dist_manager = DistributedManager()
+
+    # Set up logging
+    logger = RankZeroLoggingWrapper(PythonLogger(name="training"), dist_manager)
+
+    # Set checkpoint directory - defaults to output_dir if not specified
+    checkpoint_dir = getattr(cfg, "checkpoint_dir", None)
+    if checkpoint_dir is None:
+        checkpoint_dir = cfg.output_dir
+
+    # train.py writes to checkpoints/; this script writes to checkpoints_gp/
+    pretrained_ckpt_path = getattr(
+        cfg, "pretrained_checkpoint_path", None
+    ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+    gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
+
+    if dist_manager.rank == 0:
+        os.makedirs(cfg.output_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(pretrained_ckpt_path, exist_ok=True)
+        os.makedirs(gp_ckpt_path, exist_ok=True)
+        writer = SummaryWriter(
+            log_dir=os.path.join(
+                cfg.output_dir + "/" + cfg.run_id + "/train",
+            )
+        )
+        val_writer = SummaryWriter(
+            log_dir=os.path.join(
+                cfg.output_dir + "/" + cfg.run_id + "/val",
+            )
+        )
+    else:
+        writer = None
+        val_writer = None
+
+    logger.info(f"Config:\n{omegaconf.OmegaConf.to_yaml(cfg, resolve=True)}")
+    logger.info(f"Output directory: {cfg.output_dir}/{cfg.run_id}")
+    logger.info(
+        f"Pretrained GeoTransolver (load only): {pretrained_ckpt_path}"
+    )
+    logger.info(f"GP checkpoint (save/load): {gp_ckpt_path}")
+
+    cfg, output_pad_size = update_model_params_for_fp8(cfg, logger)
+
+    # Set up model
+    # (Using partial convert to get lists, etc., instead of ListConfigs.)
+    model = hydra.utils.instantiate(cfg.model, _convert_="partial")
+    logger.info(f"\n{torchinfo.summary(model, verbose=0)}")
+
+    model.to(dist_manager.device)
+
+    model = torch.nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[dist_manager.local_rank],
+        output_device=dist_manager.device,
+    )
+
+    # Load pretrained GeoTransolver from train.py checkpoint dir (checkpoints/), not from checkpoints_gp
+    pretrained_loaded = load_pretrained_model_only(
+        model, pretrained_ckpt_path
+    )
+    for p in model.parameters():
+        p.requires_grad = False
+    if pretrained_loaded:
+        logger.info("GeoTransolver loaded and frozen (weights will not be updated)")
+    else:
+        logger.warning(
+            "Pretrained GeoTransolver was not loaded; running with randomly initialized weights"
+        )
+
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Number of parameters (GeoTransolver, frozen): {num_params}")
+
+    # Load the normalization file from configured directory (defaults to current dir)
+    norm_dir = getattr(cfg.data, "normalization_dir", ".")
+    if cfg.data.mode == "surface" or cfg.data.mode == "combined":
+        norm_file = str(Path(norm_dir) / "surface_fields_normalization.npz")
+        norm_data = np.load(norm_file)
+        surface_factors = {
+            "mean": torch.from_numpy(norm_data["mean"]).to(dist_manager.device),
+            "std": torch.from_numpy(norm_data["std"]).to(dist_manager.device),
+        }
+    else:
+        surface_factors = None
+
+    if cfg.data.mode == "volume" or cfg.data.mode == "combined":
+        norm_file = str(Path(norm_dir) / "volume_fields_normalization.npz")
+        norm_data = np.load(norm_file)
+        volume_factors = {
+            "mean": torch.from_numpy(norm_data["mean"]).to(dist_manager.device),
+            "std": torch.from_numpy(norm_data["std"]).to(dist_manager.device),
+        }
+    else:
+        volume_factors = None
+
+    # Training dataset
+    train_dataloader = create_transolver_dataset(
+        cfg.data,
+        phase="train",
+        surface_factors=surface_factors,
+        volume_factors=volume_factors,
+    )
+
+    # Validation dataset
+
+    val_dataloader = create_transolver_dataset(
+        cfg.data,
+        phase="val",
+        surface_factors=surface_factors,
+        volume_factors=volume_factors,
+    )
+
+    num_replicas = dist_manager.world_size
+    data_rank = dist_manager.rank
+
+    # Set up distributed samplers
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataloader,
+        num_replicas=num_replicas,
+        rank=data_rank,
+        shuffle=True,
+        drop_last=True,
+    )
+
+    val_sampler = torch.utils.data.distributed.DistributedSampler(
+        val_dataloader,
+        num_replicas=num_replicas,
+        rank=data_rank,
+        shuffle=False,  # No shuffling for validation
+        drop_last=True,
+    )
+
+    # Embedding reduction and GP (only these are trained; GeoTransolver is frozen)
+    embedding_reduction_model = AttentionPooling(feat_dim=448, embed_dim=32)
+    embedding_reduction_model.to(dist_manager.device)
+
+    gp = DragGP(embed_dim=32, n_inducing=64, n_train=len(train_dataloader))
+    gp.to(dist_manager.device)
+
+    trainable_params = (
+        list(embedding_reduction_model.parameters()) + list(gp.parameters())
+    )
+    optimizer = hydra.utils.instantiate(
+        cfg.training.optimizer, params=trainable_params
+    )
+
+    # Set up learning rate scheduler based on config
+    scheduler_cfg = cfg.training.scheduler
+    scheduler_name = scheduler_cfg.name
+    scheduler_params = dict(scheduler_cfg.params)
+
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, **scheduler_params)
+
+    precision = cfg.precision
+    scaler = GradScaler() if precision == "float16" else None
+
+    if precision == "float8" and not TE_AVAILABLE:
+        raise ImportError(
+            "TransformerEngine is not installed.  Please install it to use float8 precision."
+        )
+
+    # Save/load only GP and embedding reduction to checkpoints_gp/ (GeoTransolver stays in checkpoints/)
+    ckpt_args = {
+        "path": gp_ckpt_path,
+        "optimizer": optimizer,
+        "scheduler": scheduler,
+        "models": [embedding_reduction_model, gp],
+    }
+
+    loaded_epoch = load_checkpoint(device=dist_manager.device, **ckpt_args)
+
+
+
+
+    # Training loop
+    logger.info("Starting training...")
+    for epoch in range(loaded_epoch, cfg.training.num_epochs):
+        # Set the epoch in the samplers
+        train_sampler.set_epoch(epoch)
+        val_sampler.set_epoch(epoch)
+        train_indices = list(train_sampler)
+        val_indices = list(val_sampler)
+        train_dataloader.dataset.set_indices(train_indices)
+        val_dataloader.dataset.set_indices(val_indices)
+
+        epoch_len = len(train_indices)
+        val_epoch_len = len(val_indices)
+        total_gp_loss = 0.0
+        accumulation_steps = getattr(
+            cfg.training, "gradient_accumulation_steps", 1
+        )
+
+        model.eval()
+        embedding_reduction_model.train()
+        for i, batch in enumerate(train_dataloader):
+            features = batch["fx"]
+            embeddings = batch["embeddings"]
+            targets = batch["fields"]
+
+            # Cast precisions:
+            features = cast_precisions(features, precision=precision)
+            embeddings = cast_precisions(embeddings, precision=precision)
+            if "geometry" in batch.keys():
+                geometry = cast_precisions(batch["geometry"], precision=precision)
+            else:
+                geometry = None
+
+            local_positions = embeddings[:, :, :3]
+
+            with torch.no_grad():
+                outputs, learned_embeddings = model(
+                    global_embedding=features,
+                    local_embedding=embeddings,
+                    geometry=geometry,
+                    local_positions=local_positions,
+                )
+
+            reduced_embeddings = embedding_reduction_model(learned_embeddings[0])
+
+            # True drag from batch: unnormalize fields, compute Cd, scale for GP (Cd / 0.35)
+            drag_target = compute_drag_target_from_batch(
+                batch, surface_factors, dist_manager.device
+            ).to(reduced_embeddings.dtype)
+            gp.train()
+            gp.likelihood.train()
+
+            gp_loss = gp.loss(reduced_embeddings, drag_target)
+
+            if i % accumulation_steps == 0:
+                optimizer.zero_grad()
+            (gp_loss / accumulation_steps).backward()
+
+            this_loss = gp_loss.detach().item()
+            total_gp_loss += this_loss
+
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == epoch_len:
+                optimizer.step()
+
+            logger.info(
+                f"Epoch {epoch} [{i}/{epoch_len}] GP Loss: {this_loss:.6f}"
+            )
+            if dist_manager.rank == 0 and writer is not None:
+                writer.add_scalar(
+                    "batch/gp_loss", this_loss, i + epoch_len * epoch
+                )
+
+        avg_gp_loss = total_gp_loss / epoch_len
+        logger.info(
+            f"Epoch [{epoch}/{cfg.training.num_epochs}] Avg Train GP Loss: {avg_gp_loss:.6f}"
+        )
+        if dist_manager.rank == 0 and writer is not None:
+            writer.add_scalar("epoch/gp_loss", avg_gp_loss, epoch)
+
+        # Validation: predict with GP and compute MSE vs true drag over full val set
+        model.eval()
+        embedding_reduction_model.eval()
+        gp.eval()
+        total_val_loss = 0.0
+        with torch.no_grad():
+            for i, batch in enumerate(val_dataloader):
+                features = batch["fx"]
+                embeddings = batch["embeddings"]
+                features = cast_precisions(features, precision=precision)
+                embeddings = cast_precisions(embeddings, precision=precision)
+                geometry = (
+                    cast_precisions(batch["geometry"], precision=precision)
+                    if "geometry" in batch
+                    else None
+                )
+                local_positions = embeddings[:, :, :3]
+
+                outputs, learned_embeddings = model(
+                    global_embedding=features,
+                    local_embedding=embeddings,
+                    geometry=geometry,
+                    local_positions=local_positions,
+                )
+                reduced_embeddings = embedding_reduction_model(
+                    learned_embeddings[0]
+                )
+
+                drag_target = compute_drag_target_from_batch(
+                    batch, surface_factors, dist_manager.device
+                ).to(reduced_embeddings.dtype)
+
+                pred_mean, pred_var, lower_95, upper_95 = gp.predict(
+                    reduced_embeddings
+                )
+                # Validation loss: MSE(predicted mean, true target)
+                val_loss_batch = torch.nn.functional.mse_loss(
+                    pred_mean, drag_target
+                ).item()
+                total_val_loss += val_loss_batch
+
+                logger.info(
+                    f"Val [{i}/{val_epoch_len}] GP MSE: {val_loss_batch:.6f}"
+                )
+
+        avg_val_loss = total_val_loss / val_epoch_len
+        logger.info(
+            f"Epoch [{epoch}/{cfg.training.num_epochs}] Avg Val GP MSE: {avg_val_loss:.6f}"
+        )
+        if dist_manager.rank == 0 and val_writer is not None:
+            val_writer.add_scalar("epoch/gp_mse", avg_val_loss, epoch)
+
+        if epoch % getattr(cfg.training, "save_interval", 1) == 0 and dist_manager.rank == 0:
+            save_checkpoint(**ckpt_args, epoch=epoch + 1)
+
+        scheduler.step()
+
+    logger.info("Training completed!")
+
+
+@hydra.main(version_base=None, config_path="conf", config_name="train_surface")
+def launch(cfg: DictConfig):
+    main(cfg)
+
+if __name__ == "__main__":
+    launch()
+
+
