@@ -16,9 +16,9 @@
 
 # Paths to your data:
 train:
-  data_path:  /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data_new/
+  data_path:  /data/datasets/drivaerstar/surface_files_zarr/class_F/train
 val:
-  data_path: /localhome/local-ktangsali/development_workspace/active_learning_experiment/test_data_new/
+  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_F/val
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"
@@ -31,7 +31,7 @@ pin_memory: true
 
 # Sampling resolution of the point clouds (number of surface points per sample).
 # Lower this if you hit OOM; 100_000 is very large. Try 8192 or 4096 for a 44GB GPU.
-resolution: 50_000
+resolution: 51200
 
 # Surface / Volume / (combined, if supported)
 mode: ???
