@@ -38,7 +38,7 @@ from physicsnemo.datapipes.cae.transolver_datapipe import create_transolver_data
 from physicsnemo.utils import load_checkpoint
 
 from train_variational_gp import (
-    AttentionPooling,
+    create_embedding_reduction,
     load_pretrained_model_only,
     cast_precisions,
 )
@@ -78,8 +78,13 @@ def main(cfg: DictConfig) -> None:
     load_pretrained_model_only(model, pretrained_ckpt_path)
     model.eval()
 
-    # Attention pooling (load trained weights from checkpoints_gp)
-    embedding_reduction_model = AttentionPooling(feat_dim=448, embed_dim=32)
+    # Embedding reduction (attention or mean pooling; load trained weights from checkpoints_gp)
+    pooling_type = cfg.get("embedding_pooling", "attention")
+    embedding_reduction_model = create_embedding_reduction(
+        pooling=pooling_type,
+        feat_dim=448,
+        embed_dim=32,
+    )
     embedding_reduction_model.to(device)
     load_checkpoint(
         path=gp_ckpt_path,
@@ -155,7 +160,9 @@ def main(cfg: DictConfig) -> None:
         )
     ax_attn.set_xlabel("Sample index")
     ax_attn.set_ylabel("Embedding value")
-    ax_attn.set_title("GeoTransolver embeddings: attention pooling (first 10 dims)")
+    ax_attn.set_title(
+        f"GeoTransolver embeddings: {pooling_type} pooling (first 10 dims)"
+    )
     ax_attn.legend(loc="upper right", ncol=2, fontsize=8)
     ax_attn.grid(True, alpha=0.3)
 

@@ -354,6 +354,34 @@ class AttentionPooling(nn.Module):
         weighted_sum = (attn_weights * point_feats).sum(dim=1) # (B, 448)
         return self.projector(weighted_sum)                    # (B, 32)
 
+
+class MeanPooling(nn.Module):
+    """
+    Mean pooling over the spatial (point) dimension, then a linear projection to embed_dim.
+    """
+    def __init__(self, feat_dim=448, embed_dim=32):
+        super().__init__()
+        self.projector = nn.Linear(feat_dim, embed_dim)
+
+    def forward(self, point_feats):
+        # point_feats: (B, N, feat_dim) -> (B, embed_dim)
+        pooled = point_feats.mean(dim=1)
+        return self.projector(pooled)
+
+
+def create_embedding_reduction(
+    pooling: Literal["attention", "mean"],
+    feat_dim: int = 448,
+    embed_dim: int = 32,
+    **kwargs: Any,
+) -> nn.Module:
+    """Create embedding reduction module from config."""
+    if pooling == "attention":
+        return AttentionPooling(feat_dim=feat_dim, embed_dim=embed_dim, **kwargs)
+    if pooling == "mean":
+        return MeanPooling(feat_dim=feat_dim, embed_dim=embed_dim)
+    raise ValueError(f"Unknown embedding_pooling: {pooling}. Use 'attention' or 'mean'.")
+
 class DKLGPLayer(ApproximateGP):
     def __init__(self, inducing_points, embed_dim=32):
         variational_distribution = CholeskyVariationalDistribution(
@@ -571,7 +599,13 @@ def main(cfg: DictConfig):
     )
 
     # Embedding reduction and GP (only these are trained; GeoTransolver is frozen)
-    embedding_reduction_model = AttentionPooling(feat_dim=448, embed_dim=32)
+    pooling_type = cfg.get("embedding_pooling", "attention")
+    logger.info(f"Embedding pooling: {pooling_type}")
+    embedding_reduction_model = create_embedding_reduction(
+        pooling=pooling_type,
+        feat_dim=448,
+        embed_dim=32,
+    )
     embedding_reduction_model.to(dist_manager.device)
 
     gp = DragGP(embed_dim=32, n_inducing=64, n_train=len(train_dataloader))
