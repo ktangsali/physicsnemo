@@ -43,7 +43,7 @@ data:
   include_sdf: false
   include_geometry: true
   # Lower if OOM; 300_000 is heavy. Override with data.geometry_sampling=50000 etc.
-  geometry_sampling: 50_000
+  geometry_sampling: 51200
   broadcast_global_features: false
 
 
