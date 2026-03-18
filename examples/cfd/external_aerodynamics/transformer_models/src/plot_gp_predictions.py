@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Plot GP drag predictions vs true drag on validation/test set.
+Plot GP and Geo-Transolver drag predictions vs true drag on validation/test set.
+
+True drag coefficient (Cd) on x-axis, predicted Cd on y-axis. Includes:
+- GP mean ± 1 std (shaded band)
+- Geo-Transolver: predicted surface fields → unnormalize → integrate to Cd (same
+  pipeline as true drag). A diagonal line (y = x) shows perfect prediction.
 
 Usage (from transformer_models/src):
   python plot_gp_predictions.py
@@ -39,12 +44,52 @@ from physicsnemo.utils import load_checkpoint
 # Import model classes and helpers from training script
 from train_variational_gp import (
     DRAG_COEFF_SCALE,
-    AttentionPooling,
     DragGP,
     compute_drag_target_from_batch,
+    create_embedding_reduction,
     load_pretrained_model_only,
 )
 from train_variational_gp import cast_precisions  # noqa: F401 (used in eval)
+
+
+def predict_full_mesh_in_chunks(
+    batch_full: dict,
+    model: torch.nn.Module,
+    chunk_size: int,
+    device: torch.device,
+    precision: str,
+) -> torch.Tensor:
+    """
+    Run the geo-transolver on a full-mesh batch in chunks, then stitch and unshuffle.
+    Returns predicted fields of shape (1, N_full, 4) so drag can be computed with
+    full-mesh normals/areas.
+    """
+    N = batch_full["embeddings"].shape[1]
+    indices = torch.randperm(N, device=batch_full["fx"].device)
+    index_blocks = torch.split(indices, chunk_size)
+
+    preds = []
+    for index_block in index_blocks:
+        local_embeddings = batch_full["embeddings"][:, index_block]
+        local_positions = local_embeddings[:, :, :3]
+        features = cast_precisions(batch_full["fx"], precision)
+        local_embeddings = cast_precisions(local_embeddings, precision)
+        if "geometry" in batch_full:
+            geometry = cast_precisions(batch_full["geometry"], precision)
+        else:
+            geometry = None
+        outputs, _ = model(
+            global_embedding=features,
+            local_embedding=local_embeddings,
+            geometry=geometry,
+            local_positions=local_positions,
+        )
+        preds.append(outputs)
+    # (1, N_full, 4) after concat along dim=1 (shuffled order)
+    stitched = torch.cat(preds, dim=1)
+    inverse_indices = torch.empty_like(indices)
+    inverse_indices[indices] = torch.arange(N, device=indices.device)
+    return stitched[:, inverse_indices]
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="train_surface")
@@ -66,6 +111,29 @@ def main(cfg: DictConfig) -> None:
         "std": torch.from_numpy(np.load(norm_file)["std"]).to(device),
     }
 
+    # Helper: build a subsampled + full-resolution dataloader pair for a given phase.
+    # For OOD splits we swap val.data_path in a cloned config so
+    # create_transolver_dataset (which only knows "train"/"val") works unchanged.
+    def _make_dataloaders(data_path_override: str | None = None):
+        cfg_data = omegaconf.OmegaConf.create(
+            omegaconf.OmegaConf.to_container(cfg.data, resolve=True)
+        )
+        if data_path_override is not None:
+            cfg_data.val.data_path = data_path_override
+
+        dl = create_transolver_dataset(
+            cfg_data, phase="val", surface_factors=surface_factors, volume_factors=None,
+        )
+        cfg_data_full = omegaconf.OmegaConf.create(
+            omegaconf.OmegaConf.to_container(cfg_data, resolve=True)
+        )
+        cfg_data_full.resolution = None
+        cfg_data_full.return_mesh_features = True
+        dl_full = create_transolver_dataset(
+            cfg_data_full, phase="val", surface_factors=surface_factors, volume_factors=None,
+        )
+        return dl, dl_full
+
     # Data
     train_dataloader = create_transolver_dataset(
         cfg.data,
@@ -73,12 +141,20 @@ def main(cfg: DictConfig) -> None:
         surface_factors=surface_factors,
         volume_factors=None,
     )
-    val_dataloader = create_transolver_dataset(
-        cfg.data,
-        phase="val",
-        surface_factors=surface_factors,
-        volume_factors=None,
-    )
+    val_dataloader, val_dataloader_full = _make_dataloaders()
+
+    # OOD test dataloaders
+    test_1_path = getattr(cfg.data.get("test_1", {}), "data_path", None)
+    test_2_path = getattr(cfg.data.get("test_2", {}), "data_path", None)
+    ood_sets: list[tuple[str, Any, Any]] = []
+    if test_1_path:
+        dl, dl_full = _make_dataloaders(test_1_path)
+        ood_sets.append(("OOD class_N (test_1)", dl, dl_full))
+    if test_2_path:
+        dl, dl_full = _make_dataloaders(test_2_path)
+        ood_sets.append(("OOD class_E (test_2)", dl, dl_full))
+
+    chunk_size = getattr(cfg.data, "resolution", 51200) or 51200
     n_train = len(train_dataloader)
     n_val = len(val_dataloader)
 
@@ -88,10 +164,13 @@ def main(cfg: DictConfig) -> None:
     load_pretrained_model_only(model, pretrained_ckpt_path)
     model.eval()
 
-    embedding_reduction_model = AttentionPooling(feat_dim=448, embed_dim=32)
+    pooling_type = cfg.get("embedding_pooling", "attention")
+    embedding_reduction_model = create_embedding_reduction(
+        pooling=pooling_type, feat_dim=448, embed_dim=32,
+    )
     embedding_reduction_model.to(device)
 
-    gp = DragGP(embed_dim=32, n_inducing=64, n_train=n_train)
+    gp = DragGP(embed_dim=32, n_inducing=128, n_train=n_train)
     gp.to(device)
 
     # Load GP and embedding reduction from checkpoints_gp
@@ -107,77 +186,118 @@ def main(cfg: DictConfig) -> None:
 
     precision = getattr(cfg, "precision", "float32")
 
-    # Collect predictions and true drag over val set
-    indices = []
-    true_cd = []
-    pred_mean_cd = []
-    pred_std_cd = []
+    # --- Reusable prediction collector ---
+    def collect_predictions(dl_sub, dl_full):
+        """Run GP + Geo-Transolver inference on a dataloader pair.
+        Returns dict with arrays: true_cd, pred_mean_cd, pred_std_cd, transolver_cd.
+        """
+        true_list, mean_list, std_list, trans_list = [], [], [], []
+        full_iter = iter(dl_full)
+        with torch.no_grad():
+            for batch in dl_sub:
+                features = cast_precisions(batch["fx"], precision)
+                embeddings = cast_precisions(batch["embeddings"], precision)
+                geometry = (
+                    cast_precisions(batch["geometry"], precision)
+                    if "geometry" in batch else None
+                )
+                local_positions = embeddings[:, :, :3]
 
-    with torch.no_grad():
-        for i, batch in enumerate(val_dataloader):
-            features = batch["fx"]
-            embeddings = batch["embeddings"]
-            if "geometry" in batch:
-                geometry = cast_precisions(batch["geometry"], precision)
-            else:
-                geometry = None
-            features = cast_precisions(features, precision)
-            embeddings = cast_precisions(embeddings, precision)
-            local_positions = embeddings[:, :, :3]
+                outputs, learned_embeddings = model(
+                    global_embedding=features,
+                    local_embedding=embeddings,
+                    geometry=geometry,
+                    local_positions=local_positions,
+                )
+                reduced = embedding_reduction_model(learned_embeddings[0])
 
-            _, learned_embeddings = model(
-                global_embedding=features,
-                local_embedding=embeddings,
-                geometry=geometry,
-                local_positions=local_positions,
-            )
-            reduced = embedding_reduction_model(learned_embeddings[0])
+                mean_scaled, var_scaled, _, _ = gp.predict(reduced)
+                mean_np = mean_scaled.cpu().numpy().flatten()
+                std_np = np.sqrt(var_scaled.cpu().numpy().flatten())
 
-            mean_scaled, var_scaled, _, _ = gp.predict(reduced)
-            mean_scaled = mean_scaled.cpu().numpy().flatten()
-            std_scaled = np.sqrt(var_scaled.cpu().numpy().flatten())
+                target_scaled = compute_drag_target_from_batch(
+                    batch, surface_factors, device
+                )
+                true_np = target_scaled.cpu().numpy().flatten()
 
-            target_scaled = compute_drag_target_from_batch(
-                batch, surface_factors, device
-            )
-            true_scaled = target_scaled.cpu().numpy().flatten()
+                batch_full = next(full_iter)
+                outputs_full = predict_full_mesh_in_chunks(
+                    batch_full, model, chunk_size, device, precision,
+                )
+                mod_full = dict(batch_full)
+                mod_full["fields_full"] = outputs_full
+                trans_val = float(
+                    compute_drag_target_from_batch(mod_full, surface_factors, device)
+                    .cpu().numpy().flatten()[0] * DRAG_COEFF_SCALE
+                )
 
-            # One value per sample (batch size 1)
-            for k in range(len(mean_scaled)):
-                indices.append(len(true_cd) + k)
-                true_cd.append(float(true_scaled[k] * DRAG_COEFF_SCALE))
-                pred_mean_cd.append(float(mean_scaled[k] * DRAG_COEFF_SCALE))
-                pred_std_cd.append(float(std_scaled[k] * DRAG_COEFF_SCALE))
+                for k in range(len(mean_np)):
+                    true_list.append(float(true_np[k] * DRAG_COEFF_SCALE))
+                    mean_list.append(float(mean_np[k] * DRAG_COEFF_SCALE))
+                    std_list.append(float(std_np[k] * DRAG_COEFF_SCALE))
+                    trans_list.append(trans_val)
 
-    indices = np.array(indices)
-    true_cd = np.array(true_cd)
-    pred_mean_cd = np.array(pred_mean_cd)
-    pred_std_cd = np.array(pred_std_cd)
+        return {
+            "true_cd": np.array(true_list),
+            "pred_mean_cd": np.array(mean_list),
+            "pred_std_cd": np.array(std_list),
+            "transolver_cd": np.array(trans_list),
+        }
 
-    # Plot
-    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-    ax.plot(indices, true_cd, "o", ms=4, label="True drag (Cd)", color="C0", alpha=0.8)
-    ax.plot(
-        indices,
-        pred_mean_cd,
-        "-",
-        label="GP mean (Cd)",
-        color="C1",
-        lw=1.5,
-    )
-    ax.fill_between(
-        indices,
-        pred_mean_cd - pred_std_cd,
-        pred_mean_cd + pred_std_cd,
-        alpha=0.3,
-        color="C1",
-        label=r"GP $\pm$ 1 std",
-    )
-    ax.set_xlabel("Sample index")
-    ax.set_ylabel("Drag coefficient (Cd)")
-    ax.set_title("GP drag predictions on validation set")
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
+    # Collect for in-distribution val
+    print("Collecting predictions on validation set ...")
+    val_results = collect_predictions(val_dataloader, val_dataloader_full)
+
+    # Collect for each OOD set
+    ood_results: list[tuple[str, dict]] = []
+    for name, dl_sub, dl_full in ood_sets:
+        print(f"Collecting predictions on {name} ...")
+        ood_results.append((name, collect_predictions(dl_sub, dl_full)))
+
+    # --- Plotting ---
+    n_panels = 1 + len(ood_results)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 7))
+    if n_panels == 1:
+        axes = [axes]
+
+    def _plot_panel(ax, res, title):
+        true_cd = res["true_cd"]
+        pred_mean_cd = res["pred_mean_cd"]
+        pred_std_cd = res["pred_std_cd"]
+        transolver_cd = res["transolver_cd"]
+
+        cd_min = min(true_cd.min(), pred_mean_cd.min(), transolver_cd.min())
+        cd_max = max(true_cd.max(), pred_mean_cd.max(), transolver_cd.max())
+        margin = 0.05 * (cd_max - cd_min) if cd_max > cd_min else 0.01
+        diag_lo, diag_hi = cd_min - margin, cd_max + margin
+
+        ax.plot(
+            [diag_lo, diag_hi], [diag_lo, diag_hi],
+            "k--", lw=1.5, alpha=0.7, label="y = x",
+        )
+        sort_idx = np.argsort(true_cd)
+        ax.fill_between(
+            true_cd[sort_idx],
+            (pred_mean_cd - 2 * pred_std_cd)[sort_idx],
+            (pred_mean_cd + 2 * pred_std_cd)[sort_idx],
+            alpha=0.3, color="C1", label=r"GP $\pm$ 2 std",
+        )
+        ax.plot(true_cd, pred_mean_cd, "o", ms=2, color="C1", alpha=0.9, label="GP mean")
+        ax.plot(true_cd, transolver_cd, "s", ms=2, color="C2", alpha=0.9,
+                label="Geo-Transolver (field→Cd)")
+        ax.set_xlabel("True Cd")
+        ax.set_ylabel("Predicted Cd")
+        ax.set_title(title)
+        ax.set_aspect("equal")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(diag_lo, diag_hi)
+        ax.set_ylim(diag_lo, diag_hi)
+
+    _plot_panel(axes[0], val_results, "Validation (in-distribution)")
+    for idx, (name, res) in enumerate(ood_results):
+        _plot_panel(axes[idx + 1], res, name)
+
     fig.tight_layout()
 
     out_dir = Path(cfg.output_dir) / cfg.run_id

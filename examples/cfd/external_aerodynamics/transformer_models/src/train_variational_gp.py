@@ -343,8 +343,9 @@ class AttentionPooling(nn.Module):
             nn.Linear(hidden, 1),  # scalar score per point
         )
         self.projector = nn.Sequential(
-            nn.Linear(feat_dim, 256), nn.ReLU(),
-            nn.Linear(256, embed_dim),
+            nn.Linear(feat_dim, 256), nn.ReLU(), nn.LayerNorm(256),
+            nn.Linear(256, 128), nn.ReLU(), nn.LayerNorm(128),
+            nn.Linear(128, embed_dim),
         )
 
     def forward(self, point_feats):
@@ -393,9 +394,12 @@ class DKLGPLayer(ApproximateGP):
         )
         super().__init__(variational_strategy)
         self.mean_module = gpytorch.means.ConstantMean()
-        self.covar_module = gpytorch.kernels.ScaleKernel(
-            gpytorch.kernels.RBFKernel(ard_num_dims=embed_dim)
+        base_kernel = gpytorch.kernels.MaternKernel(
+            nu=2.5,
+            ard_num_dims=embed_dim,
+            lengthscale_constraint=gpytorch.constraints.Interval(0.01, 10.0),
         )
+        self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -403,11 +407,12 @@ class DKLGPLayer(ApproximateGP):
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
 class DragGP(nn.Module):
-    def __init__(self, embed_dim=32, n_inducing=64, n_train=None):
+    def __init__(self, embed_dim=32, n_inducing=64, n_train=None, inducing_points=None):
         super().__init__()
         assert n_train is not None, "Must specify total number of training geometries"
 
-        inducing_points = torch.randn(n_inducing, embed_dim)
+        if inducing_points is None:
+            inducing_points = torch.randn(n_inducing, embed_dim)
         self.gp_layer = DKLGPLayer(inducing_points, embed_dim)
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
         self.mll = VariationalELBO(self.likelihood, self.gp_layer, num_data=n_train)
@@ -598,6 +603,8 @@ def main(cfg: DictConfig):
         drop_last=True,
     )
 
+    precision = cfg.precision
+
     # Embedding reduction and GP (only these are trained; GeoTransolver is frozen)
     pooling_type = cfg.get("embedding_pooling", "attention")
     logger.info(f"Embedding pooling: {pooling_type}")
@@ -608,14 +615,57 @@ def main(cfg: DictConfig):
     )
     embedding_reduction_model.to(dist_manager.device)
 
-    gp = DragGP(embed_dim=32, n_inducing=64, n_train=len(train_dataloader))
+    n_inducing = 128
+    embed_dim = 32
+    logger.info(
+        f"Collecting {n_inducing} inducing-point embeddings from training data..."
+    )
+    init_embeddings = []
+    model.eval()
+    embedding_reduction_model.eval()
+    with torch.no_grad():
+        for i_init, batch_init in enumerate(train_dataloader):
+            if len(init_embeddings) >= n_inducing:
+                break
+            features_init = cast_precisions(batch_init["fx"], precision)
+            embeddings_init = cast_precisions(batch_init["embeddings"], precision)
+            geometry_init = (
+                cast_precisions(batch_init["geometry"], precision)
+                if "geometry" in batch_init
+                else None
+            )
+            local_positions_init = embeddings_init[:, :, :3]
+            _, learned_emb_init = model(
+                global_embedding=features_init,
+                local_embedding=embeddings_init,
+                geometry=geometry_init,
+                local_positions=local_positions_init,
+            )
+            reduced_init = embedding_reduction_model(learned_emb_init[0])
+            init_embeddings.append(reduced_init.cpu())
+    init_embeddings = torch.cat(init_embeddings, dim=0)[:n_inducing]
+    logger.info(
+        f"Inducing points initialised from data: shape {init_embeddings.shape}, "
+        f"norm range [{init_embeddings.norm(dim=1).min():.4f}, "
+        f"{init_embeddings.norm(dim=1).max():.4f}]"
+    )
+
+    gp = DragGP(
+        embed_dim=embed_dim,
+        n_inducing=n_inducing,
+        n_train=len(train_dataloader),
+        inducing_points=init_embeddings,
+    )
     gp.to(dist_manager.device)
 
-    trainable_params = (
-        list(embedding_reduction_model.parameters()) + list(gp.parameters())
-    )
-    optimizer = hydra.utils.instantiate(
-        cfg.training.optimizer, params=trainable_params
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": embedding_reduction_model.parameters(), "lr": 1e-3},
+            {"params": gp.gp_layer.variational_parameters(), "lr": 1e-2},
+            {"params": gp.gp_layer.hyperparameters(), "lr": 1e-2},
+            {"params": gp.likelihood.parameters(), "lr": 1e-2},
+        ],
+        weight_decay=1e-4,
     )
 
     # Set up learning rate scheduler based on config
@@ -625,7 +675,6 @@ def main(cfg: DictConfig):
 
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, **scheduler_params)
 
-    precision = cfg.precision
     scaler = GradScaler() if precision == "float16" else None
 
     if precision == "float8" and not TE_AVAILABLE:
@@ -660,6 +709,7 @@ def main(cfg: DictConfig):
         epoch_len = len(train_indices)
         val_epoch_len = len(val_indices)
         total_gp_loss = 0.0
+        total_train_mse = 0.0
         accumulation_steps = getattr(
             cfg.training, "gradient_accumulation_steps", 1
         )
@@ -707,11 +757,18 @@ def main(cfg: DictConfig):
             this_loss = gp_loss.detach().item()
             total_gp_loss += this_loss
 
+            with torch.no_grad():
+                pred_mean = gp.gp_layer(reduced_embeddings).mean
+                train_mse = torch.nn.functional.mse_loss(
+                    pred_mean, drag_target
+                ).item()
+            total_train_mse += train_mse
+
             if (i + 1) % accumulation_steps == 0 or (i + 1) == epoch_len:
                 optimizer.step()
 
             logger.info(
-                f"Epoch {epoch} [{i}/{epoch_len}] GP Loss: {this_loss:.6f}"
+                f"Epoch {epoch} [{i}/{epoch_len}] GP Loss: {this_loss:.6f}  Train MSE: {train_mse:.6f}"
             )
             if dist_manager.rank == 0 and writer is not None:
                 writer.add_scalar(
@@ -719,11 +776,28 @@ def main(cfg: DictConfig):
                 )
 
         avg_gp_loss = total_gp_loss / epoch_len
+        avg_train_mse = total_train_mse / epoch_len
         logger.info(
-            f"Epoch [{epoch}/{cfg.training.num_epochs}] Avg Train GP Loss: {avg_gp_loss:.6f}"
+            f"Epoch [{epoch}/{cfg.training.num_epochs}] Avg Train GP Loss: {avg_gp_loss:.6f}  Avg Train MSE: {avg_train_mse:.6f}"
         )
+
+        ls = gp.gp_layer.covar_module.base_kernel.lengthscale.detach().cpu()
+        os_ = gp.gp_layer.covar_module.outputscale.detach().cpu().item()
+        noise = gp.likelihood.noise.detach().cpu().item()
+        logger.info(
+            f"  GP hypers — lengthscale: min={ls.min():.4f} max={ls.max():.4f} "
+            f"mean={ls.mean():.4f} | outputscale={os_:.6f} | noise={noise:.6f}"
+        )
+        logger.info(
+            f"  last-batch embedding norm: {reduced_embeddings.detach().norm(dim=1).mean():.4f}"
+        )
+
         if dist_manager.rank == 0 and writer is not None:
             writer.add_scalar("epoch/gp_loss", avg_gp_loss, epoch)
+            writer.add_scalar("epoch/train_mse", avg_train_mse, epoch)
+            writer.add_scalar("epoch/gp_lengthscale_mean", ls.mean().item(), epoch)
+            writer.add_scalar("epoch/gp_outputscale", os_, epoch)
+            writer.add_scalar("epoch/gp_noise", noise, epoch)
 
         # Validation: predict with GP and compute MSE vs true drag over full val set
         model.eval()

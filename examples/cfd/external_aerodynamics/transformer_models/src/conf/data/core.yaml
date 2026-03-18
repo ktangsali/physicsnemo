@@ -20,6 +20,12 @@ train:
 val:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_F/val
 
+# OOD test splits (used only by plot_gp_predictions.py)
+test_1:
+  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_N/val
+test_2:
+  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_E/val
+
 # You can set a normalization factor directory:
 normalization_dir: "src/"
 
