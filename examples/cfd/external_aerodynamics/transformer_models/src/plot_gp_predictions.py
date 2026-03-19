@@ -275,13 +275,15 @@ def main(cfg: DictConfig) -> None:
         print(f"Collecting predictions on {name} ...")
         ood_results.append((name, collect_predictions(dl_sub, dl_full)))
 
-    # --- Plotting ---
+    # --- Plotting (3 rows x n_panels columns) ---
     n_panels = 1 + len(ood_results)
-    fig, axes = plt.subplots(1, n_panels, figsize=(7 * n_panels, 7))
+    fig, axes = plt.subplots(3, n_panels, figsize=(7 * n_panels, 18))
     if n_panels == 1:
-        axes = [axes]
+        axes = axes.reshape(3, 1)
 
-    def _plot_panel(ax, res, title):
+    all_results = [("Validation (in-distribution)", val_results)] + ood_results
+
+    def _plot_scatter(ax, res, title):
         true_cd = res["true_cd"]
         pred_mean_cd = res["pred_mean_cd"]
         pred_std_cd = res["pred_std_cd"]
@@ -315,9 +317,36 @@ def main(cfg: DictConfig) -> None:
         ax.set_xlim(diag_lo, diag_hi)
         ax.set_ylim(diag_lo, diag_hi)
 
-    _plot_panel(axes[0], val_results, "Validation (in-distribution)")
-    for idx, (name, res) in enumerate(ood_results):
-        _plot_panel(axes[idx + 1], res, name)
+    def _plot_abs_diff_hist(ax, res, title):
+        abs_diff = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
+        ax.hist(abs_diff, bins=30, color="C3", edgecolor="black", alpha=0.75)
+        ax.axvline(np.mean(abs_diff), color="k", ls="--", lw=1.5,
+                    label=f"mean = {np.mean(abs_diff):.4f}")
+        ax.axvline(np.median(abs_diff), color="C0", ls=":", lw=1.5,
+                    label=f"median = {np.median(abs_diff):.4f}")
+        ax.set_xlabel("|Cd_GP − Cd_GeoTransolver|")
+        ax.set_ylabel("Count")
+        ax.set_title(f"{title}\n|GP − GeoTransolver| gap")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    def _plot_std_hist(ax, res, title):
+        std = res["pred_std_cd"]
+        ax.hist(std, bins=30, color="C4", edgecolor="black", alpha=0.75)
+        ax.axvline(np.mean(std), color="k", ls="--", lw=1.5,
+                    label=f"mean = {np.mean(std):.4f}")
+        ax.axvline(np.median(std), color="C0", ls=":", lw=1.5,
+                    label=f"median = {np.median(std):.4f}")
+        ax.set_xlabel("GP Predictive Std Dev (Cd)")
+        ax.set_ylabel("Count")
+        ax.set_title(f"{title}\nGP Std Dev")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    for col, (name, res) in enumerate(all_results):
+        _plot_scatter(axes[0, col], res, name)
+        _plot_abs_diff_hist(axes[1, col], res, name)
+        _plot_std_hist(axes[2, col], res, name)
 
     fig.tight_layout()
 
