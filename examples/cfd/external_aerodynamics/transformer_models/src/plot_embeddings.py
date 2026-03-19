@@ -52,10 +52,19 @@ def main(cfg: DictConfig) -> None:
     DistributedManager.initialize()
 
     checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or cfg.output_dir
-    pretrained_ckpt_path = getattr(
-        cfg, "pretrained_checkpoint_path", None
-    ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
-    gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
+    combined_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_combined"
+    use_combined = Path(combined_ckpt_path).exists()
+
+    if not use_combined:
+        pretrained_ckpt_path = getattr(
+            cfg, "pretrained_checkpoint_path", None
+        ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+        gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
+
+    print(
+        f"Loading from {'combined' if use_combined else 'separate'} "
+        f"checkpoint(s) under {checkpoint_dir}/{cfg.run_id}/"
+    )
 
     # Load normalization
     norm_dir = getattr(cfg.data, "normalization_dir", ".")
@@ -72,25 +81,35 @@ def main(cfg: DictConfig) -> None:
         volume_factors=None,
     )
 
-    # GeoTransolver only (for point-wise embeddings)
+    feat_dim = getattr(cfg, "embedding_feat_dim", 448)
+    embed_dim = getattr(cfg, "embed_dim", 32)
+    pooling_type = cfg.get("embedding_pooling", "attention")
+
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
     model.to(device)
-    load_pretrained_model_only(model, pretrained_ckpt_path)
-    model.eval()
 
-    # Embedding reduction (attention or mean pooling; load trained weights from checkpoints_gp)
-    pooling_type = cfg.get("embedding_pooling", "attention")
     embedding_reduction_model = create_embedding_reduction(
         pooling=pooling_type,
-        feat_dim=448,
-        embed_dim=32,
+        feat_dim=feat_dim,
+        embed_dim=embed_dim,
     )
     embedding_reduction_model.to(device)
-    load_checkpoint(
-        path=gp_ckpt_path,
-        models=[embedding_reduction_model],
-        device=device,
-    )
+
+    if use_combined:
+        load_checkpoint(
+            path=combined_ckpt_path,
+            models=[model, embedding_reduction_model],
+            device=device,
+        )
+    else:
+        load_pretrained_model_only(model, pretrained_ckpt_path)
+        load_checkpoint(
+            path=gp_ckpt_path,
+            models=[embedding_reduction_model],
+            device=device,
+        )
+
+    model.eval()
     embedding_reduction_model.eval()
 
     precision = getattr(cfg, "precision", "float32")

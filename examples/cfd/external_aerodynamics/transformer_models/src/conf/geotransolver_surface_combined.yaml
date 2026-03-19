@@ -1,0 +1,49 @@
+defaults:
+  - training: base
+  - model: geotransolver
+  - data: surface
+
+output_dir: "runs"
+checkpoint_dir: null
+run_id: "geotransolver/surface/combined"
+
+# --- Embedding reduction ---
+embedding_pooling: attention   # "attention" or "mean"
+embedding_feat_dim: 448        # n_hidden (256) + n_radii * n_hidden_local (6*32 = 192)
+
+# --- GP parameters ---
+embed_dim: 32
+n_inducing: 128
+
+# --- Loss weights ---
+lambda_gp: 0.01               # GP ELBO weight (after warmup ramp)
+lambda_consistency: 1.0        # Consistency loss weight (0 disables entirely)
+
+# --- Warmup schedule ---
+gp_warmup_start: 50           # Epoch where GP/consistency ramp begins
+gp_warmup_end: 60             # Epoch where ramp reaches full weight (linear 0→1)
+
+# --- Consistency loss ---
+consistency_every_n_steps: 1   # Full-mesh forward every N training steps (higher = cheaper)
+
+# --- Performance ---
+precision: float32
+compile: false
+profile: false
+
+model:
+  functional_dim: 6
+  include_local_features: true
+  radii: [0.01, 0.05, 0.25, 1.0, 2.5, 5.0]
+  neighbors_in_radius: [4, 8, 16, 64, 128, 256]
+  n_hidden_local: 32
+
+data:
+  include_sdf: false
+  include_geometry: true
+  geometry_sampling: 51200
+  broadcast_global_features: false
+
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
