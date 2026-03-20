@@ -88,10 +88,12 @@ def main(cfg: DictConfig) -> None:
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
     model.to(device)
 
+    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
     embedding_reduction_model = create_embedding_reduction(
         pooling=pooling_type,
         feat_dim=feat_dim,
         embed_dim=embed_dim,
+        spectral_norm=use_spectral_norm,
     )
     embedding_reduction_model.to(device)
 

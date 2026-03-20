@@ -10,6 +10,7 @@ run_id: "geotransolver/surface/combined"
 # --- Embedding reduction ---
 embedding_pooling: attention   # "attention" or "mean"
 embedding_feat_dim: 448        # n_hidden (256) + n_radii * n_hidden_local (6*32 = 192)
+spectral_norm_embedding: false # Apply spectral normalization to embedding reduction layers (SNGP-style)
 
 # --- GP parameters ---
 embed_dim: 32
@@ -25,6 +26,7 @@ gp_warmup_end: 60             # Epoch where ramp reaches full weight (linear 0â†
 
 # --- Consistency loss ---
 consistency_every_n_steps: 1   # Full-mesh forward every N training steps (higher = cheaper)
+consistency_detach_transolver: true  # If true, full-mesh GeoTransolver pass is detached (no grads). Set false to backprop through it.
 
 # --- Performance ---
 precision: float32

@@ -1,9 +1,18 @@
-"""Combined training: GeoTransolver (field prediction) + Variational GP (drag prediction).
+"""Combined training v2: GeoTransolver + Variational GP with zero-cost consistency.
 
 Trains both models jointly with three loss terms:
   1. MSE loss on per-point surface fields (pressure + wall shear stress)
   2. Variational ELBO loss on GP drag prediction from learned embeddings
-  3. Consistency loss between GP-predicted drag and field-integrated drag
+  3. Consistency loss between GP-predicted drag and field-integrated drag,
+     computed directly from the training forward pass predictions (no separate
+     full-mesh pass required).
+
+Compared to train_gp_combined.py, the consistency loss reuses the GeoTransolver
+outputs from the same forward pass used for the MSE loss.  This means:
+  - Zero extra memory for the consistency loss computation.
+  - Gradients from the consistency loss flow through the GeoTransolver for free
+    when consistency_detach_transolver=false.
+  - No full-mesh training dataloader is needed (only for validation).
 
 The GP and consistency losses activate after a configurable warmup period with a
 linear ramp (default: epoch 50-60).  Inducing points are re-initialised at the
@@ -15,7 +24,8 @@ Key config overrides (command-line):
     +gp_warmup_start=50        Epoch at which GP/consistency ramp begins
     +gp_warmup_end=60          Epoch at which ramp reaches full weight
     +consistency_every_n=1     Compute consistency loss every N steps
-    +consistency_detach_transolver=true   Detach GeoTransolver in consistency loss (false = backprop through it)
+    +consistency_detach_transolver=true   Detach GeoTransolver outputs in consistency loss
+    +spectral_norm_embedding=false        Apply spectral norm to embedding reduction
     +n_inducing=128            Number of GP inducing points
     +embed_dim=32              Dimension of GP embedding
 """
@@ -56,9 +66,15 @@ from train import (
     loss_fn,
     update_model_params_for_fp8,
 )
+from physicsnemo.models.domino.utils import unstandardize
+
 from train_variational_gp import (
     DRAG_COEFF_SCALE,
+    FRONTAL_AREA,
+    REFERENCE_DENSITY,
+    REFERENCE_VELOCITY,
     compute_drag_target_from_batch,
+    compute_force_coefficients_torch,
     create_embedding_reduction,
     DragGP,
 )
@@ -88,6 +104,50 @@ torch.serialization.add_safe_globals([omegaconf.base.Metadata])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def compute_drag_from_subsampled_outputs(
+    outputs: torch.Tensor,
+    batch: dict,
+    surface_factors: dict,
+    device: torch.device,
+    drag_scale: float = DRAG_COEFF_SCALE,
+) -> torch.Tensor:
+    """Compute drag from subsampled GeoTransolver predictions.
+
+    Uses per-element normals and areas at the subsampled points
+    (``batch["surface_normals_sub"]`` and ``batch["surface_areas_sub"]``,
+    returned by the datapipe).  The partial sum is scaled by
+    ``N_full / N_sub`` to give an unbiased Monte-Carlo estimate of the
+    full-mesh integral under uniform random subsampling.
+
+    Returns a (1,) tensor in GP-scaled drag space (Cd / drag_scale).
+    Preserves the computational graph through *outputs* so that gradients can
+    flow back into the GeoTransolver.
+    """
+    mean = surface_factors["mean"]
+    std = surface_factors["std"]
+    fields_phys = unstandardize(outputs, mean, std).squeeze(0)  # (N_sub, 4)
+    p = fields_phys[:, 0]
+    wss = fields_phys[:, 1:4]
+
+    normals = batch["surface_normals_sub"].squeeze(0).to(
+        device, dtype=fields_phys.dtype
+    )
+    areas = batch["surface_areas_sub"].squeeze(0).to(
+        device, dtype=fields_phys.dtype
+    )
+
+    n_full = batch["surface_areas"].squeeze(0).shape[0]
+    n_sub = p.shape[0]
+
+    coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY ** 2)
+    scale = n_full / n_sub
+
+    c_total, _, _ = compute_force_coefficients_torch(
+        normals, areas, coeff * scale, p, wss,
+    )
+    return (c_total / drag_scale).unsqueeze(0)
+
 
 def gp_ramp_weight(epoch: int, warmup_start: int, warmup_end: int) -> float:
     """0 before *warmup_start*, linear 0→1 over [start, end), 1 after."""
@@ -157,7 +217,6 @@ def reinitialize_inducing_points(
     init_embeddings_t = torch.cat(init_embeddings, dim=0)[:n_inducing].to(device)
     gp.gp_layer.variational_strategy.inducing_points.data.copy_(init_embeddings_t)
 
-    # Reset variational distribution to match new inducing locations
     vd = gp.gp_layer.variational_strategy._variational_distribution
     vd.variational_mean.data.zero_()
     vd.chol_variational_covar.data.copy_(
@@ -177,55 +236,45 @@ def compute_transolver_drag_full_mesh(
     surface_factors: dict,
     device: torch.device,
     precision: str,
-    detach: bool = True,
 ) -> torch.Tensor:
     """Run GeoTransolver on full mesh in chunks; integrate predicted fields to Cd.
 
+    Used only during validation for accurate drag gap measurement.
+    Always runs under torch.no_grad() and offloads to CPU for memory savings.
     Returns a (1,) tensor in GP-scaled drag space (Cd / DRAG_COEFF_SCALE).
-    When *detach=True* (default) the forward pass runs under ``torch.no_grad()``
-    and intermediates are offloaded to CPU for memory savings.  When *detach=False*
-    gradients flow through the full-mesh pass back into the GeoTransolver (higher
-    memory, but allows the consistency loss to update the GeoTransolver).
     """
-    ctx = torch.no_grad() if detach else nullcontext()
-    with ctx:
-        fx_full = cast_precisions(batch_full["fx"].to(device), precision)
-        geo_full = (
-            cast_precisions(batch_full["geometry"].to(device), precision)
-            if "geometry" in batch_full
-            else None
+    fx_full = cast_precisions(batch_full["fx"].to(device), precision)
+    geo_full = (
+        cast_precisions(batch_full["geometry"].to(device), precision)
+        if "geometry" in batch_full
+        else None
+    )
+
+    N = batch_full["embeddings"].shape[1]
+    indices = torch.randperm(N, device=device)
+    index_blocks = torch.split(indices, chunk_size)
+
+    preds: list[torch.Tensor] = []
+    for idx_block in index_blocks:
+        local_emb = cast_precisions(
+            batch_full["embeddings"][:, idx_block].to(device), precision
         )
+        local_pos = local_emb[:, :, :3]
+        outputs, _ = model(
+            global_embedding=fx_full,
+            local_embedding=local_emb,
+            geometry=geo_full,
+            local_positions=local_pos,
+        )
+        preds.append(outputs.cpu())
 
-        N = batch_full["embeddings"].shape[1]
-        indices = torch.randperm(N, device=device)
-        index_blocks = torch.split(indices, chunk_size)
+    stitched = torch.cat(preds, dim=1)
+    inverse = torch.empty_like(indices, device="cpu")
+    inverse[indices.cpu()] = torch.arange(N)
+    outputs_full = stitched[:, inverse].to(device)
 
-        preds: list[torch.Tensor] = []
-        for idx_block in index_blocks:
-            local_emb = cast_precisions(
-                batch_full["embeddings"][:, idx_block].to(device), precision
-            )
-            local_pos = local_emb[:, :, :3]
-            outputs, _ = model(
-                global_embedding=fx_full,
-                local_embedding=local_emb,
-                geometry=geo_full,
-                local_positions=local_pos,
-            )
-            preds.append(outputs.cpu() if detach else outputs)
-
-        stitched = torch.cat(preds, dim=1)
-        if detach:
-            inverse = torch.empty_like(indices, device="cpu")
-            inverse[indices.cpu()] = torch.arange(N)
-            outputs_full = stitched[:, inverse].to(device)
-        else:
-            inverse = torch.empty_like(indices)
-            inverse[indices] = torch.arange(N, device=device)
-            outputs_full = stitched[:, inverse]
-
-        mod = dict(batch_full)
-        mod["fields_full"] = outputs_full
+    mod = dict(batch_full)
+    mod["fields_full"] = outputs_full
     return compute_drag_target_from_batch(mod, surface_factors, device)
 
 
@@ -237,7 +286,7 @@ def main(cfg: DictConfig):
     DistributedManager.initialize()
     dist_manager = DistributedManager()
     logger = RankZeroLoggingWrapper(
-        PythonLogger(name="combined_training"), dist_manager
+        PythonLogger(name="combined_training_v2"), dist_manager
     )
 
     # ---- Configurable hyper-parameters with sane defaults ----
@@ -277,6 +326,9 @@ def main(cfg: DictConfig):
         f"lambda_gp={lambda_gp}, lambda_consistency={lambda_consistency}, "
         f"consistency_detach_transolver={consistency_detach}, "
         f"spectral_norm_embedding={use_spectral_norm}"
+    )
+    logger.info(
+        "Consistency mode: reuse training forward pass (subsampled mesh)"
     )
 
     precision = cfg.precision
@@ -328,22 +380,19 @@ def main(cfg: DictConfig):
         surface_factors=surface_factors, volume_factors=volume_factors,
     )
 
+    # Full-mesh dataloader only needed for validation (accurate drag gap)
     if use_consistency:
         cfg_data_full = omegaconf.OmegaConf.create(
             omegaconf.OmegaConf.to_container(cfg.data, resolve=True)
         )
         cfg_data_full.resolution = None
         cfg_data_full.return_mesh_features = True
-        train_dl_full = create_transolver_dataset(
-            cfg_data_full, phase="train",
-            surface_factors=surface_factors, volume_factors=volume_factors,
-        )
         val_dl_full = create_transolver_dataset(
             cfg_data_full, phase="val",
             surface_factors=surface_factors, volume_factors=volume_factors,
         )
     else:
-        train_dl_full = val_dl_full = None
+        val_dl_full = None
 
     # ---- Distributed samplers ----
     num_replicas = dist_manager.world_size
@@ -425,7 +474,7 @@ def main(cfg: DictConfig):
         modes = ["volume"]
 
     # ---- Training loop ----
-    logger.info("Starting combined training ...")
+    logger.info("Starting combined training (v2 — subsampled consistency) ...")
     for epoch in range(loaded_epoch, cfg.training.num_epochs):
         train_sampler.set_epoch(epoch)
         val_sampler.set_epoch(epoch)
@@ -433,8 +482,7 @@ def main(cfg: DictConfig):
         val_indices = list(val_sampler)
         train_dl.dataset.set_indices(train_indices)
         val_dl.dataset.set_indices(val_indices)
-        if use_consistency:
-            train_dl_full.dataset.set_indices(train_indices)
+        if val_dl_full is not None:
             val_dl_full.dataset.set_indices(val_indices)
 
         epoch_len = len(train_indices)
@@ -461,13 +509,9 @@ def main(cfg: DictConfig):
         gp.train()
         gp.likelihood.train()
 
-        full_iter = iter(train_dl_full) if use_consistency else None
         start_time = time.time()
 
         for i, batch in enumerate(train_dl):
-            # Keep full-res iter in sync even if we skip the consistency loss
-            batch_full = next(full_iter) if full_iter is not None else None
-
             features = cast_precisions(batch["fx"], precision)
             embeddings = cast_precisions(batch["embeddings"], precision)
             targets = batch["fields"]
@@ -527,19 +571,16 @@ def main(cfg: DictConfig):
                 gp_loss = torch.tensor(0.0, device=dist_manager.device)
                 gp_mean = None
 
-            # ---- Consistency loss ----
+            # ---- Consistency loss (reuse training forward pass) ----
             c_loss_val = 0.0
             if (
                 use_consistency
                 and w_gp > 0
                 and gp_mean is not None
-                and batch_full is not None
                 and (i % consistency_every_n == 0)
             ):
-                transolver_cd = compute_transolver_drag_full_mesh(
-                    batch_full, model, chunk_size,
-                    surface_factors, dist_manager.device, precision,
-                    detach=consistency_detach,
+                transolver_cd = compute_drag_from_subsampled_outputs(
+                    outputs, batch, surface_factors, dist_manager.device,
                 ).to(gp_mean.dtype)
                 if consistency_detach:
                     transolver_cd = transolver_cd.detach()
@@ -677,7 +718,7 @@ def main(cfg: DictConfig):
         val_consistency_gap_sum = 0.0
         val_metrics_sum: dict[str, float] = {}
 
-        full_val_iter = iter(val_dl_full) if use_consistency else None
+        full_val_iter = iter(val_dl_full) if val_dl_full is not None else None
 
         with torch.no_grad():
             for vi, batch in enumerate(val_dl):
@@ -754,7 +795,7 @@ def main(cfg: DictConfig):
                 val_gp_mse = F.mse_loss(pred_mean, drag_target_v).item()
                 val_gp_mse_sum += val_gp_mse
 
-                # Consistency gap
+                # Consistency gap (full-mesh for accurate measurement)
                 if batch_full_v is not None:
                     trans_cd = compute_transolver_drag_full_mesh(
                         batch_full_v, model, chunk_size,

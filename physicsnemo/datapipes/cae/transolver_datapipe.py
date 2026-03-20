@@ -216,6 +216,13 @@ class TransolverDataPipe(Dataset):
         if self.config.scaling_type is not None:
             fields = self.scale_model_targets(fields, self.config.surface_factors)
 
+        # Subsampled areas and normals (raw, not unit-normalized) for drag integration
+        sub_areas = data_dict["surface_areas"]
+        sub_normals = data_dict["surface_normals"]
+        if idx is not None:
+            sub_areas = sub_areas[idx]
+            sub_normals = sub_normals[idx]
+
         if "air_density" in data_dict and "stream_velocity" in data_dict:
             # Build fx:
             fx_inputs = [
@@ -233,12 +240,16 @@ class TransolverDataPipe(Dataset):
                 "embeddings": embeddings,
                 "fx": fx,
                 "fields": fields,
+                "surface_areas_sub": sub_areas,
+                "surface_normals_sub": sub_normals,
             }
 
         else:
             return {
                 "embeddings": embeddings,
                 "fields": fields,
+                "surface_areas_sub": sub_areas,
+                "surface_normals_sub": sub_normals,
             }
 
     def preprocess_volume_data(

@@ -331,21 +331,28 @@ def compute_drag_target_from_batch(
     return target
 
 
+def spectral_norm_wrapper(layer: nn.Module, use_sn: bool) -> nn.Module:
+    """Wrap a layer with spectral normalization if requested."""
+    if use_sn:
+        return torch.nn.utils.parametrizations.spectral_norm(layer)
+    return layer
+
+
 class AttentionPooling(nn.Module):
     """
     Learns per-point importance weights before aggregating.
     """
-    def __init__(self, feat_dim=448, embed_dim=32, hidden=128):
+    def __init__(self, feat_dim=448, embed_dim=32, hidden=128, spectral_norm=False):
         super().__init__()
-        # Attention scores per point
+        sn = spectral_norm
         self.attention = nn.Sequential(
-            nn.Linear(feat_dim, hidden), nn.Tanh(),
-            nn.Linear(hidden, 1),  # scalar score per point
+            spectral_norm_wrapper(nn.Linear(feat_dim, hidden), sn), nn.Tanh(),
+            spectral_norm_wrapper(nn.Linear(hidden, 1), sn),
         )
         self.projector = nn.Sequential(
-            nn.Linear(feat_dim, 256), nn.ReLU(), nn.LayerNorm(256),
-            nn.Linear(256, 128), nn.ReLU(), nn.LayerNorm(128),
-            nn.Linear(128, embed_dim),
+            spectral_norm_wrapper(nn.Linear(feat_dim, 256), sn), nn.ReLU(), nn.LayerNorm(256),
+            spectral_norm_wrapper(nn.Linear(256, 128), sn), nn.ReLU(), nn.LayerNorm(128),
+            spectral_norm_wrapper(nn.Linear(128, embed_dim), sn),
         )
 
     def forward(self, point_feats):
@@ -360,9 +367,9 @@ class MeanPooling(nn.Module):
     """
     Mean pooling over the spatial (point) dimension, then a linear projection to embed_dim.
     """
-    def __init__(self, feat_dim=448, embed_dim=32):
+    def __init__(self, feat_dim=448, embed_dim=32, spectral_norm=False):
         super().__init__()
-        self.projector = nn.Linear(feat_dim, embed_dim)
+        self.projector = spectral_norm_wrapper(nn.Linear(feat_dim, embed_dim), spectral_norm)
 
     def forward(self, point_feats):
         # point_feats: (B, N, feat_dim) -> (B, embed_dim)
@@ -374,13 +381,20 @@ def create_embedding_reduction(
     pooling: Literal["attention", "mean"],
     feat_dim: int = 448,
     embed_dim: int = 32,
+    spectral_norm: bool = False,
     **kwargs: Any,
 ) -> nn.Module:
     """Create embedding reduction module from config."""
     if pooling == "attention":
-        return AttentionPooling(feat_dim=feat_dim, embed_dim=embed_dim, **kwargs)
+        return AttentionPooling(
+            feat_dim=feat_dim, embed_dim=embed_dim,
+            spectral_norm=spectral_norm, **kwargs,
+        )
     if pooling == "mean":
-        return MeanPooling(feat_dim=feat_dim, embed_dim=embed_dim)
+        return MeanPooling(
+            feat_dim=feat_dim, embed_dim=embed_dim,
+            spectral_norm=spectral_norm,
+        )
     raise ValueError(f"Unknown embedding_pooling: {pooling}. Use 'attention' or 'mean'.")
 
 class DKLGPLayer(ApproximateGP):

@@ -176,8 +176,10 @@ def main(cfg: DictConfig) -> None:
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
     model.to(device)
 
+    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
     embedding_reduction_model = create_embedding_reduction(
         pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
+        spectral_norm=use_spectral_norm,
     )
     embedding_reduction_model.to(device)
 
@@ -317,6 +319,15 @@ def main(cfg: DictConfig) -> None:
         ax.set_xlim(diag_lo, diag_hi)
         ax.set_ylim(diag_lo, diag_hi)
 
+    _PERCENTILES = [80, 90, 95]
+    _PCT_COLORS = ["C6", "C8", "C9"]
+
+    def _add_percentile_lines(ax, data):
+        for pct, color in zip(_PERCENTILES, _PCT_COLORS):
+            val = np.percentile(data, pct)
+            ax.axvline(val, color=color, ls="-.", lw=1.2,
+                        label=f"P{pct} = {val:.4f}")
+
     def _plot_abs_diff_hist(ax, res, title):
         abs_diff = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
         ax.hist(abs_diff, bins=30, color="C3", edgecolor="black", alpha=0.75)
@@ -324,10 +335,11 @@ def main(cfg: DictConfig) -> None:
                     label=f"mean = {np.mean(abs_diff):.4f}")
         ax.axvline(np.median(abs_diff), color="C0", ls=":", lw=1.5,
                     label=f"median = {np.median(abs_diff):.4f}")
+        _add_percentile_lines(ax, abs_diff)
         ax.set_xlabel("|Cd_GP − Cd_GeoTransolver|")
         ax.set_ylabel("Count")
         ax.set_title(f"{title}\n|GP − GeoTransolver| gap")
-        ax.legend(loc="best", fontsize=8)
+        ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
 
     def _plot_std_hist(ax, res, title):
@@ -337,10 +349,11 @@ def main(cfg: DictConfig) -> None:
                     label=f"mean = {np.mean(std):.4f}")
         ax.axvline(np.median(std), color="C0", ls=":", lw=1.5,
                     label=f"median = {np.median(std):.4f}")
+        _add_percentile_lines(ax, std)
         ax.set_xlabel("GP Predictive Std Dev (Cd)")
         ax.set_ylabel("Count")
         ax.set_title(f"{title}\nGP Std Dev")
-        ax.legend(loc="best", fontsize=8)
+        ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
 
     for col, (name, res) in enumerate(all_results):
