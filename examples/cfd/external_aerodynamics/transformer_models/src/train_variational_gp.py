@@ -342,7 +342,10 @@ class AttentionPooling(nn.Module):
     """
     Learns per-point importance weights before aggregating.
     """
-    def __init__(self, feat_dim=448, embed_dim=32, hidden=128, spectral_norm=False):
+    def __init__(
+        self, feat_dim=448, embed_dim=32, hidden=128,
+        spectral_norm=False, normalize=False, target_scale=1.0,
+    ):
         super().__init__()
         sn = spectral_norm
         self.attention = nn.Sequential(
@@ -354,27 +357,40 @@ class AttentionPooling(nn.Module):
             spectral_norm_wrapper(nn.Linear(256, 128), sn), nn.ReLU(), nn.LayerNorm(128),
             spectral_norm_wrapper(nn.Linear(128, embed_dim), sn),
         )
+        self.normalize = normalize
+        self.target_scale = target_scale
 
     def forward(self, point_feats):
         # point_feats: (B, 50000, 448)
         attn_scores = self.attention(point_feats)              # (B, 50000, 1)
         attn_weights = torch.softmax(attn_scores, dim=1)      # (B, 50000, 1)
         weighted_sum = (attn_weights * point_feats).sum(dim=1) # (B, 448)
-        return self.projector(weighted_sum)                    # (B, 32)
+        out = self.projector(weighted_sum)                     # (B, 32)
+        if self.normalize:
+            out = torch.nn.functional.normalize(out, dim=-1) * self.target_scale
+        return out
 
 
 class MeanPooling(nn.Module):
     """
     Mean pooling over the spatial (point) dimension, then a linear projection to embed_dim.
     """
-    def __init__(self, feat_dim=448, embed_dim=32, spectral_norm=False):
+    def __init__(
+        self, feat_dim=448, embed_dim=32, spectral_norm=False,
+        normalize=False, target_scale=1.0,
+    ):
         super().__init__()
         self.projector = spectral_norm_wrapper(nn.Linear(feat_dim, embed_dim), spectral_norm)
+        self.normalize = normalize
+        self.target_scale = target_scale
 
     def forward(self, point_feats):
         # point_feats: (B, N, feat_dim) -> (B, embed_dim)
         pooled = point_feats.mean(dim=1)
-        return self.projector(pooled)
+        out = self.projector(pooled)
+        if self.normalize:
+            out = torch.nn.functional.normalize(out, dim=-1) * self.target_scale
+        return out
 
 
 def create_embedding_reduction(
@@ -382,23 +398,35 @@ def create_embedding_reduction(
     feat_dim: int = 448,
     embed_dim: int = 32,
     spectral_norm: bool = False,
+    normalize: bool = False,
+    target_scale: float = 1.0,
     **kwargs: Any,
 ) -> nn.Module:
     """Create embedding reduction module from config."""
     if pooling == "attention":
         return AttentionPooling(
             feat_dim=feat_dim, embed_dim=embed_dim,
-            spectral_norm=spectral_norm, **kwargs,
+            spectral_norm=spectral_norm,
+            normalize=normalize, target_scale=target_scale,
+            **kwargs,
         )
     if pooling == "mean":
         return MeanPooling(
             feat_dim=feat_dim, embed_dim=embed_dim,
             spectral_norm=spectral_norm,
+            normalize=normalize, target_scale=target_scale,
         )
     raise ValueError(f"Unknown embedding_pooling: {pooling}. Use 'attention' or 'mean'.")
 
 class DKLGPLayer(ApproximateGP):
-    def __init__(self, inducing_points, embed_dim=32):
+    def __init__(
+        self,
+        inducing_points,
+        embed_dim=32,
+        lengthscale_range=(0.01, 10.0),
+        lengthscale_prior=None,
+        outputscale_prior=None,
+    ):
         variational_distribution = CholeskyVariationalDistribution(
             inducing_points.size(0)
         )
@@ -408,12 +436,29 @@ class DKLGPLayer(ApproximateGP):
         )
         super().__init__(variational_strategy)
         self.mean_module = gpytorch.means.ConstantMean()
+
+        ls_constraint = gpytorch.constraints.Interval(*lengthscale_range)
+        ls_prior_obj = None
+        if lengthscale_prior is not None:
+            # (concentration, rate) for Gamma — e.g. (3.0, 6.0) → mean 0.5
+            ls_prior_obj = gpytorch.priors.GammaPrior(*lengthscale_prior)
+
         base_kernel = gpytorch.kernels.MaternKernel(
             nu=2.5,
             ard_num_dims=embed_dim,
-            lengthscale_constraint=gpytorch.constraints.Interval(0.01, 10.0),
+            lengthscale_constraint=ls_constraint,
+            lengthscale_prior=ls_prior_obj,
         )
-        self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
+
+        os_prior_obj = None
+        if outputscale_prior is not None:
+            # (concentration, rate) for Gamma — e.g. (2.0, 0.5) → mean 4.0
+            os_prior_obj = gpytorch.priors.GammaPrior(*outputscale_prior)
+
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            base_kernel,
+            outputscale_prior=os_prior_obj,
+        )
 
     def forward(self, x):
         mean = self.mean_module(x)
@@ -421,57 +466,107 @@ class DKLGPLayer(ApproximateGP):
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
 class DragGP(nn.Module):
-    def __init__(self, embed_dim=32, n_inducing=64, n_train=None, inducing_points=None):
+    """Variational GP head that operates entirely in float64.
+
+    Short lengthscales on L2-normalised embeddings make the inducing-point
+    covariance matrix K_uu ill-conditioned in float32.  Running the GP
+    (kernel, variational strategy, likelihood) in float64 eliminates the
+    precision issue at the source.  The parameter overhead is negligible
+    (a few thousand doubles vs millions of float32 encoder weights).
+
+    Inputs are cast to float64 on entry; outputs are cast back to the
+    caller's dtype so gradients flow through seamlessly.
+    """
+
+    def __init__(
+        self, embed_dim=32, n_inducing=64, n_train=None, inducing_points=None,
+        lengthscale_range=(0.01, 10.0),
+        lengthscale_prior=None,
+        outputscale_prior=None,
+    ):
         super().__init__()
         assert n_train is not None, "Must specify total number of training geometries"
 
         if inducing_points is None:
             inducing_points = torch.randn(n_inducing, embed_dim)
-        self.gp_layer = DKLGPLayer(inducing_points, embed_dim)
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        self.gp_layer = DKLGPLayer(
+            inducing_points, embed_dim,
+            lengthscale_range=lengthscale_range,
+            lengthscale_prior=lengthscale_prior,
+            outputscale_prior=outputscale_prior,
+        ).double()
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().double()
         self.mll = VariationalELBO(self.likelihood, self.gp_layer, num_data=n_train)
+
+    @staticmethod
+    def _gp_context():
+        """Safety-net jitter in case float64 K_uu is still marginal."""
+        return gpytorch.settings.cholesky_jitter(float_value=1e-3, double_value=1e-4)
 
     def forward(self, embedding):
         """
         Args:
-            embedding: (1, 32) global embedding from your encoder
+            embedding: (B, D) global embedding from encoder (any dtype)
         Returns:
-            dist: MultivariateNormal — GP predictive distribution
+            dist: MultivariateNormal in the caller's original dtype
         """
-        return self.gp_layer(embedding)
+        orig_dtype = embedding.dtype
+        with self._gp_context():
+            dist = self.gp_layer(embedding.double())
+        return gpytorch.distributions.MultivariateNormal(
+            dist.mean.to(orig_dtype),
+            dist.lazy_covariance_matrix.to_dense().to(orig_dtype),
+        )
+
+    def forward_and_loss(self, embedding, drag_target):
+        """Single forward pass returning both the predictive mean and ELBO loss.
+
+        Args:
+            embedding:   (B, D) global embedding
+            drag_target: (B,) scalar drag values
+        Returns:
+            mean:     (B,) predictive mean in caller's dtype
+            neg_elbo: scalar loss in caller's dtype
+        """
+        orig_dtype = embedding.dtype
+        with self._gp_context():
+            dist = self.gp_layer(embedding.double())
+            neg_elbo = -self.mll(dist, drag_target.double())
+        return dist.mean.to(orig_dtype), neg_elbo.to(orig_dtype)
 
     def loss(self, embedding, drag_target):
         """
         Args:
-            embedding:   (1, 32) global embedding
-            drag_target: (1,) scalar drag value
+            embedding:   (B, D) global embedding
+            drag_target: (B,) scalar drag values
         Returns:
-            neg_elbo: scalar loss to backprop through encoder + GP jointly
+            neg_elbo: scalar loss (in caller's dtype) to backprop through encoder + GP
         """
-        dist = self.forward(embedding)
-        return -self.mll(dist, drag_target)
+        _, neg_elbo = self.forward_and_loss(embedding, drag_target)
+        return neg_elbo
 
     @torch.no_grad()
     def predict(self, embedding):
         """
         Args:
-            embedding: (1, 32) or (B, 32)
+            embedding: (B, D)
         Returns:
-            mean:     (B,)
-            variance: (B,)
-            lower_95: (B,)
-            upper_95: (B,)
+            mean, variance, lower_95, upper_95  — all (B,) in caller's dtype
         """
+        orig_dtype = embedding.dtype
         self.eval()
         self.likelihood.eval()
-        with gpytorch.settings.fast_pred_var():
-            dist = self.forward(embedding)
+        with self._gp_context(), gpytorch.settings.fast_pred_var():
+            dist = self.gp_layer(embedding.double())
             pred = self.likelihood(dist)
             mean = pred.mean
             var = pred.variance
             lower = mean - 1.96 * var.sqrt()
             upper = mean + 1.96 * var.sqrt()
-        return mean, var, lower, upper
+        return (
+            mean.to(orig_dtype), var.to(orig_dtype),
+            lower.to(orig_dtype), upper.to(orig_dtype),
+        )
 
 
 

@@ -66,6 +66,7 @@ from train import (
     loss_fn,
     update_model_params_for_fp8,
 )
+import gpytorch
 from physicsnemo.models.domino.utils import unstandardize
 
 from train_variational_gp import (
@@ -303,6 +304,17 @@ def main(cfg: DictConfig):
     accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
     use_consistency = lambda_consistency > 0
 
+    # Embedding normalization
+    normalize_embeddings = getattr(cfg, "normalize_embeddings", False)
+    embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
+
+    # GP kernel configuration
+    ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 10.0]))
+    ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
+    ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
+    os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
+    os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
+
     # ---- Directories and writers ----
     checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or cfg.output_dir
     ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_combined"
@@ -328,6 +340,13 @@ def main(cfg: DictConfig):
         f"spectral_norm_embedding={use_spectral_norm}"
     )
     logger.info(
+        f"Embedding normalize={normalize_embeddings}, target_scale={embedding_target_scale}"
+    )
+    logger.info(
+        f"GP kernel: lengthscale_range={ls_range}, "
+        f"lengthscale_prior={ls_prior}, outputscale_prior={os_prior}"
+    )
+    logger.info(
         "Consistency mode: reuse training forward pass (subsampled mesh)"
     )
 
@@ -351,6 +370,8 @@ def main(cfg: DictConfig):
     embedding_reduction = create_embedding_reduction(
         pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
+        normalize=normalize_embeddings,
+        target_scale=embedding_target_scale,
     )
     embedding_reduction.to(dist_manager.device)
 
@@ -410,6 +431,9 @@ def main(cfg: DictConfig):
     n_train = len(train_dl)
     gp = DragGP(
         embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
+        lengthscale_range=ls_range,
+        lengthscale_prior=ls_prior,
+        outputscale_prior=os_prior,
     )
     gp.to(dist_manager.device)
     num_gp_params = (
@@ -560,9 +584,7 @@ def main(cfg: DictConfig):
                     batch, surface_factors, dist_manager.device,
                 ).to(reduced.dtype)
 
-                gp_dist = gp(reduced)
-                gp_mean = gp_dist.mean
-                gp_loss = -gp.mll(gp_dist, drag_target)
+                gp_mean, gp_loss = gp.forward_and_loss(reduced, drag_target)
 
                 with torch.no_grad():
                     gp_train_mse_val = F.mse_loss(gp_mean, drag_target).item()

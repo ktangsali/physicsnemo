@@ -21,10 +21,23 @@ val:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_F/val
 
 # OOD test splits (used only by plot_gp_predictions.py)
-test_1:
+# All keys matching "test_*" are auto-discovered by the script.
+test_notchback:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_N/val
-test_2:
+test_estateback:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_E/val
+test_suv:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_suv_zarr
+test_sedan:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sedan_zarr
+test_pickup:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_pickup_zarr
+test_hatchback:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_hatchback_zarr
+test_van:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_van_zarr
+test_sports_car:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sports_car_zarr
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"

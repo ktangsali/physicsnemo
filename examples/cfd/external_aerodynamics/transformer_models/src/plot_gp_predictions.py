@@ -37,6 +37,7 @@ torch.serialization.add_safe_globals([int])
 torch.serialization.add_safe_globals([omegaconf.nodes.AnyNode])
 torch.serialization.add_safe_globals([omegaconf.base.Metadata])
 
+import gpytorch
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.datapipes.cae.transolver_datapipe import create_transolver_dataset
 from physicsnemo.utils import load_checkpoint
@@ -92,7 +93,7 @@ def predict_full_mesh_in_chunks(
     return stitched[:, inverse_indices]
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="train_surface")
+@hydra.main(version_base=None, config_path="conf", config_name="geotransolver_surface_combined")
 def main(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DistributedManager.initialize()
@@ -152,16 +153,20 @@ def main(cfg: DictConfig) -> None:
     )
     val_dataloader, val_dataloader_full = _make_dataloaders()
 
-    # OOD test dataloaders
-    test_1_path = getattr(cfg.data.get("test_1", {}), "data_path", None)
-    test_2_path = getattr(cfg.data.get("test_2", {}), "data_path", None)
+    # OOD test dataloaders — auto-discover all "test_*" keys in cfg.data
     ood_sets: list[tuple[str, Any, Any]] = []
-    if test_1_path:
-        dl, dl_full = _make_dataloaders(test_1_path)
-        ood_sets.append(("OOD class_N (test_1)", dl, dl_full))
-    if test_2_path:
-        dl, dl_full = _make_dataloaders(test_2_path)
-        ood_sets.append(("OOD class_E (test_2)", dl, dl_full))
+    for key in sorted(cfg.data.keys()):
+        if not key.startswith("test_"):
+            continue
+        entry = cfg.data[key]
+        path = getattr(entry, "data_path", None) if hasattr(entry, "data_path") else None
+        if path is None or not Path(path).is_dir():
+            print(f"  Skipping {key}: path={path} (not found)")
+            continue
+        label = key.replace("test_", "OOD ").replace("_", " ").title()
+        print(f"  Loading OOD set: {key} -> {path}")
+        dl, dl_full = _make_dataloaders(path)
+        ood_sets.append((label, dl, dl_full))
 
     chunk_size = getattr(cfg.data, "resolution", 51200) or 51200
     n_train = len(train_dataloader)
@@ -172,18 +177,33 @@ def main(cfg: DictConfig) -> None:
     feat_dim = getattr(cfg, "embedding_feat_dim", 448)
     n_inducing = getattr(cfg, "n_inducing", 128)
     pooling_type = cfg.get("embedding_pooling", "attention")
+    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
+    normalize_embeddings = getattr(cfg, "normalize_embeddings", False)
+    embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
+
+    ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 10.0]))
+    ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
+    ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
+    os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
+    os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
 
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
     model.to(device)
 
-    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
     embedding_reduction_model = create_embedding_reduction(
         pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
+        normalize=normalize_embeddings,
+        target_scale=embedding_target_scale,
     )
     embedding_reduction_model.to(device)
 
-    gp = DragGP(embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train)
+    gp = DragGP(
+        embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
+        lengthscale_range=ls_range,
+        lengthscale_prior=ls_prior,
+        outputscale_prior=os_prior,
+    )
     gp.to(device)
 
     checkpoint_epoch = getattr(cfg, "checkpoint_epoch", None)
@@ -277,47 +297,35 @@ def main(cfg: DictConfig) -> None:
         print(f"Collecting predictions on {name} ...")
         ood_results.append((name, collect_predictions(dl_sub, dl_full)))
 
-    # --- Plotting (3 rows x n_panels columns) ---
-    n_panels = 1 + len(ood_results)
-    fig, axes = plt.subplots(3, n_panels, figsize=(7 * n_panels, 18))
-    if n_panels == 1:
-        axes = axes.reshape(3, 1)
-
+    # --- Plotting helpers ---
     all_results = [("Validation (in-distribution)", val_results)] + ood_results
 
-    def _plot_scatter(ax, res, title):
-        true_cd = res["true_cd"]
-        pred_mean_cd = res["pred_mean_cd"]
-        pred_std_cd = res["pred_std_cd"]
-        transolver_cd = res["transolver_cd"]
+    # Pre-compute derived quantities for every dataset
+    for _name, res in all_results:
+        res["abs_diff"] = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
+        res["joint_uq"] = np.maximum(res["abs_diff"], res["pred_std_cd"])
 
-        cd_min = min(true_cd.min(), pred_mean_cd.min(), transolver_cd.min())
-        cd_max = max(true_cd.max(), pred_mean_cd.max(), transolver_cd.max())
-        margin = 0.05 * (cd_max - cd_min) if cd_max > cd_min else 0.01
-        diag_lo, diag_hi = cd_min - margin, cd_max + margin
+    # --- Global axis ranges (consistent across rows for each column) ---
+    def _global_range(key):
+        vals = np.concatenate([res[key] for _, res in all_results])
+        lo, hi = vals.min(), vals.max()
+        margin = 0.05 * (hi - lo) if hi > lo else 0.01
+        return lo - margin, hi + margin
 
-        ax.plot(
-            [diag_lo, diag_hi], [diag_lo, diag_hi],
-            "k--", lw=1.5, alpha=0.7, label="y = x",
-        )
-        sort_idx = np.argsort(true_cd)
-        ax.fill_between(
-            true_cd[sort_idx],
-            (pred_mean_cd - 2 * pred_std_cd)[sort_idx],
-            (pred_mean_cd + 2 * pred_std_cd)[sort_idx],
-            alpha=0.3, color="C1", label=r"GP $\pm$ 2 std",
-        )
-        ax.plot(true_cd, pred_mean_cd, "o", ms=2, color="C1", alpha=0.9, label="GP mean")
-        ax.plot(true_cd, transolver_cd, "s", ms=2, color="C2", alpha=0.9,
-                label="Geo-Transolver (field→Cd)")
-        ax.set_xlabel("True Cd")
-        ax.set_ylabel("Predicted Cd")
-        ax.set_title(title)
-        ax.set_aspect("equal")
-        ax.legend(loc="best", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(diag_lo, diag_hi)
-        ax.set_ylim(diag_lo, diag_hi)
+    # Col 0: scatter — use global Cd range, clamped to >= 0
+    all_cd = np.concatenate([
+        np.concatenate([res["true_cd"], res["pred_mean_cd"], res["transolver_cd"]])
+        for _, res in all_results
+    ])
+    cd_margin = 0.05 * (all_cd.max() - all_cd.min()) if all_cd.max() > all_cd.min() else 0.01
+    scatter_lo = max(0.0, all_cd.min() - cd_margin)
+    scatter_hi = all_cd.max() + cd_margin
+
+    # Cols 1-2: histogram x ranges
+    diff_lo, diff_hi = _global_range("abs_diff")
+    diff_lo = max(diff_lo, 0.0)
+    std_lo, std_hi = _global_range("pred_std_cd")
+    std_lo = max(std_lo, 0.0)
 
     _PERCENTILES = [80, 90, 95]
     _PCT_COLORS = ["C6", "C8", "C9"]
@@ -328,38 +336,102 @@ def main(cfg: DictConfig) -> None:
             ax.axvline(val, color=color, ls="-.", lw=1.2,
                         label=f"P{pct} = {val:.4f}")
 
-    def _plot_abs_diff_hist(ax, res, title):
-        abs_diff = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
-        ax.hist(abs_diff, bins=30, color="C3", edgecolor="black", alpha=0.75)
-        ax.axvline(np.mean(abs_diff), color="k", ls="--", lw=1.5,
-                    label=f"mean = {np.mean(abs_diff):.4f}")
-        ax.axvline(np.median(abs_diff), color="C0", ls=":", lw=1.5,
-                    label=f"median = {np.median(abs_diff):.4f}")
-        _add_percentile_lines(ax, abs_diff)
-        ax.set_xlabel("|Cd_GP − Cd_GeoTransolver|")
+    def _plot_scatter(ax, res, title):
+        true_cd = res["true_cd"]
+        pred_mean_cd = res["pred_mean_cd"]
+        pred_std_cd = res["pred_std_cd"]
+        transolver_cd = res["transolver_cd"]
+
+        ax.plot(
+            [scatter_lo, scatter_hi], [scatter_lo, scatter_hi],
+            "k--", lw=1.5, alpha=0.7, label="y = x",
+        )
+        sort_idx = np.argsort(true_cd)
+        ax.fill_between(
+            true_cd[sort_idx],
+            (pred_mean_cd - 2 * pred_std_cd)[sort_idx],
+            (pred_mean_cd + 2 * pred_std_cd)[sort_idx],
+            alpha=0.3, color="C1", label=r"GP $\pm$ 2 std",
+        )
+        ax.plot(true_cd, pred_mean_cd, "o", ms=1.5, color="C1", alpha=0.9, label="GP mean")
+        ax.plot(true_cd, transolver_cd, "s", ms=1.5, color="C2", alpha=0.9,
+                label="Geo-Transolver (field→Cd)")
+        ax.set_xlabel("True Cd")
+        ax.set_ylabel("Predicted Cd")
+        ax.set_title(title)
+        ax.set_aspect("equal")
+        ax.legend(loc="best", fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(scatter_lo, scatter_hi)
+        ax.set_ylim(scatter_lo, scatter_hi)
+
+    def _plot_joint_scatter(ax, res, title):
+        """Scatter: true Cd on x, GP mean on y, with joint UQ shading."""
+        true_cd = res["true_cd"]
+        pred_mean_cd = res["pred_mean_cd"]
+        joint_uq = res["joint_uq"]
+
+        ax.plot(
+            [scatter_lo, scatter_hi], [scatter_lo, scatter_hi],
+            "k--", lw=1.5, alpha=0.7, label="y = x",
+        )
+        sort_idx = np.argsort(true_cd)
+        ax.fill_between(
+            true_cd[sort_idx],
+            (pred_mean_cd - joint_uq)[sort_idx],
+            (pred_mean_cd + joint_uq)[sort_idx],
+            alpha=0.3, color="C5", label=r"GP mean $\pm$ joint UQ",
+        )
+        ax.plot(true_cd, pred_mean_cd, "o", ms=1.5, color="C1", alpha=0.9, label="GP mean")
+        ax.set_xlabel("True Cd")
+        ax.set_ylabel("Predicted Cd")
+        ax.set_title(f"{title}\nJoint UQ = max(|disagree|, GP std)")
+        ax.set_aspect("equal")
+        ax.legend(loc="best", fontsize=7)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(scatter_lo, scatter_hi)
+        ax.set_ylim(scatter_lo, scatter_hi)
+
+    def _plot_hist(ax, data, xlabel, title, color, xlims):
+        ax.hist(data, bins=30, color=color, edgecolor="black", alpha=0.75,
+                range=xlims)
+        ax.axvline(np.mean(data), color="k", ls="--", lw=1.5,
+                    label=f"mean = {np.mean(data):.4f}")
+        ax.axvline(np.median(data), color="C0", ls=":", lw=1.5,
+                    label=f"median = {np.median(data):.4f}")
+        _add_percentile_lines(ax, data)
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("Count")
-        ax.set_title(f"{title}\n|GP − GeoTransolver| gap")
+        ax.set_title(title)
+        ax.set_xlim(xlims)
         ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)
 
-    def _plot_std_hist(ax, res, title):
-        std = res["pred_std_cd"]
-        ax.hist(std, bins=30, color="C4", edgecolor="black", alpha=0.75)
-        ax.axvline(np.mean(std), color="k", ls="--", lw=1.5,
-                    label=f"mean = {np.mean(std):.4f}")
-        ax.axvline(np.median(std), color="C0", ls=":", lw=1.5,
-                    label=f"median = {np.median(std):.4f}")
-        _add_percentile_lines(ax, std)
-        ax.set_xlabel("GP Predictive Std Dev (Cd)")
-        ax.set_ylabel("Count")
-        ax.set_title(f"{title}\nGP Std Dev")
-        ax.legend(loc="best", fontsize=7)
-        ax.grid(True, alpha=0.3)
+    # --- Layout: one row per dataset, 4 columns ---
+    # Col 0: scatter (GP + Transolver vs true)
+    # Col 1: histogram |disagreement|
+    # Col 2: histogram GP std
+    # Col 3: scatter with joint UQ shading
+    n_rows = len(all_results)
+    fig, axes = plt.subplots(n_rows, 4, figsize=(28, 6 * n_rows))
+    if n_rows == 1:
+        axes = axes.reshape(1, 4)
 
-    for col, (name, res) in enumerate(all_results):
-        _plot_scatter(axes[0, col], res, name)
-        _plot_abs_diff_hist(axes[1, col], res, name)
-        _plot_std_hist(axes[2, col], res, name)
+    for row, (name, res) in enumerate(all_results):
+        _plot_scatter(axes[row, 0], res, name)
+        _plot_hist(
+            axes[row, 1], res["abs_diff"],
+            xlabel="|Cd_GP − Cd_GeoTransolver|",
+            title=f"{name}\n|GP − GeoTransolver| gap",
+            color="C3", xlims=(diff_lo, diff_hi),
+        )
+        _plot_hist(
+            axes[row, 2], res["pred_std_cd"],
+            xlabel="GP Predictive Std Dev (Cd)",
+            title=f"{name}\nGP Std Dev",
+            color="C4", xlims=(std_lo, std_hi),
+        )
+        _plot_joint_scatter(axes[row, 3], res, name)
 
     fig.tight_layout()
 
@@ -368,7 +440,7 @@ def main(cfg: DictConfig) -> None:
     out_path = out_dir / "gp_drag_predictions.png"
     fig.savefig(out_path, dpi=150)
     print(f"Saved plot to {out_path}")
-    plt.show()
+    plt.close(fig)
 
 
 if __name__ == "__main__":
