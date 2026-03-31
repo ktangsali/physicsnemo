@@ -9,7 +9,7 @@ run_id: "geotransolver/surface/combined"
 
 # --- Embedding reduction ---
 embedding_pooling: attention   # "attention" or "mean"
-embedding_feat_dim: 448        # n_hidden (256) + n_radii * n_hidden_local (6*32 = 192)
+embedding_feat_dim: 256        # context_dim from GlobalContextBuilder: dim_head * n_radii * n_inputs + dim_head * 2
 spectral_norm_embedding: false # Apply spectral normalization to embedding reduction layers (SNGP-style)
 normalize_embeddings: false    # L2-normalize embeddings to a sphere of radius target_scale
 embedding_target_scale: 1.0    # Radius of the embedding sphere (only used when normalize_embeddings=true)

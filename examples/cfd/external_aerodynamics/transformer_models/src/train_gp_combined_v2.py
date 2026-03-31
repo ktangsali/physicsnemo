@@ -204,13 +204,13 @@ def reinitialize_inducing_points(
             else None
         )
         local_positions = embeddings[:, :, :3]
-        _, learned_emb = model(
+        _, _, emb_states = model(
             global_embedding=features,
             local_embedding=embeddings,
             geometry=geometry,
             local_positions=local_positions,
         )
-        reduced = embedding_reduction(learned_emb[0])
+        reduced = embedding_reduction(emb_states.flatten(1, 2))
         init_embeddings.append(reduced.cpu())
 
     dataloader.dataset.set_indices(train_indices)
@@ -261,7 +261,7 @@ def compute_transolver_drag_full_mesh(
             batch_full["embeddings"][:, idx_block].to(device), precision
         )
         local_pos = local_emb[:, :, :3]
-        outputs, _ = model(
+        outputs, *_ = model(
             global_embedding=fx_full,
             local_embedding=local_emb,
             geometry=geo_full,
@@ -300,7 +300,7 @@ def main(cfg: DictConfig):
     use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
     n_inducing = getattr(cfg, "n_inducing", 128)
     embed_dim = getattr(cfg, "embed_dim", 32)
-    feat_dim = getattr(cfg, "embedding_feat_dim", 448)
+    feat_dim = getattr(cfg, "embedding_feat_dim", 256)
     accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
     use_consistency = lambda_consistency > 0
 
@@ -554,7 +554,7 @@ def main(cfg: DictConfig):
 
                 if geometry is not None:
                     local_positions = embeddings[:, :, :3]
-                    outputs, learned_embeddings = model(
+                    outputs, _, embedding_states = model(
                         global_embedding=features,
                         local_embedding=embeddings,
                         geometry=geometry,
@@ -566,11 +566,11 @@ def main(cfg: DictConfig):
                     outputs = model(fx=features, embedding=embeddings)
                     outputs = unpad_output_for_fp8(outputs, output_pad_size)
                     mse_loss = F.mse_loss(outputs, targets)
-                    learned_embeddings = None
+                    embedding_states = None
 
-            if learned_embeddings is None:
+            if embedding_states is None:
                 raise RuntimeError(
-                    "Model did not return learned embeddings.  "
+                    "Model did not return embedding_states.  "
                     "Combined training requires a GeoTransolver (geometry) model."
                 )
 
@@ -579,7 +579,7 @@ def main(cfg: DictConfig):
             gp_train_mse_val = 0.0
 
             if w_gp > 0:
-                reduced = embedding_reduction(learned_embeddings[0])
+                reduced = embedding_reduction(embedding_states.flatten(1, 2))
                 drag_target = compute_drag_target_from_batch(
                     batch, surface_factors, dist_manager.device,
                 ).to(reduced.dtype)
@@ -764,7 +764,7 @@ def main(cfg: DictConfig):
                         )
 
                     local_positions = embeddings_v[:, :, :3]
-                    outputs, learned_emb = model(
+                    outputs, _, emb_states_v = model(
                         global_embedding=features,
                         local_embedding=embeddings_v,
                         geometry=geometry,
@@ -808,7 +808,7 @@ def main(cfg: DictConfig):
                         )
 
                 # GP drag validation
-                reduced_v = embedding_reduction(learned_emb[0])
+                reduced_v = embedding_reduction(emb_states_v.flatten(1, 2))
                 drag_target_v = compute_drag_target_from_batch(
                     batch, surface_factors, dist_manager.device,
                 ).to(reduced_v.dtype)

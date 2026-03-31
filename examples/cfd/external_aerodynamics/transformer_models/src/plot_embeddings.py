@@ -213,7 +213,7 @@ def main(cfg: DictConfig) -> None:
         volume_factors=None,
     )
 
-    feat_dim = getattr(cfg, "embedding_feat_dim", 448)
+    feat_dim = getattr(cfg, "embedding_feat_dim", 256)
     embed_dim = getattr(cfg, "embed_dim", 32)
     pooling_type = cfg.get("embedding_pooling", "attention")
 
@@ -267,16 +267,15 @@ def main(cfg: DictConfig) -> None:
             embeddings = cast_precisions(embeddings, precision)
             local_positions = embeddings[:, :, :3]
 
-            _, learned_embeddings = model(
+            _, learned_embeddings, embedding_states = model(
                 global_embedding=features,
                 local_embedding=embeddings,
                 geometry=geometry,
                 local_positions=local_positions,
             )
-            point_feats = learned_embeddings[0]
 
-            mean_pooled = point_feats.mean(dim=1)
-            attn_pooled = embedding_reduction_model(point_feats)
+            mean_pooled = embedding_states.flatten(1, 2).mean(dim=1)
+            attn_pooled = embedding_reduction_model(embedding_states.flatten(1, 2))
 
             mean_embeds_list.append(mean_pooled.cpu().numpy())
             attn_embeds_list.append(attn_pooled.cpu().numpy())

@@ -343,7 +343,7 @@ class AttentionPooling(nn.Module):
     Learns per-point importance weights before aggregating.
     """
     def __init__(
-        self, feat_dim=448, embed_dim=32, hidden=128,
+        self, feat_dim=256, embed_dim=32, hidden=128,
         spectral_norm=False, normalize=False, target_scale=1.0,
     ):
         super().__init__()
@@ -361,10 +361,10 @@ class AttentionPooling(nn.Module):
         self.target_scale = target_scale
 
     def forward(self, point_feats):
-        # point_feats: (B, 50000, 448)
-        attn_scores = self.attention(point_feats)              # (B, 50000, 1)
-        attn_weights = torch.softmax(attn_scores, dim=1)      # (B, 50000, 1)
-        weighted_sum = (attn_weights * point_feats).sum(dim=1) # (B, 448)
+        # point_feats: (B, N, feat_dim)  e.g. (B, H*S, context_dim) for embedding_states
+        attn_scores = self.attention(point_feats)              # (B, N, 1)
+        attn_weights = torch.softmax(attn_scores, dim=1)      # (B, N, 1)
+        weighted_sum = (attn_weights * point_feats).sum(dim=1) # (B, feat_dim)
         out = self.projector(weighted_sum)                     # (B, 32)
         if self.normalize:
             out = torch.nn.functional.normalize(out, dim=-1) * self.target_scale
@@ -376,7 +376,7 @@ class MeanPooling(nn.Module):
     Mean pooling over the spatial (point) dimension, then a linear projection to embed_dim.
     """
     def __init__(
-        self, feat_dim=448, embed_dim=32, spectral_norm=False,
+        self, feat_dim=256, embed_dim=32, spectral_norm=False,
         normalize=False, target_scale=1.0,
     ):
         super().__init__()
@@ -395,7 +395,7 @@ class MeanPooling(nn.Module):
 
 def create_embedding_reduction(
     pooling: Literal["attention", "mean"],
-    feat_dim: int = 448,
+    feat_dim: int = 256,
     embed_dim: int = 32,
     spectral_norm: bool = False,
     normalize: bool = False,
@@ -719,7 +719,7 @@ def main(cfg: DictConfig):
     logger.info(f"Embedding pooling: {pooling_type}")
     embedding_reduction_model = create_embedding_reduction(
         pooling=pooling_type,
-        feat_dim=448,
+        feat_dim=256,
         embed_dim=32,
     )
     embedding_reduction_model.to(dist_manager.device)
@@ -744,13 +744,13 @@ def main(cfg: DictConfig):
                 else None
             )
             local_positions_init = embeddings_init[:, :, :3]
-            _, learned_emb_init = model(
+            _, _, emb_states_init = model(
                 global_embedding=features_init,
                 local_embedding=embeddings_init,
                 geometry=geometry_init,
                 local_positions=local_positions_init,
             )
-            reduced_init = embedding_reduction_model(learned_emb_init[0])
+            reduced_init = embedding_reduction_model(emb_states_init.flatten(1, 2))
             init_embeddings.append(reduced_init.cpu())
     init_embeddings = torch.cat(init_embeddings, dim=0)[:n_inducing]
     logger.info(
@@ -841,14 +841,14 @@ def main(cfg: DictConfig):
             local_positions = embeddings[:, :, :3]
 
             with torch.no_grad():
-                outputs, learned_embeddings = model(
+                outputs, _, embedding_states = model(
                     global_embedding=features,
                     local_embedding=embeddings,
                     geometry=geometry,
                     local_positions=local_positions,
                 )
 
-            reduced_embeddings = embedding_reduction_model(learned_embeddings[0])
+            reduced_embeddings = embedding_reduction_model(embedding_states.flatten(1, 2))
 
             # True drag from batch: unnormalize fields, compute Cd, scale for GP (Cd / 0.35)
             drag_target = compute_drag_target_from_batch(
@@ -926,14 +926,14 @@ def main(cfg: DictConfig):
                 )
                 local_positions = embeddings[:, :, :3]
 
-                outputs, learned_embeddings = model(
+                outputs, _, embedding_states = model(
                     global_embedding=features,
                     local_embedding=embeddings,
                     geometry=geometry,
                     local_positions=local_positions,
                 )
                 reduced_embeddings = embedding_reduction_model(
-                    learned_embeddings[0]
+                    embedding_states.flatten(1, 2)
                 )
 
                 drag_target = compute_drag_target_from_batch(

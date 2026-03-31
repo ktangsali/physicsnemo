@@ -481,9 +481,15 @@ class GeoTransolver(Module):
 
         Returns
         -------
-        torch.Tensor | tuple[torch.Tensor, ...]
-            Output tensor of shape :math:`(B, N, C_{out})`. Returns single tensor
-            if input was single tensor, tuple if input was tuple.
+        tuple
+            A 3-tuple of ``(output, learned_embeddings, embedding_states)`` where:
+
+            - ``output``: tensor of shape :math:`(B, N, C_{out})` (single tensor
+              if input was single, tuple if input was tuple).
+            - ``learned_embeddings``: tuple of per-input-type tensors after the
+              GALE blocks, each :math:`(B, N, n_{hidden})`.
+            - ``embedding_states``: geometry/global context of shape
+              :math:`(B, H, S, D_c)` or ``None`` if no context sources.
 
         Raises
         ------
@@ -559,4 +565,4 @@ class GeoTransolver(Module):
         else:
             x = tuple(x)
 
-        return x, learned_embeddings
+        return x, learned_embeddings, embedding_states

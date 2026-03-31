@@ -79,7 +79,7 @@ def predict_full_mesh_in_chunks(
             geometry = cast_precisions(batch_full["geometry"], precision)
         else:
             geometry = None
-        outputs, _ = model(
+        outputs, *_ = model(
             global_embedding=features,
             local_embedding=local_embeddings,
             geometry=geometry,
@@ -174,7 +174,7 @@ def main(cfg: DictConfig) -> None:
 
     # Models
     embed_dim = getattr(cfg, "embed_dim", 32)
-    feat_dim = getattr(cfg, "embedding_feat_dim", 448)
+    feat_dim = getattr(cfg, "embedding_feat_dim", 256)
     n_inducing = getattr(cfg, "n_inducing", 128)
     pooling_type = cfg.get("embedding_pooling", "attention")
     use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
@@ -246,13 +246,13 @@ def main(cfg: DictConfig) -> None:
                 )
                 local_positions = embeddings[:, :, :3]
 
-                outputs, learned_embeddings = model(
+                outputs, _, embedding_states = model(
                     global_embedding=features,
                     local_embedding=embeddings,
                     geometry=geometry,
                     local_positions=local_positions,
                 )
-                reduced = embedding_reduction_model(learned_embeddings[0])
+                reduced = embedding_reduction_model(embedding_states.flatten(1, 2))
 
                 mean_scaled, var_scaled, _, _ = gp.predict(reduced)
                 mean_np = mean_scaled.cpu().numpy().flatten()
