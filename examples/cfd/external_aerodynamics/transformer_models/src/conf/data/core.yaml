@@ -38,6 +38,12 @@ test_van:
   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_van_zarr
 test_sports_car:
   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sports_car_zarr
+test_drivaerml:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_drivaerml_zarr
+test_shiftsuv_estate:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_estate_zarr
+test_shiftsuv_fastback:
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_fastback_zarr
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"

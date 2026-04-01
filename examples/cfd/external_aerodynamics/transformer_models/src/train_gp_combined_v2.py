@@ -216,6 +216,8 @@ def reinitialize_inducing_points(
     dataloader.dataset.set_indices(train_indices)
 
     init_embeddings_t = torch.cat(init_embeddings, dim=0)[:n_inducing].to(device)
+    if gp.feature_extractor is not None:
+        init_embeddings_t = gp.feature_extractor(init_embeddings_t)
     gp.gp_layer.variational_strategy.inducing_points.data.copy_(init_embeddings_t)
 
     vd = gp.gp_layer.variational_strategy._variational_distribution
@@ -314,6 +316,8 @@ def main(cfg: DictConfig):
     ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
     os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
     os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
+    mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
+    mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
 
     # ---- Directories and writers ----
     checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or cfg.output_dir
@@ -344,7 +348,8 @@ def main(cfg: DictConfig):
     )
     logger.info(
         f"GP kernel: lengthscale_range={ls_range}, "
-        f"lengthscale_prior={ls_prior}, outputscale_prior={os_prior}"
+        f"lengthscale_prior={ls_prior}, outputscale_prior={os_prior}, "
+        f"mlp_hidden={mlp_hidden}"
     )
     logger.info(
         "Consistency mode: reuse training forward pass (subsampled mesh)"
@@ -434,6 +439,7 @@ def main(cfg: DictConfig):
         lengthscale_range=ls_range,
         lengthscale_prior=ls_prior,
         outputscale_prior=os_prior,
+        mlp_hidden=mlp_hidden,
     )
     gp.to(dist_manager.device)
     num_gp_params = (
@@ -455,15 +461,17 @@ def main(cfg: DictConfig):
         weight_decay=cfg.training.optimizer.weight_decay,
         adjust_lr_fn="match_rms_adamw",
     )
-    gp_opt = torch.optim.AdamW(
-        [
-            {"params": embedding_reduction.parameters(), "lr": 1e-3},
-            {"params": gp.gp_layer.variational_parameters(), "lr": 1e-2},
-            {"params": gp.gp_layer.hyperparameters(), "lr": 1e-2},
-            {"params": gp.likelihood.parameters(), "lr": 1e-2},
-        ],
-        weight_decay=1e-4,
-    )
+    gp_param_groups = [
+        {"params": embedding_reduction.parameters(), "lr": 1e-3},
+        {"params": gp.gp_layer.variational_parameters(), "lr": 1e-2},
+        {"params": gp.gp_layer.hyperparameters(), "lr": 1e-2},
+        {"params": gp.likelihood.parameters(), "lr": 1e-2},
+    ]
+    if gp.feature_extractor is not None:
+        gp_param_groups.append(
+            {"params": gp.feature_extractor.parameters(), "lr": 1e-3}
+        )
+    gp_opt = torch.optim.AdamW(gp_param_groups, weight_decay=1e-4)
     optimizer = CombinedOptimizer([geo_muon, geo_adamw, gp_opt])
 
     # ---- Scheduler ----

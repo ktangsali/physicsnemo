@@ -18,6 +18,11 @@ embedding_target_scale: 1.0    # Radius of the embedding sphere (only used when 
 embed_dim: 32
 n_inducing: 128
 
+# --- GP DKL feature extractor ---
+# Hidden layer sizes for MLP between embedding reduction and GP kernel.
+# null = no MLP (embedding goes directly to GP). Example: [128, 64]
+gp_mlp_hidden: null
+
 # --- GP kernel ---
 # Lengthscale: [lower, upper] hard constraint on per-dimension ARD lengthscales.
 # With normalize_embeddings=true, pairwise distances are in [0, 2], so [0.05, 2.0] is a good fit.

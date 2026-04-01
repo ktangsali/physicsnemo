@@ -186,6 +186,8 @@ def main(cfg: DictConfig) -> None:
     ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
     os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
     os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
+    mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
+    mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
 
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
     model.to(device)
@@ -203,6 +205,7 @@ def main(cfg: DictConfig) -> None:
         lengthscale_range=ls_range,
         lengthscale_prior=ls_prior,
         outputscale_prior=os_prior,
+        mlp_hidden=mlp_hidden,
     )
     gp.to(device)
 
@@ -303,7 +306,7 @@ def main(cfg: DictConfig) -> None:
     # Pre-compute derived quantities for every dataset
     for _name, res in all_results:
         res["abs_diff"] = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
-        res["joint_uq"] = np.maximum(res["abs_diff"], res["pred_std_cd"])
+        res["joint_uq"] = np.maximum(res["abs_diff"], 2.0 * res["pred_std_cd"])
 
     # --- Global axis ranges (consistent across rows for each column) ---
     def _global_range(key):
@@ -385,7 +388,7 @@ def main(cfg: DictConfig) -> None:
         ax.plot(true_cd, pred_mean_cd, "o", ms=1.5, color="C1", alpha=0.9, label="GP mean")
         ax.set_xlabel("True Cd")
         ax.set_ylabel("Predicted Cd")
-        ax.set_title(f"{title}\nJoint UQ = max(|disagree|, GP std)")
+        ax.set_title(f"{title}\nJoint UQ = max(|disagree|, 2·GP std)")
         ax.set_aspect("equal")
         ax.legend(loc="best", fontsize=7)
         ax.grid(True, alpha=0.3)

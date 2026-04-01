@@ -476,6 +476,11 @@ class DragGP(nn.Module):
 
     Inputs are cast to float64 on entry; outputs are cast back to the
     caller's dtype so gradients flow through seamlessly.
+
+    When *mlp_hidden* is provided (e.g. ``[128, 64]``), a small feature
+    extractor is inserted before the GP kernel (Deep Kernel Learning).
+    The MLP runs in float32 for speed; its output is cast to float64 for
+    the GP.
     """
 
     def __init__(
@@ -483,14 +488,32 @@ class DragGP(nn.Module):
         lengthscale_range=(0.01, 10.0),
         lengthscale_prior=None,
         outputscale_prior=None,
+        mlp_hidden=None,
     ):
         super().__init__()
         assert n_train is not None, "Must specify total number of training geometries"
 
+        # Optional DKL feature extractor (float32)
+        if mlp_hidden:
+            layers = []
+            in_dim = embed_dim
+            for h in mlp_hidden:
+                layers.append(nn.Linear(in_dim, h))
+                layers.append(nn.ReLU())
+                in_dim = h
+            self.feature_extractor = nn.Sequential(*layers)
+            gp_input_dim = mlp_hidden[-1]
+        else:
+            self.feature_extractor = None
+            gp_input_dim = embed_dim
+
         if inducing_points is None:
-            inducing_points = torch.randn(n_inducing, embed_dim)
+            inducing_points = torch.randn(n_inducing, gp_input_dim)
+        elif inducing_points.shape[-1] != gp_input_dim and self.feature_extractor is not None:
+            with torch.no_grad():
+                inducing_points = self.feature_extractor(inducing_points)
         self.gp_layer = DKLGPLayer(
-            inducing_points, embed_dim,
+            inducing_points, gp_input_dim,
             lengthscale_range=lengthscale_range,
             lengthscale_prior=lengthscale_prior,
             outputscale_prior=outputscale_prior,
@@ -503,6 +526,12 @@ class DragGP(nn.Module):
         """Safety-net jitter in case float64 K_uu is still marginal."""
         return gpytorch.settings.cholesky_jitter(float_value=1e-3, double_value=1e-4)
 
+    def _apply_fe(self, embedding):
+        """Run optional feature extractor (float32), return float64 for GP."""
+        if self.feature_extractor is not None:
+            embedding = self.feature_extractor(embedding)
+        return embedding.double()
+
     def forward(self, embedding):
         """
         Args:
@@ -512,7 +541,7 @@ class DragGP(nn.Module):
         """
         orig_dtype = embedding.dtype
         with self._gp_context():
-            dist = self.gp_layer(embedding.double())
+            dist = self.gp_layer(self._apply_fe(embedding))
         return gpytorch.distributions.MultivariateNormal(
             dist.mean.to(orig_dtype),
             dist.lazy_covariance_matrix.to_dense().to(orig_dtype),
@@ -530,7 +559,7 @@ class DragGP(nn.Module):
         """
         orig_dtype = embedding.dtype
         with self._gp_context():
-            dist = self.gp_layer(embedding.double())
+            dist = self.gp_layer(self._apply_fe(embedding))
             neg_elbo = -self.mll(dist, drag_target.double())
         return dist.mean.to(orig_dtype), neg_elbo.to(orig_dtype)
 
@@ -557,7 +586,7 @@ class DragGP(nn.Module):
         self.eval()
         self.likelihood.eval()
         with self._gp_context(), gpytorch.settings.fast_pred_var():
-            dist = self.gp_layer(embedding.double())
+            dist = self.gp_layer(self._apply_fe(embedding))
             pred = self.likelihood(dist)
             mean = pred.mean
             var = pred.variance
