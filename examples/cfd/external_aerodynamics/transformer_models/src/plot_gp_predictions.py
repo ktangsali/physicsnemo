@@ -46,6 +46,8 @@ from physicsnemo.utils import load_checkpoint
 from train_variational_gp import (
     DRAG_COEFF_SCALE,
     DragGP,
+    DragMLP,
+    apply_spectral_norm_to_model,
     compute_drag_target_from_batch,
     create_embedding_reduction,
     load_pretrained_model_only,
@@ -181,6 +183,9 @@ def main(cfg: DictConfig) -> None:
     normalize_embeddings = getattr(cfg, "normalize_embeddings", False)
     embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
 
+    head_type = getattr(cfg, "head_type", "gp")
+    use_gp = head_type == "gp"
+
     ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 10.0]))
     ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
     ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
@@ -188,8 +193,14 @@ def main(cfg: DictConfig) -> None:
     os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
     mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
     mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
+    mlp_head_hidden_cfg = getattr(cfg, "mlp_head_hidden", None)
+    mlp_head_hidden = list(mlp_head_hidden_cfg) if mlp_head_hidden_cfg is not None else [256, 256]
 
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
+    sn_backbone = getattr(cfg, "spectral_norm_backbone", False)
+    sn_coeff = getattr(cfg, "spectral_norm_coeff", 1.0)
+    if sn_backbone:
+        apply_spectral_norm_to_model(model, coeff=sn_coeff)
     model.to(device)
 
     embedding_reduction_model = create_embedding_reduction(
@@ -200,13 +211,16 @@ def main(cfg: DictConfig) -> None:
     )
     embedding_reduction_model.to(device)
 
-    gp = DragGP(
-        embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
-        lengthscale_range=ls_range,
-        lengthscale_prior=ls_prior,
-        outputscale_prior=os_prior,
-        mlp_hidden=mlp_hidden,
-    )
+    if use_gp:
+        gp = DragGP(
+            embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
+            lengthscale_range=ls_range,
+            lengthscale_prior=ls_prior,
+            outputscale_prior=os_prior,
+            mlp_hidden=mlp_hidden,
+        )
+    else:
+        gp = DragMLP(embed_dim=embed_dim, hidden=mlp_head_hidden)
     gp.to(device)
 
     checkpoint_epoch = getattr(cfg, "checkpoint_epoch", None)

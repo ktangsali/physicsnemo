@@ -15,6 +15,7 @@ from omegaconf import DictConfig
 
 # Pytorch imports:
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.optim import Optimizer
 from torch.amp import autocast, GradScaler
@@ -338,6 +339,37 @@ def spectral_norm_wrapper(layer: nn.Module, use_sn: bool) -> nn.Module:
     return layer
 
 
+def apply_spectral_norm_to_model(
+    model: nn.Module,
+    coeff: float = 1.0,
+    skip_output_proj: bool = True,
+) -> None:
+    """Apply spectral normalization to all nn.Linear layers in *model* in-place.
+
+    When *coeff* > 1 the constraint is "soft": the layer's spectral norm is
+    clamped to *coeff* instead of 1, following the DUE / SNGP convention.
+    *skip_output_proj* excludes the final output projection (``ln_mlp_out``)
+    because it sits after the embedding tap-point and doesn't affect GP inputs.
+    """
+    for name, module in list(model.named_modules()):
+        if skip_output_proj and "ln_mlp_out" in name:
+            continue
+        if isinstance(module, nn.Linear):
+            parent_name, attr_name = name.rsplit(".", 1) if "." in name else ("", name)
+            parent = model.get_submodule(parent_name) if parent_name else model
+            wrapped = torch.nn.utils.parametrizations.spectral_norm(module)
+            if coeff != 1.0:
+                wrapped._coeff = coeff
+                orig_forward = wrapped.forward
+
+                def _scaled_forward(self, x, _c=coeff, _fwd=orig_forward):
+                    return _fwd(x) * _c
+
+                import types
+                wrapped.forward = types.MethodType(_scaled_forward, wrapped)
+            setattr(parent, attr_name, wrapped)
+
+
 class AttentionPooling(nn.Module):
     """
     Learns per-point importance weights before aggregating.
@@ -597,6 +629,47 @@ class DragGP(nn.Module):
             lower.to(orig_dtype), upper.to(orig_dtype),
         )
 
+
+class DragMLP(nn.Module):
+    """Simple MLP head for drag prediction — drop-in replacement for DragGP.
+
+    Provides the same ``forward_and_loss`` / ``predict`` interface so the
+    training and evaluation scripts can swap between GP and MLP via config.
+    The loss is plain MSE (scaled by ``DRAG_COEFF_SCALE`` on targets, same as GP).
+    ``predict`` returns zero variance so downstream plotting code works unchanged.
+    """
+
+    def __init__(self, embed_dim: int = 32, hidden: list[int] | None = None):
+        super().__init__()
+        if hidden is None:
+            hidden = [256, 256]
+        layers: list[nn.Module] = []
+        in_dim = embed_dim
+        for h in hidden:
+            layers.append(nn.Linear(in_dim, h))
+            layers.append(nn.ReLU())
+            in_dim = h
+        layers.append(nn.Linear(in_dim, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, embedding):
+        return self.net(embedding).squeeze(-1)
+
+    def forward_and_loss(self, embedding, drag_target):
+        pred = self.forward(embedding)
+        loss = F.mse_loss(pred, drag_target)
+        return pred, loss
+
+    def loss(self, embedding, drag_target):
+        _, mse = self.forward_and_loss(embedding, drag_target)
+        return mse
+
+    @torch.no_grad()
+    def predict(self, embedding):
+        self.eval()
+        pred = self.forward(embedding)
+        zeros = torch.zeros_like(pred)
+        return pred, zeros, pred, pred
 
 
 def main(cfg: DictConfig):

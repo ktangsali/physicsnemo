@@ -7,6 +7,10 @@ output_dir: "runs"
 checkpoint_dir: null
 run_id: "geotransolver/surface/combined"
 
+# --- Head type ---
+head_type: gp                  # "gp" (variational GP) or "mlp" (simple MLP baseline)
+mlp_head_hidden: [256, 256]    # Hidden layer sizes for MLP head (only used when head_type=mlp)
+
 # --- Embedding reduction ---
 embedding_pooling: attention   # "attention" or "mean"
 embedding_feat_dim: 256        # context_dim from GlobalContextBuilder: dim_head * n_radii * n_inputs + dim_head * 2

@@ -41,6 +41,7 @@ from physicsnemo.datapipes.cae.transolver_datapipe import create_transolver_data
 from physicsnemo.utils import load_checkpoint
 
 from train_variational_gp import (
+    apply_spectral_norm_to_model,
     create_embedding_reduction,
     load_pretrained_model_only,
     cast_precisions,
@@ -218,6 +219,10 @@ def main(cfg: DictConfig) -> None:
     pooling_type = cfg.get("embedding_pooling", "attention")
 
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
+    sn_backbone = getattr(cfg, "spectral_norm_backbone", False)
+    sn_coeff = getattr(cfg, "spectral_norm_coeff", 1.0)
+    if sn_backbone:
+        apply_spectral_norm_to_model(model, coeff=sn_coeff)
     model.to(device)
 
     use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
