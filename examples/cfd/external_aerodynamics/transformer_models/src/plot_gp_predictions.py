@@ -322,6 +322,19 @@ def main(cfg: DictConfig) -> None:
         res["abs_diff"] = np.abs(res["pred_mean_cd"] - res["transolver_cd"])
         res["joint_uq"] = np.maximum(res["abs_diff"], 2.0 * res["pred_std_cd"])
 
+    # --- Save raw results so plots can be regenerated without re-running inference ---
+    out_dir = Path(cfg.output_dir) / cfg.run_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    npz_data = {}
+    for name, res in all_results:
+        tag = name.replace(" ", "_").lower()
+        for key in ("true_cd", "pred_mean_cd", "pred_std_cd", "transolver_cd",
+                     "abs_diff", "joint_uq"):
+            npz_data[f"{tag}__{key}"] = res[key]
+    results_path = out_dir / "prediction_results.npz"
+    np.savez_compressed(results_path, **npz_data)
+    print(f"Saved prediction results to {results_path}")
+
     # --- Global axis ranges (consistent across rows for each column) ---
     def _global_range(key):
         vals = np.concatenate([res[key] for _, res in all_results])
@@ -452,12 +465,67 @@ def main(cfg: DictConfig) -> None:
 
     fig.tight_layout()
 
-    out_dir = Path(cfg.output_dir) / cfg.run_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "gp_drag_predictions.png"
+    out_path = out_dir / "gp_drag_predictions_detailed.png"
     fig.savefig(out_path, dpi=150)
     print(f"Saved plot to {out_path}")
     plt.close(fig)
+
+    # --- KDE overlay: disagreement & GP std dev across all datasets ---
+    if len(all_results) > 1:
+        from scipy.stats import gaussian_kde
+
+        n_kde_cols = 2 if use_gp else 1
+        fig_kde, axes_kde = plt.subplots(
+            1, n_kde_cols, figsize=(8 * n_kde_cols, 6),
+        )
+        if n_kde_cols == 1:
+            axes_kde = [axes_kde]
+        ax_dis = axes_kde[0]
+        ax_std = axes_kde[1] if use_gp else None
+
+        head_label = "GP" if use_gp else "MLP"
+        cmap = plt.cm.get_cmap("tab10", len(all_results))
+        for idx, (name, res) in enumerate(all_results):
+            color = cmap(idx)
+            is_id = idx == 0
+
+            disagree = res["abs_diff"]
+            lw = 2.5 if is_id else 1.5
+            ls = "-" if is_id else "--"
+
+            if len(disagree) > 2:
+                xs = np.linspace(max(0, disagree.min() * 0.8), disagree.max() * 1.2, 500)
+                kde = gaussian_kde(disagree)
+                ax_dis.plot(xs, kde(xs), color=color, lw=lw, ls=ls, label=name)
+                ax_dis.fill_between(xs, kde(xs), alpha=0.1 if is_id else 0.05, color=color)
+
+            if ax_std is not None:
+                std_dev = res["pred_std_cd"]
+                if len(std_dev) > 2:
+                    xs = np.linspace(max(0, std_dev.min() * 0.8), std_dev.max() * 1.2, 500)
+                    kde = gaussian_kde(std_dev)
+                    ax_std.plot(xs, kde(xs), color=color, lw=lw, ls=ls, label=name)
+                    ax_std.fill_between(xs, kde(xs), alpha=0.1 if is_id else 0.05, color=color)
+
+        ax_dis.set_xlabel(f"|Cd_{head_label} − Cd_GeoTransolver|")
+        ax_dis.set_ylabel("Density")
+        ax_dis.set_title(f"Disagreement ({head_label}): ID vs OOD")
+        ax_dis.legend(loc="best", fontsize=8)
+        ax_dis.grid(True, alpha=0.3)
+
+        if ax_std is not None:
+            ax_std.set_xlabel("GP Predictive Std Dev (Cd)")
+            ax_std.set_ylabel("Density")
+            ax_std.set_title("GP Std Dev: ID vs OOD")
+            ax_std.set_xscale("log")
+            ax_std.legend(loc="best", fontsize=8)
+            ax_std.grid(True, alpha=0.3, which="both")
+
+        fig_kde.tight_layout()
+        kde_path = out_dir / "kde_id_vs_ood.png"
+        fig_kde.savefig(kde_path, dpi=150)
+        print(f"Saved KDE overlay plot to {kde_path}")
+        plt.close(fig_kde)
 
 
 if __name__ == "__main__":

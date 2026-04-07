@@ -26,24 +26,24 @@ test_notchback:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_N/val
 test_estateback:
   data_path: /data/datasets/drivaerstar/surface_files_zarr/class_E/val
-test_suv:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_suv_zarr
-test_sedan:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sedan_zarr
-test_pickup:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_pickup_zarr
-test_hatchback:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_hatchback_zarr
-test_van:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_van_zarr
-test_sports_car:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sports_car_zarr
+# test_suv:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_suv_zarr
+# test_sedan:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sedan_zarr
+# test_pickup:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_pickup_zarr
+# test_hatchback:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_hatchback_zarr
+# test_van:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_van_zarr
+# test_sports_car:
+#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sports_car_zarr
 test_drivaerml:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_drivaerml_zarr
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_drivaerml_100_zarr
 test_shiftsuv_estate:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_estate_zarr
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_estate_100_zarr
 test_shiftsuv_fastback:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_fastback_zarr
+  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_fastback_100_zarr
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"
