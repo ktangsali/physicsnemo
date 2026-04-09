@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """
 Plot Geo-Transolver training metrics from active learning sbatch .out logs.
@@ -30,6 +46,7 @@ JOB_ID_RE = re.compile(r"_(\d+)\.out$", re.IGNORECASE)
 
 
 DEFAULT_PATTERN = "slurm_logs/drivaer-gp-head_*.out"
+
 
 def job_id_from_path(log_path: Path) -> Optional[str]:
     m = JOB_ID_RE.search(log_path.name)
@@ -235,14 +252,30 @@ def accumulate_logs(log_paths: List[Path]) -> Dict[str, list]:
         merged: Dict[str, list] = {
             "format": "combined",
             "epochs": epochs,
-            "train_gp_loss": [combined_train_map.get(ep, {}).get("gp_loss") for ep in epochs],
-            "train_mse": [combined_train_map.get(ep, {}).get("train_mse") for ep in epochs],
-            "train_field_mse": [combined_train_map.get(ep, {}).get("field_mse") for ep in epochs],
-            "train_cons_loss": [combined_train_map.get(ep, {}).get("cons_loss") for ep in epochs],
-            "train_total_loss": [combined_train_map.get(ep, {}).get("total_loss") for ep in epochs],
-            "val_gp_mse": [combined_val_map.get(ep, {}).get("val_gp_mse") for ep in epochs],
-            "val_field_mse": [combined_val_map.get(ep, {}).get("val_field_mse") for ep in epochs],
-            "val_consistency_gap": [combined_val_map.get(ep, {}).get("val_consistency_gap") for ep in epochs],
+            "train_gp_loss": [
+                combined_train_map.get(ep, {}).get("gp_loss") for ep in epochs
+            ],
+            "train_mse": [
+                combined_train_map.get(ep, {}).get("train_mse") for ep in epochs
+            ],
+            "train_field_mse": [
+                combined_train_map.get(ep, {}).get("field_mse") for ep in epochs
+            ],
+            "train_cons_loss": [
+                combined_train_map.get(ep, {}).get("cons_loss") for ep in epochs
+            ],
+            "train_total_loss": [
+                combined_train_map.get(ep, {}).get("total_loss") for ep in epochs
+            ],
+            "val_gp_mse": [
+                combined_val_map.get(ep, {}).get("val_gp_mse") for ep in epochs
+            ],
+            "val_field_mse": [
+                combined_val_map.get(ep, {}).get("val_field_mse") for ep in epochs
+            ],
+            "val_consistency_gap": [
+                combined_val_map.get(ep, {}).get("val_consistency_gap") for ep in epochs
+            ],
             "learning_rates": [],
         }
     else:
@@ -333,8 +366,12 @@ def plot_combined(d: Dict[str, list], n_logs: int):
     if has_lr:
         ax = axes[3]
         ax.plot(
-            epochs, d["learning_rates"], "-",
-            color="tab:green", linewidth=1.5, label="Learning Rate",
+            epochs,
+            d["learning_rates"],
+            "-",
+            color="tab:green",
+            linewidth=1.5,
+            label="Learning Rate",
         )
         ax.set_ylabel("Learning Rate")
         ax.set_yscale("log")
@@ -360,8 +397,12 @@ def plot_simple(d: Dict[str, list], n_logs: int):
     markevery = max(1, len(d["epochs"]) // 50)
 
     ax1.plot(
-        d["epochs"], d["train_losses"], "b-o",
-        label="Train Loss", markersize=3, markevery=markevery,
+        d["epochs"],
+        d["train_losses"],
+        "b-o",
+        label="Train Loss",
+        markersize=3,
+        markevery=markevery,
     )
     ax1.set_ylabel("Train Loss")
     ax1.set_yscale("log")
@@ -370,8 +411,12 @@ def plot_simple(d: Dict[str, list], n_logs: int):
     ax1.grid(True, alpha=0.3, which="both")
 
     ax2.plot(
-        d["epochs"], d["val_losses"], "r-s",
-        label="Val Loss", markersize=3, markevery=markevery,
+        d["epochs"],
+        d["val_losses"],
+        "r-s",
+        label="Val Loss",
+        markersize=3,
+        markevery=markevery,
     )
     ax2.set_ylabel("Val Loss")
     ax2.set_yscale("log")
@@ -380,8 +425,12 @@ def plot_simple(d: Dict[str, list], n_logs: int):
 
     if has_lr:
         ax3.plot(
-            d["epochs"], d["learning_rates"], "-",
-            color="tab:green", linewidth=1.5, label="Learning Rate",
+            d["epochs"],
+            d["learning_rates"],
+            "-",
+            color="tab:green",
+            linewidth=1.5,
+            label="Learning Rate",
         )
         ax3.set_xlabel("Epoch")
         ax3.set_ylabel("Learning Rate")
@@ -391,8 +440,7 @@ def plot_simple(d: Dict[str, list], n_logs: int):
         ax3.grid(True, alpha=0.3, which="both")
     else:
         ax2.set_xlabel("Epoch")
-        print("Warning: could not find StepLR scheduler config; "
-              "skipping LR subplot.")
+        print("Warning: could not find StepLR scheduler config; skipping LR subplot.")
 
     fig.tight_layout()
     return fig
@@ -421,8 +469,10 @@ def main():
 
     fmt = d.get("format", "simple")
     print(f"Detected log format: {fmt}")
-    print(f"Epoch range: {d['epochs'][0]} – {d['epochs'][-1]}  "
-          f"({len(d['epochs'])} epochs)")
+    print(
+        f"Epoch range: {d['epochs'][0]} – {d['epochs'][-1]}  "
+        f"({len(d['epochs'])} epochs)"
+    )
 
     if fmt == "combined":
         fig = plot_combined(d, len(log_paths))

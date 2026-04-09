@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Select 10 random geometries per vehicle class from the driveSim dataset,
 merge the 3 surface VTP parts (body + front_wheels + back_wheels) into a
@@ -6,6 +22,7 @@ single VTK, and save to test_<class>/{NNN}_speed{S}.vtk.
 Usage:
     python prepare_ood_test_data.py
 """
+
 import csv
 import os
 import random
@@ -13,7 +30,9 @@ from collections import defaultdict
 
 import pyvista as pv
 
-CSV_PATH = "/lustre/fsw/coreai_modulus_cae/datasets/driveSim_openfoam/batch_post_legal_3_0.csv"
+CSV_PATH = (
+    "/lustre/fsw/coreai_modulus_cae/datasets/driveSim_openfoam/batch_post_legal_3_0.csv"
+)
 EXTRACTED_DIR = "/lustre/fsw/coreai_modulus_cae/datasets/driveSim_openfoam/extracted"
 OUTPUT_BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -26,7 +45,11 @@ def boundary_dir_for_index(idx: int) -> str:
     prefix = f"batch_post_legal_3_0_{idx}"
     return os.path.join(
         EXTRACTED_DIR,
-        f"{prefix}_VTK", prefix, "VTK", f"{prefix}_5000", "boundary",
+        f"{prefix}_VTK",
+        prefix,
+        "VTK",
+        f"{prefix}_5000",
+        "boundary",
     )
 
 
@@ -51,12 +74,15 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
 
         available = [
-            r for r in cls_rows
+            r
+            for r in cls_rows
             if os.path.isdir(boundary_dir_for_index(int(r["Index"])))
         ]
         if len(available) < N_PER_CLASS:
-            print(f"WARNING: {cls_name} has only {len(available)} available "
-                  f"(of {len(cls_rows)} in CSV)")
+            print(
+                f"WARNING: {cls_name} has only {len(available)} available "
+                f"(of {len(cls_rows)} in CSV)"
+            )
 
         selected = random.sample(available, min(N_PER_CLASS, len(available)))
         count = 0
@@ -82,8 +108,10 @@ def main():
 
             out_path = os.path.join(out_dir, f"{i:03d}_speed{speed}.vtk")
             merged.save(out_path)
-            print(f"  [{cls_name:12s}] idx={idx:3d}  speed={speed:2d}  "
-                  f"cells={merged.n_cells:6d}  -> {os.path.basename(out_path)}")
+            print(
+                f"  [{cls_name:12s}] idx={idx:3d}  speed={speed:2d}  "
+                f"cells={merged.n_cells:6d}  -> {os.path.basename(out_path)}"
+            )
             count += 1
 
         summary.append((cls_name, count, out_dir))

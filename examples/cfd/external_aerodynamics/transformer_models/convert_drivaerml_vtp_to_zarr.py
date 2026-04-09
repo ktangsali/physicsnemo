@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Convert DrivAerML VTP files to Zarr format for the Geo Transolver recipe.
 
@@ -14,6 +30,7 @@ Two-pass process:
 Usage:
     python convert_drivaerml_vtp_to_zarr.py --input_dir test_drivaerml_raw --output_dir test_drivaerml_zarr
 """
+
 import argparse
 import csv
 import os
@@ -42,9 +59,7 @@ def _build_wss_vector(mesh):
     if wss.ndim == 1:
         wss = wss.reshape(-1, 3)
     if wss.shape[1] != 3:
-        raise ValueError(
-            f"Expected 3-component WSS vector, got shape {wss.shape}"
-        )
+        raise ValueError(f"Expected 3-component WSS vector, got shape {wss.shape}")
     wss = -wss
     return wss
 
@@ -58,14 +73,20 @@ def _compute_field_stats(pressure, wss):
     has_nan_inf = not (np.all(valid_p) and np.all(valid_w))
     if valid_p.sum() == 0 or valid_w.sum() == 0:
         return {
-            "n_cells": n_cells, "has_nan_inf": has_nan_inf,
-            "pressure_min": np.nan, "pressure_max": np.nan,
-            "pressure_mean": np.nan, "pressure_std": np.nan,
-            "wss_magnitude_min": np.nan, "wss_magnitude_max": np.nan,
-            "wss_magnitude_mean": np.nan, "wss_magnitude_std": np.nan,
+            "n_cells": n_cells,
+            "has_nan_inf": has_nan_inf,
+            "pressure_min": np.nan,
+            "pressure_max": np.nan,
+            "pressure_mean": np.nan,
+            "pressure_std": np.nan,
+            "wss_magnitude_min": np.nan,
+            "wss_magnitude_max": np.nan,
+            "wss_magnitude_mean": np.nan,
+            "wss_magnitude_std": np.nan,
         }
     return {
-        "n_cells": n_cells, "has_nan_inf": has_nan_inf,
+        "n_cells": n_cells,
+        "has_nan_inf": has_nan_inf,
         "pressure_min": float(np.min(p[valid_p])),
         "pressure_max": float(np.max(p[valid_p])),
         "pressure_mean": float(np.mean(p[valid_p])),
@@ -79,7 +100,9 @@ def _compute_field_stats(pressure, wss):
 
 def _get_normals_raw(mesh):
     normals = mesh.compute_normals(
-        cell_normals=True, point_normals=False, consistent_normals=True,
+        cell_normals=True,
+        point_normals=False,
+        consistent_normals=True,
     )
     return np.asarray(normals.cell_data["Normals"], dtype=np.float32)
 
@@ -138,8 +161,9 @@ def _stl_faces_from_mesh(mesh):
     return np.concatenate(tri_list, axis=0).astype(np.int32)
 
 
-def vtp_to_zarr_one(vtp_path: str, zarr_path: str,
-                     air_density: float, stream_velocity: float):
+def vtp_to_zarr_one(
+    vtp_path: str, zarr_path: str, air_density: float, stream_velocity: float
+):
     mesh = _load_mesh(vtp_path)
     n_cells = mesh.n_cells
 
@@ -211,7 +235,8 @@ def _worker_convert(args):
     vtp_path, zarr_path, air_density, stream_velocity = args
     try:
         stats = vtp_to_zarr_one(
-            vtp_path, zarr_path,
+            vtp_path,
+            zarr_path,
             air_density=air_density,
             stream_velocity=stream_velocity,
         )
@@ -223,8 +248,12 @@ def _worker_convert(args):
 def _detect_outliers(stats_list, outlier_std: float):
     if not stats_list:
         return set(), {}
-    pressure_max = np.array([s["pressure_max"] for _, s in stats_list], dtype=np.float64)
-    wss_max = np.array([s["wss_magnitude_max"] for _, s in stats_list], dtype=np.float64)
+    pressure_max = np.array(
+        [s["pressure_max"] for _, s in stats_list], dtype=np.float64
+    )
+    wss_max = np.array(
+        [s["wss_magnitude_max"] for _, s in stats_list], dtype=np.float64
+    )
     p_fin = np.isfinite(pressure_max)
     w_fin = np.isfinite(wss_max)
     p_med = np.median(pressure_max[p_fin]) if p_fin.any() else np.nan
@@ -233,10 +262,18 @@ def _detect_outliers(stats_list, outlier_std: float):
     w_mad = np.median(np.abs(wss_max[w_fin] - w_med)) if w_fin.any() else 0.0
     p_std = np.std(pressure_max[p_fin]) if p_fin.sum() > 1 else 0.0
     w_std = np.std(wss_max[w_fin]) if w_fin.sum() > 1 else 0.0
-    p_thresh = p_med + outlier_std * (1.4826 * p_mad if p_mad > 1e-30 else p_std) if np.isfinite(p_med) else np.inf
-    w_thresh = w_med + outlier_std * (1.4826 * w_mad if w_mad > 1e-30 else w_std) if np.isfinite(w_med) else np.inf
+    p_thresh = (
+        p_med + outlier_std * (1.4826 * p_mad if p_mad > 1e-30 else p_std)
+        if np.isfinite(p_med)
+        else np.inf
+    )
+    w_thresh = (
+        w_med + outlier_std * (1.4826 * w_mad if w_mad > 1e-30 else w_std)
+        if np.isfinite(w_med)
+        else np.inf
+    )
     exclude_paths = set()
-    for (p, s) in stats_list:
+    for p, s in stats_list:
         if s.get("has_zero_normals", False):
             exclude_paths.add(p)
         elif s.get("has_nan_inf", False):
@@ -244,36 +281,46 @@ def _detect_outliers(stats_list, outlier_std: float):
         elif s["pressure_max"] > p_thresh or s["wss_magnitude_max"] > w_thresh:
             exclude_paths.add(p)
     global_stats = {
-        "pressure_max_median": float(p_med), "pressure_max_threshold": float(p_thresh),
-        "wss_magnitude_max_median": float(w_med), "wss_magnitude_max_threshold": float(w_thresh),
+        "pressure_max_median": float(p_med),
+        "pressure_max_threshold": float(p_thresh),
+        "wss_magnitude_max_median": float(w_med),
+        "wss_magnitude_max_threshold": float(w_thresh),
     }
     return exclude_paths, global_stats
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Convert DrivAerML VTP files to zarr")
-    parser.add_argument("--input_dir", required=True,
-                        help="Directory with run_XXXXX.vtp files")
-    parser.add_argument("--output_dir", required=True,
-                        help="Directory to write .zarr groups")
-    parser.add_argument("--stats_csv", default=None,
-                        help="Path for stats CSV (default: vtk_stats_<input_dir_name>.csv)")
-    parser.add_argument("--workers", type=int, default=0,
-                        help="Number of parallel workers (0 = cpu_count - 1)")
+    parser = argparse.ArgumentParser(description="Convert DrivAerML VTP files to zarr")
+    parser.add_argument(
+        "--input_dir", required=True, help="Directory with run_XXXXX.vtp files"
+    )
+    parser.add_argument(
+        "--output_dir", required=True, help="Directory to write .zarr groups"
+    )
+    parser.add_argument(
+        "--stats_csv",
+        default=None,
+        help="Path for stats CSV (default: vtk_stats_<input_dir_name>.csv)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of parallel workers (0 = cpu_count - 1)",
+    )
     args = parser.parse_args()
 
     input_dir = args.input_dir
     output_dir = args.output_dir
-    stats_csv = args.stats_csv or f"vtk_stats_{os.path.basename(input_dir.rstrip('/'))}.csv"
+    stats_csv = (
+        args.stats_csv or f"vtk_stats_{os.path.basename(input_dir.rstrip('/'))}.csv"
+    )
     workers = args.workers or max(1, (os.cpu_count() or 2) - 1)
 
     if not os.path.isdir(input_dir):
         raise SystemExit(f"Input directory not found: {input_dir}")
 
-    vtp_files = sorted(
-        [f for f in os.listdir(input_dir) if f.lower().endswith(".vtp")]
-    )
+    vtp_files = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".vtp")])
     if not vtp_files:
         raise SystemExit(f"No .vtp files found in {input_dir}")
 
@@ -295,7 +342,9 @@ def main():
             print(f"FAILED {path}: {err}")
         raise SystemExit(len(failed))
 
-    success_stats = [(p, s) for p, e, s in inspect_results if e is None and s is not None]
+    success_stats = [
+        (p, s) for p, e, s in inspect_results if e is None and s is not None
+    ]
     exclude_paths, global_stats = _detect_outliers(success_stats, OUTLIER_STD)
 
     if exclude_paths:
@@ -315,11 +364,15 @@ def main():
     if not to_convert:
         raise SystemExit("No VTP files passed filters; nothing to convert.")
 
-    print(f"\nPass 2: Converting {len(to_convert)} VTP files to zarr (workers={workers})")
+    print(
+        f"\nPass 2: Converting {len(to_convert)} VTP files to zarr (workers={workers})"
+    )
     with Pool(workers) as pool:
         convert_results = pool.map(_worker_convert, to_convert)
 
-    convert_failed = [(path, err) for path, err, _ in convert_results if err is not None]
+    convert_failed = [
+        (path, err) for path, err, _ in convert_results if err is not None
+    ]
     if convert_failed:
         for path, err in convert_failed:
             print(f"FAILED {path}: {err}")
@@ -331,25 +384,49 @@ def main():
     if success and stats_csv:
         with open(stats_csv, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow([
-                "file", "n_cells", "has_nan_inf", "has_zero_normals", "excluded",
-                "pressure_min", "pressure_max", "pressure_mean", "pressure_std",
-                "wss_magnitude_min", "wss_magnitude_max", "wss_magnitude_mean", "wss_magnitude_std",
-            ])
-            for (p, s) in success:
+            w.writerow(
+                [
+                    "file",
+                    "n_cells",
+                    "has_nan_inf",
+                    "has_zero_normals",
+                    "excluded",
+                    "pressure_min",
+                    "pressure_max",
+                    "pressure_mean",
+                    "pressure_std",
+                    "wss_magnitude_min",
+                    "wss_magnitude_max",
+                    "wss_magnitude_mean",
+                    "wss_magnitude_std",
+                ]
+            )
+            for p, s in success:
                 fname = os.path.basename(p)
                 excluded = p in exclude_paths
-                w.writerow([
-                    fname, s["n_cells"], s.get("has_nan_inf", False),
-                    s.get("has_zero_normals", False), excluded,
-                    s["pressure_min"], s["pressure_max"], s["pressure_mean"], s["pressure_std"],
-                    s["wss_magnitude_min"], s["wss_magnitude_max"],
-                    s["wss_magnitude_mean"], s["wss_magnitude_std"],
-                ])
+                w.writerow(
+                    [
+                        fname,
+                        s["n_cells"],
+                        s.get("has_nan_inf", False),
+                        s.get("has_zero_normals", False),
+                        excluded,
+                        s["pressure_min"],
+                        s["pressure_max"],
+                        s["pressure_mean"],
+                        s["pressure_std"],
+                        s["wss_magnitude_min"],
+                        s["wss_magnitude_max"],
+                        s["wss_magnitude_mean"],
+                        s["wss_magnitude_std"],
+                    ]
+                )
         print(f"  Wrote {stats_csv}")
 
-    print(f"\nDone. Wrote {len(to_convert)} zarr groups to {output_dir} "
-          f"(excluded {len(exclude_paths)} files)")
+    print(
+        f"\nDone. Wrote {len(to_convert)} zarr groups to {output_dir} "
+        f"(excluded {len(exclude_paths)} files)"
+    )
 
 
 if __name__ == "__main__":

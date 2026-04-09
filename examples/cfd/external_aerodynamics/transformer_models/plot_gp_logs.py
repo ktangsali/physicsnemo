@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """
 Plot GP training metrics from active learning sbatch .out logs.
@@ -51,19 +67,27 @@ def parse_log(log_path: Path) -> Dict[str, list]:
         r"Epoch \[(\d+)/\d+\] Avg Train (?:GP|Head) Loss: ([\d.eE+-]+)"
         r"(?:\s+Avg Train MSE: ([\d.eE+-]+))?"
     )
-    avg_val_re = re.compile(r"Epoch \[(\d+)/\d+\] Avg Val (?:GP|Head) MSE: ([\d.eE+-]+)")
+    avg_val_re = re.compile(
+        r"Epoch \[(\d+)/\d+\] Avg Val (?:GP|Head) MSE: ([\d.eE+-]+)"
+    )
     hyper_re = re.compile(
         r"GP hypers .+ lengthscale: min=([\d.eE+-]+) max=([\d.eE+-]+) mean=([\d.eE+-]+)"
         r" \| outputscale=([\d.eE+-]+) \| noise=([\d.eE+-]+)"
     )
 
     data: Dict[str, list] = {
-        "epochs_gp_loss": [], "gp_losses": [],
-        "epochs_train_mse": [], "train_mses": [],
-        "epochs_val_mse": [], "val_mses": [],
+        "epochs_gp_loss": [],
+        "gp_losses": [],
+        "epochs_train_mse": [],
+        "train_mses": [],
+        "epochs_val_mse": [],
+        "val_mses": [],
         "epochs_hyper": [],
-        "ls_min": [], "ls_max": [], "ls_mean": [],
-        "outputscale": [], "noise": [],
+        "ls_min": [],
+        "ls_max": [],
+        "ls_mean": [],
+        "outputscale": [],
+        "noise": [],
     }
 
     last_train_epoch = None
@@ -162,17 +186,24 @@ def main():
     ax_idx = 0
 
     # --- Subplot 1: Avg Train MSE & Avg Val Head MSE ---
-    ax = axes[ax_idx]; ax_idx += 1
+    ax = axes[ax_idx]
+    ax_idx += 1
     if d["epochs_train_mse"]:
         ax.plot(
-            d["epochs_train_mse"], d["train_mses"], "b-o",
-            label="Avg Train MSE", markersize=3,
+            d["epochs_train_mse"],
+            d["train_mses"],
+            "b-o",
+            label="Avg Train MSE",
+            markersize=3,
             markevery=max(1, len(d["epochs_train_mse"]) // 50),
         )
     if d["epochs_val_mse"]:
         ax.plot(
-            d["epochs_val_mse"], d["val_mses"], "r-s",
-            label="Avg Val Head MSE", markersize=3,
+            d["epochs_val_mse"],
+            d["val_mses"],
+            "r-s",
+            label="Avg Val Head MSE",
+            markersize=3,
             markevery=max(1, len(d["epochs_val_mse"]) // 50),
         )
     ax.set_ylabel("MSE")
@@ -182,11 +213,15 @@ def main():
     ax.grid(True, alpha=0.3, which="both")
 
     # --- Subplot 2: Avg Train Head Loss (linear scale) ---
-    ax = axes[ax_idx]; ax_idx += 1
+    ax = axes[ax_idx]
+    ax_idx += 1
     if d["epochs_gp_loss"]:
         ax.plot(
-            d["epochs_gp_loss"], d["gp_losses"], "-",
-            color="tab:green", linewidth=1.2,
+            d["epochs_gp_loss"],
+            d["gp_losses"],
+            "-",
+            color="tab:green",
+            linewidth=1.2,
             label="Avg Train Head Loss",
         )
     ax.set_ylabel("Head Loss")
@@ -196,11 +231,16 @@ def main():
 
     if has_hyper:
         # --- Subplot 3: Lengthscale ---
-        ax = axes[ax_idx]; ax_idx += 1
+        ax = axes[ax_idx]
+        ax_idx += 1
         ep = d["epochs_hyper"]
         ax.fill_between(
-            ep, d["ls_min"], d["ls_max"],
-            alpha=0.2, color="tab:blue", label="Min\u2013Max range",
+            ep,
+            d["ls_min"],
+            d["ls_max"],
+            alpha=0.2,
+            color="tab:blue",
+            label="Min\u2013Max range",
         )
         ax.plot(ep, d["ls_mean"], "-", color="tab:blue", linewidth=1.2, label="Mean")
         ax.set_ylabel("Lengthscale")
@@ -209,15 +249,24 @@ def main():
         ax.grid(True, alpha=0.3)
 
         # --- Subplot 4: Outputscale ---
-        ax = axes[ax_idx]; ax_idx += 1
-        ax.plot(ep, d["outputscale"], "-", color="tab:orange", linewidth=1.2, label="Outputscale")
+        ax = axes[ax_idx]
+        ax_idx += 1
+        ax.plot(
+            ep,
+            d["outputscale"],
+            "-",
+            color="tab:orange",
+            linewidth=1.2,
+            label="Outputscale",
+        )
         ax.set_ylabel("Outputscale")
         ax.set_title("GP Outputscale vs Epoch")
         ax.legend(loc="best")
         ax.grid(True, alpha=0.3)
 
         # --- Subplot 5: Noise ---
-        ax = axes[ax_idx]; ax_idx += 1
+        ax = axes[ax_idx]
+        ax_idx += 1
         ax.plot(ep, d["noise"], "-", color="tab:red", linewidth=1.2, label="Noise")
         ax.set_ylabel("Noise")
         ax.set_title("GP Noise vs Epoch")
@@ -230,7 +279,7 @@ def main():
     # output_file = "stage_2_mlp_head.png"
     # output_file = "stage_2_gp_head.png"
     output_file = "stage_2_gp_v3_head.png"
-    
+
     plt.savefig(output_file, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"\nPlot saved to: {output_file}")

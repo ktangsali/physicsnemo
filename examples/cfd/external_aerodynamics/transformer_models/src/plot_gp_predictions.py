@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """Plot GP and Geo-Transolver drag predictions vs true drag.
 
@@ -74,7 +90,8 @@ def predict_full_mesh_in_chunks(
         local_embeddings = cast_precisions(local_embeddings, precision)
         geometry = (
             cast_precisions(batch_full["geometry"], precision)
-            if "geometry" in batch_full else None
+            if "geometry" in batch_full
+            else None
         )
         outputs = model(
             global_embedding=features,
@@ -104,9 +121,14 @@ def main(cfg: DictConfig) -> None:
     use_combined = Path(combined_ckpt_path).exists()
 
     if not use_combined:
-        pretrained_ckpt_path = getattr(
-            cfg, "pretrained_checkpoint_path", None,
-        ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+        pretrained_ckpt_path = (
+            getattr(
+                cfg,
+                "pretrained_checkpoint_path",
+                None,
+            )
+            or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+        )
         gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
 
     print(
@@ -128,8 +150,10 @@ def main(cfg: DictConfig) -> None:
         if data_path_override is not None:
             cfg_data.val.data_path = data_path_override
         dl = create_transolver_dataset(
-            cfg_data, phase="val",
-            surface_factors=surface_factors, volume_factors=None,
+            cfg_data,
+            phase="val",
+            surface_factors=surface_factors,
+            volume_factors=None,
         )
         cfg_data_full = omegaconf.OmegaConf.create(
             omegaconf.OmegaConf.to_container(cfg_data, resolve=True)
@@ -137,14 +161,18 @@ def main(cfg: DictConfig) -> None:
         cfg_data_full.resolution = None
         cfg_data_full.return_mesh_features = True
         dl_full = create_transolver_dataset(
-            cfg_data_full, phase="val",
-            surface_factors=surface_factors, volume_factors=None,
+            cfg_data_full,
+            phase="val",
+            surface_factors=surface_factors,
+            volume_factors=None,
         )
         return dl, dl_full
 
     train_dataloader = create_transolver_dataset(
-        cfg.data, phase="train",
-        surface_factors=surface_factors, volume_factors=None,
+        cfg.data,
+        phase="train",
+        surface_factors=surface_factors,
+        volume_factors=None,
     )
     val_dataloader, val_dataloader_full = _make_dataloaders()
 
@@ -154,8 +182,7 @@ def main(cfg: DictConfig) -> None:
             continue
         entry = cfg.data[key]
         path = (
-            getattr(entry, "data_path", None)
-            if hasattr(entry, "data_path") else None
+            getattr(entry, "data_path", None) if hasattr(entry, "data_path") else None
         )
         if path is None or not Path(path).is_dir():
             print(f"  Skipping {key}: path={path} (not found)")
@@ -189,8 +216,7 @@ def main(cfg: DictConfig) -> None:
     mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
     mlp_head_hidden_cfg = getattr(cfg, "mlp_head_hidden", None)
     mlp_head_hidden = (
-        list(mlp_head_hidden_cfg) if mlp_head_hidden_cfg is not None
-        else [256, 256]
+        list(mlp_head_hidden_cfg) if mlp_head_hidden_cfg is not None else [256, 256]
     )
 
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
@@ -201,7 +227,9 @@ def main(cfg: DictConfig) -> None:
     model.to(device)
 
     embedding_reduction_model = create_embedding_reduction(
-        pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
+        pooling=pooling_type,
+        feat_dim=feat_dim,
+        embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
         normalize=normalize_embeddings,
         target_scale=embedding_target_scale,
@@ -210,7 +238,9 @@ def main(cfg: DictConfig) -> None:
 
     if use_gp:
         gp = VariationalGPHead(
-            input_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
+            input_dim=embed_dim,
+            n_inducing=n_inducing,
+            n_train=n_train,
             lengthscale_range=ls_range,
             lengthscale_prior=ls_prior,
             outputscale_prior=os_prior,
@@ -253,7 +283,8 @@ def main(cfg: DictConfig) -> None:
                 embeddings = cast_precisions(batch["embeddings"], precision)
                 geometry = (
                     cast_precisions(batch["geometry"], precision)
-                    if "geometry" in batch else None
+                    if "geometry" in batch
+                    else None
                 )
                 local_positions = embeddings[:, :, :3]
 
@@ -264,29 +295,39 @@ def main(cfg: DictConfig) -> None:
                     local_positions=local_positions,
                     return_embedding_states=True,
                 )
-                reduced = embedding_reduction_model(
-                    embedding_states.flatten(1, 2)
-                )
+                reduced = embedding_reduction_model(embedding_states.flatten(1, 2))
 
                 mean_scaled, var_scaled, _, _ = gp.predict(reduced)
                 mean_np = mean_scaled.cpu().numpy().flatten()
                 std_np = np.sqrt(var_scaled.cpu().numpy().flatten())
 
                 target_scaled = compute_drag_target_from_batch(
-                    batch, surface_factors, device,
+                    batch,
+                    surface_factors,
+                    device,
                 )
                 true_np = target_scaled.cpu().numpy().flatten()
 
                 batch_full = next(full_iter)
                 outputs_full = predict_full_mesh_in_chunks(
-                    batch_full, model, chunk_size, device, precision,
+                    batch_full,
+                    model,
+                    chunk_size,
+                    device,
+                    precision,
                 )
                 mod_full = dict(batch_full)
                 mod_full["fields_full"] = outputs_full
                 trans_val = float(
                     compute_drag_target_from_batch(
-                        mod_full, surface_factors, device,
-                    ).cpu().numpy().flatten()[0] * DRAG_COEFF_SCALE
+                        mod_full,
+                        surface_factors,
+                        device,
+                    )
+                    .cpu()
+                    .numpy()
+                    .flatten()[0]
+                    * DRAG_COEFF_SCALE
                 )
 
                 for k in range(len(mean_np)):
@@ -322,8 +363,14 @@ def main(cfg: DictConfig) -> None:
     npz_data = {}
     for name, res in all_results:
         tag = name.replace(" ", "_").lower()
-        for key in ("true_cd", "pred_mean_cd", "pred_std_cd", "transolver_cd",
-                     "abs_diff", "joint_uq"):
+        for key in (
+            "true_cd",
+            "pred_mean_cd",
+            "pred_std_cd",
+            "transolver_cd",
+            "abs_diff",
+            "joint_uq",
+        ):
             npz_data[f"{tag}__{key}"] = res[key]
     results_path = out_dir / "prediction_results.npz"
     np.savez_compressed(results_path, **npz_data)
@@ -336,15 +383,20 @@ def main(cfg: DictConfig) -> None:
         margin = 0.05 * (hi - lo) if hi > lo else 0.01
         return lo - margin, hi + margin
 
-    all_cd = np.concatenate([
-        np.concatenate([
-            res["true_cd"], res["pred_mean_cd"], res["transolver_cd"],
-        ])
-        for _, res in all_results
-    ])
+    all_cd = np.concatenate(
+        [
+            np.concatenate(
+                [
+                    res["true_cd"],
+                    res["pred_mean_cd"],
+                    res["transolver_cd"],
+                ]
+            )
+            for _, res in all_results
+        ]
+    )
     cd_margin = (
-        0.05 * (all_cd.max() - all_cd.min())
-        if all_cd.max() > all_cd.min() else 0.01
+        0.05 * (all_cd.max() - all_cd.min()) if all_cd.max() > all_cd.min() else 0.01
     )
     scatter_lo = max(0.0, all_cd.min() - cd_margin)
     scatter_hi = all_cd.max() + cd_margin
@@ -361,7 +413,10 @@ def main(cfg: DictConfig) -> None:
         for pct, color in zip(_PERCENTILES, _PCT_COLORS):
             val = np.percentile(data, pct)
             ax.axvline(
-                val, color=color, ls="-.", lw=1.2,
+                val,
+                color=color,
+                ls="-.",
+                lw=1.2,
                 label=f"P{pct} = {val:.4f}",
             )
 
@@ -371,23 +426,39 @@ def main(cfg: DictConfig) -> None:
         pred_std_cd = res["pred_std_cd"]
         transolver_cd = res["transolver_cd"]
         ax.plot(
-            [scatter_lo, scatter_hi], [scatter_lo, scatter_hi],
-            "k--", lw=1.5, alpha=0.7, label="y = x",
+            [scatter_lo, scatter_hi],
+            [scatter_lo, scatter_hi],
+            "k--",
+            lw=1.5,
+            alpha=0.7,
+            label="y = x",
         )
         sort_idx = np.argsort(true_cd)
         ax.fill_between(
             true_cd[sort_idx],
             (pred_mean_cd - 2 * pred_std_cd)[sort_idx],
             (pred_mean_cd + 2 * pred_std_cd)[sort_idx],
-            alpha=0.3, color="C1", label=r"GP $\pm$ 2 std",
+            alpha=0.3,
+            color="C1",
+            label=r"GP $\pm$ 2 std",
         )
         ax.plot(
-            true_cd, pred_mean_cd, "o", ms=1.5, color="C1",
-            alpha=0.9, label="GP mean",
+            true_cd,
+            pred_mean_cd,
+            "o",
+            ms=1.5,
+            color="C1",
+            alpha=0.9,
+            label="GP mean",
         )
         ax.plot(
-            true_cd, transolver_cd, "s", ms=1.5, color="C2",
-            alpha=0.9, label="Geo-Transolver (field→Cd)",
+            true_cd,
+            transolver_cd,
+            "s",
+            ms=1.5,
+            color="C2",
+            alpha=0.9,
+            label="Geo-Transolver (field→Cd)",
         )
         ax.set_xlabel("True Cd")
         ax.set_ylabel("Predicted Cd")
@@ -403,19 +474,30 @@ def main(cfg: DictConfig) -> None:
         pred_mean_cd = res["pred_mean_cd"]
         joint_uq = res["joint_uq"]
         ax.plot(
-            [scatter_lo, scatter_hi], [scatter_lo, scatter_hi],
-            "k--", lw=1.5, alpha=0.7, label="y = x",
+            [scatter_lo, scatter_hi],
+            [scatter_lo, scatter_hi],
+            "k--",
+            lw=1.5,
+            alpha=0.7,
+            label="y = x",
         )
         sort_idx = np.argsort(true_cd)
         ax.fill_between(
             true_cd[sort_idx],
             (pred_mean_cd - joint_uq)[sort_idx],
             (pred_mean_cd + joint_uq)[sort_idx],
-            alpha=0.3, color="C5", label=r"GP mean $\pm$ joint UQ",
+            alpha=0.3,
+            color="C5",
+            label=r"GP mean $\pm$ joint UQ",
         )
         ax.plot(
-            true_cd, pred_mean_cd, "o", ms=1.5, color="C1",
-            alpha=0.9, label="GP mean",
+            true_cd,
+            pred_mean_cd,
+            "o",
+            ms=1.5,
+            color="C1",
+            alpha=0.9,
+            label="GP mean",
         )
         ax.set_xlabel("True Cd")
         ax.set_ylabel("Predicted Cd")
@@ -428,15 +510,25 @@ def main(cfg: DictConfig) -> None:
 
     def _plot_hist(ax, data, xlabel, title, color, xlims):
         ax.hist(
-            data, bins=30, color=color, edgecolor="black",
-            alpha=0.75, range=xlims,
+            data,
+            bins=30,
+            color=color,
+            edgecolor="black",
+            alpha=0.75,
+            range=xlims,
         )
         ax.axvline(
-            np.mean(data), color="k", ls="--", lw=1.5,
+            np.mean(data),
+            color="k",
+            ls="--",
+            lw=1.5,
             label=f"mean = {np.mean(data):.4f}",
         )
         ax.axvline(
-            np.median(data), color="C0", ls=":", lw=1.5,
+            np.median(data),
+            color="C0",
+            ls=":",
+            lw=1.5,
             label=f"median = {np.median(data):.4f}",
         )
         _add_percentile_lines(ax, data)
@@ -456,16 +548,20 @@ def main(cfg: DictConfig) -> None:
     for row, (name, res) in enumerate(all_results):
         _plot_scatter(axes[row, 0], res, name)
         _plot_hist(
-            axes[row, 1], res["abs_diff"],
+            axes[row, 1],
+            res["abs_diff"],
             xlabel="|Cd_GP − Cd_GeoTransolver|",
             title=f"{name}\n|GP − GeoTransolver| gap",
-            color="C3", xlims=(diff_lo, diff_hi),
+            color="C3",
+            xlims=(diff_lo, diff_hi),
         )
         _plot_hist(
-            axes[row, 2], res["pred_std_cd"],
+            axes[row, 2],
+            res["pred_std_cd"],
             xlabel="GP Predictive Std Dev (Cd)",
             title=f"{name}\nGP Std Dev",
-            color="C4", xlims=(std_lo, std_hi),
+            color="C4",
+            xlims=(std_lo, std_hi),
         )
         _plot_joint_scatter(axes[row, 3], res, name)
 
@@ -481,7 +577,9 @@ def main(cfg: DictConfig) -> None:
 
         n_kde_cols = 2 if use_gp else 1
         fig_kde, axes_kde = plt.subplots(
-            1, n_kde_cols, figsize=(8 * n_kde_cols, 6),
+            1,
+            n_kde_cols,
+            figsize=(8 * n_kde_cols, 6),
         )
         if n_kde_cols == 1:
             axes_kde = [axes_kde]
@@ -500,15 +598,23 @@ def main(cfg: DictConfig) -> None:
             if len(disagree) > 2:
                 xs = np.linspace(
                     max(0, disagree.min() * 0.8),
-                    disagree.max() * 1.2, 500,
+                    disagree.max() * 1.2,
+                    500,
                 )
                 kde = gaussian_kde(disagree)
                 ax_dis.plot(
-                    xs, kde(xs), color=color, lw=lw, ls=ls, label=name,
+                    xs,
+                    kde(xs),
+                    color=color,
+                    lw=lw,
+                    ls=ls,
+                    label=name,
                 )
                 ax_dis.fill_between(
-                    xs, kde(xs),
-                    alpha=0.1 if is_id else 0.05, color=color,
+                    xs,
+                    kde(xs),
+                    alpha=0.1 if is_id else 0.05,
+                    color=color,
                 )
 
             if ax_std is not None:
@@ -516,16 +622,23 @@ def main(cfg: DictConfig) -> None:
                 if len(std_dev) > 2:
                     xs = np.linspace(
                         max(0, std_dev.min() * 0.8),
-                        std_dev.max() * 1.2, 500,
+                        std_dev.max() * 1.2,
+                        500,
                     )
                     kde = gaussian_kde(std_dev)
                     ax_std.plot(
-                        xs, kde(xs), color=color, lw=lw, ls=ls,
+                        xs,
+                        kde(xs),
+                        color=color,
+                        lw=lw,
+                        ls=ls,
                         label=name,
                     )
                     ax_std.fill_between(
-                        xs, kde(xs),
-                        alpha=0.1 if is_id else 0.05, color=color,
+                        xs,
+                        kde(xs),
+                        alpha=0.1 if is_id else 0.05,
+                        color=color,
                     )
 
         ax_dis.set_xlabel(f"|Cd_{head_label} − Cd_GeoTransolver|")

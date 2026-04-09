@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """Visualize GeoTransolver embedding distributions from a combined-trained model.
 
@@ -63,7 +79,12 @@ def plot_line_comparison(
 
     for d in range(min(N_DIMS_LINE_PLOT, mean_embeds.shape[1])):
         ax_mean.plot(
-            indices, mean_embeds[:, d], "-o", ms=2, label=f"Dim {d}", alpha=0.8,
+            indices,
+            mean_embeds[:, d],
+            "-o",
+            ms=2,
+            label=f"Dim {d}",
+            alpha=0.8,
         )
     ax_mean.set_ylabel("Embedding value")
     ax_mean.set_title("GeoTransolver embeddings: mean pooling (first 10 dims)")
@@ -72,7 +93,12 @@ def plot_line_comparison(
 
     for d in range(min(N_DIMS_LINE_PLOT, attn_embeds.shape[1])):
         ax_attn.plot(
-            indices, attn_embeds[:, d], "-o", ms=2, label=f"Dim {d}", alpha=0.8,
+            indices,
+            attn_embeds[:, d],
+            "-o",
+            ms=2,
+            label=f"Dim {d}",
+            alpha=0.8,
         )
     ax_attn.set_xlabel("Sample index")
     ax_attn.set_ylabel("Embedding value")
@@ -108,11 +134,17 @@ def plot_histogram_grid(
         values = attn_embeds[:, d]
         ax.hist(values, bins=30, color="steelblue", edgecolor="white", alpha=0.85)
         ax.axvline(
-            values.mean(), color="crimson", linestyle="--", linewidth=1.2,
+            values.mean(),
+            color="crimson",
+            linestyle="--",
+            linewidth=1.2,
             label=f"\u03bc={values.mean():.2f}",
         )
         ax.axvline(
-            np.median(values), color="orange", linestyle=":", linewidth=1.2,
+            np.median(values),
+            color="orange",
+            linestyle=":",
+            linewidth=1.2,
             label=f"med={np.median(values):.2f}",
         )
         ax.set_title(f"Dim {d}  (\u03c3={values.std():.2f})", fontsize=9)
@@ -126,7 +158,8 @@ def plot_histogram_grid(
     fig.suptitle(
         f"Embedding dimension distributions — {pooling_type} pooling, "
         f"{n_dims} dims, {n_samples} val samples",
-        fontsize=14, y=1.01,
+        fontsize=14,
+        y=1.01,
     )
     fig.tight_layout()
     out_path = out_dir / "embedding_histograms.png"
@@ -149,8 +182,13 @@ def plot_summary_stats(
     fig, (ax_bar, ax_box) = plt.subplots(1, 2, figsize=(18, 5))
 
     ax_bar.bar(
-        dims, means, yerr=stds, capsize=3,
-        color="steelblue", alpha=0.8, edgecolor="white",
+        dims,
+        means,
+        yerr=stds,
+        capsize=3,
+        color="steelblue",
+        alpha=0.8,
+        edgecolor="white",
     )
     ax_bar.set_xlabel("Embedding dimension")
     ax_bar.set_ylabel("Value")
@@ -193,9 +231,14 @@ def main(cfg: DictConfig) -> None:
     use_combined = Path(combined_ckpt_path).exists()
 
     if not use_combined:
-        pretrained_ckpt_path = getattr(
-            cfg, "pretrained_checkpoint_path", None,
-        ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+        pretrained_ckpt_path = (
+            getattr(
+                cfg,
+                "pretrained_checkpoint_path",
+                None,
+            )
+            or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
+        )
         gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
 
     print(
@@ -211,8 +254,10 @@ def main(cfg: DictConfig) -> None:
     }
 
     val_dataloader = create_transolver_dataset(
-        cfg.data, phase="val",
-        surface_factors=surface_factors, volume_factors=None,
+        cfg.data,
+        phase="val",
+        surface_factors=surface_factors,
+        volume_factors=None,
     )
 
     feat_dim = getattr(cfg, "embedding_feat_dim", 256)
@@ -230,7 +275,9 @@ def main(cfg: DictConfig) -> None:
     normalize_embeddings = getattr(cfg, "normalize_embeddings", False)
     embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
     embedding_reduction_model = create_embedding_reduction(
-        pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
+        pooling=pooling_type,
+        feat_dim=feat_dim,
+        embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
         normalize=normalize_embeddings,
         target_scale=embedding_target_scale,
@@ -265,7 +312,8 @@ def main(cfg: DictConfig) -> None:
             embeddings = batch["embeddings"]
             geometry = (
                 cast_precisions(batch["geometry"], precision)
-                if "geometry" in batch else None
+                if "geometry" in batch
+                else None
             )
             features = cast_precisions(features, precision)
             embeddings = cast_precisions(embeddings, precision)
@@ -280,9 +328,7 @@ def main(cfg: DictConfig) -> None:
             )
 
             mean_pooled = embedding_states.flatten(1, 2).mean(dim=1)
-            attn_pooled = embedding_reduction_model(
-                embedding_states.flatten(1, 2)
-            )
+            attn_pooled = embedding_reduction_model(embedding_states.flatten(1, 2))
 
             mean_embeds_list.append(mean_pooled.cpu().numpy())
             attn_embeds_list.append(attn_pooled.cpu().numpy())

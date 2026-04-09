@@ -1,3 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python3
 """Re-plot KDE overlay from saved prediction_results.npz files.
 
@@ -28,7 +44,9 @@ def main():
         tag, field = k.split("__", 1)
         datasets.setdefault(tag, {})[field] = data[k]
 
-    has_std = any("pred_std_cd" in v and v["pred_std_cd"].max() > 0 for v in datasets.values())
+    has_std = any(
+        "pred_std_cd" in v and v["pred_std_cd"].max() > 0 for v in datasets.values()
+    )
 
     n_cols = 2 if has_std else 1
     fig, axes = plt.subplots(1, n_cols, figsize=(8 * n_cols, 6))
@@ -60,7 +78,9 @@ def main():
                 xs = np.linspace(max(0, std_dev.min() * 0.8), std_dev.max() * 1.2, 500)
                 kde = gaussian_kde(std_dev)
                 ax_std.plot(xs, kde(xs), color=color, lw=lw, ls=ls, label=label)
-                ax_std.fill_between(xs, kde(xs), alpha=0.1 if is_id else 0.05, color=color)
+                ax_std.fill_between(
+                    xs, kde(xs), alpha=0.1 if is_id else 0.05, color=color
+                )
 
     ax_dis.set_xlabel(f"|Cd_{head_label} − Cd_GeoTransolver|")
     ax_dis.set_ylabel("Density")

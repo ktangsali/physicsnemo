@@ -21,10 +21,10 @@ import torch
 
 from physicsnemo.nn.module.pooling import AttentionPooling, MeanPooling
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(params=[1, 4], ids=["batch1", "batch4"])
 def batch_size(request):
@@ -50,6 +50,7 @@ def embed_dim(request):
 # AttentionPooling
 # ---------------------------------------------------------------------------
 
+
 class TestAttentionPooling:
     """Tests for the AttentionPooling module."""
 
@@ -70,25 +71,37 @@ class TestAttentionPooling:
 
     def test_normalize_unit_norm(self):
         pool = AttentionPooling(
-            feat_dim=64, embed_dim=16, normalize=True, target_scale=1.0,
+            feat_dim=64,
+            embed_dim=16,
+            normalize=True,
+            target_scale=1.0,
         )
         x = torch.randn(4, 100, 64)
         out = pool(x)
         norms = out.norm(dim=-1)
         torch.testing.assert_close(
-            norms, torch.ones(4), atol=1e-5, rtol=1e-5,
+            norms,
+            torch.ones(4),
+            atol=1e-5,
+            rtol=1e-5,
         )
 
     def test_normalize_custom_scale(self):
         scale = 2.5
         pool = AttentionPooling(
-            feat_dim=64, embed_dim=16, normalize=True, target_scale=scale,
+            feat_dim=64,
+            embed_dim=16,
+            normalize=True,
+            target_scale=scale,
         )
         x = torch.randn(4, 100, 64)
         out = pool(x)
         norms = out.norm(dim=-1)
         torch.testing.assert_close(
-            norms, torch.full((4,), scale), atol=1e-5, rtol=1e-5,
+            norms,
+            torch.full((4,), scale),
+            atol=1e-5,
+            rtol=1e-5,
         )
 
     def test_no_normalize(self):
@@ -100,7 +113,9 @@ class TestAttentionPooling:
 
     def test_spectral_norm_applied(self):
         pool = AttentionPooling(
-            feat_dim=64, embed_dim=16, spectral_norm=True,
+            feat_dim=64,
+            embed_dim=16,
+            spectral_norm=True,
         )
         has_sn = False
         for module in pool.modules():
@@ -122,6 +137,7 @@ class TestAttentionPooling:
 # MeanPooling
 # ---------------------------------------------------------------------------
 
+
 class TestMeanPooling:
     """Tests for the MeanPooling module."""
 
@@ -142,13 +158,19 @@ class TestMeanPooling:
 
     def test_normalize_unit_norm(self):
         pool = MeanPooling(
-            feat_dim=64, embed_dim=16, normalize=True, target_scale=1.0,
+            feat_dim=64,
+            embed_dim=16,
+            normalize=True,
+            target_scale=1.0,
         )
         x = torch.randn(4, 100, 64)
         out = pool(x)
         norms = out.norm(dim=-1)
         torch.testing.assert_close(
-            norms, torch.ones(4), atol=1e-5, rtol=1e-5,
+            norms,
+            torch.ones(4),
+            atol=1e-5,
+            rtol=1e-5,
         )
 
     def test_spectral_norm_applied(self):

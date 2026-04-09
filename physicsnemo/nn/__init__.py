@@ -115,6 +115,7 @@ from .module.hpx import (
 from .module.kan_layers import KolmogorovArnoldNetwork
 from .module.mlp_layers import Mlp
 from .module.pade import Pade
+from .module.pooling import AttentionPooling, MeanPooling
 from .module.resample_layers import (
     DownSample2D,
     DownSample3D,
@@ -135,7 +136,6 @@ from .module.transformer_layers import (
     FuserLayer,
     SwinTransformer,
 )
-from .module.pooling import AttentionPooling, MeanPooling
 from .module.unet_layers import UNetBlock
 from .module.weight_fact import WeightFactLinear
 from .module.weight_norm import WeightNormLinear
