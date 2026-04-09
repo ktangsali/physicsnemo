@@ -23,13 +23,9 @@ output_dir: "runs"
 checkpoint_dir: null  # Optional: set custom checkpoint path, defaults to output_dir
 run_id: "geotransolver/surface/bq"
 
-# Embedding reduction for variational GP: "attention" (learned attention pooling) or "mean" (mean over points + linear projection)
-embedding_pooling: attention
-
 # Performance considerations:
 precision: float32 # float32, float16, bfloat16, or float8
-# Set to false if you hit OOM or torch.compile recompilation errors
-compile: false
+compile: true
 profile: false
 
 model:

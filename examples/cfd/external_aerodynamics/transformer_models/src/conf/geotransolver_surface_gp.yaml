@@ -70,6 +70,11 @@ precision: float32
 compile: false
 profile: false
 
+# --- Training overrides (base.yaml defaults: save_interval=25, no accumulation) ---
+training:
+  save_interval: 10
+  gradient_accumulation_steps: 8
+
 model:
   functional_dim: 6
   include_local_features: true
