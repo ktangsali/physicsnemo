@@ -315,7 +315,7 @@ The model was trained exclusively on **DrivAerStar Fastback** geometries (class 
 
 **Left — Disagreement:** The distribution of |Cd_GP − Cd_GeoTransolver| is tightly concentrated near zero for in-distribution Fastback samples (solid blue), indicating strong agreement between the two independent drag predictions.  OOD classes exhibit heavier tails and wider spread, meaning the GP and GeoTransolver diverge more when encountering unfamiliar geometries.  Notably, the disagreement signal correlates with geometric similarity to the training distribution: **Notchback** — the DrivAerStar body style most resembling Fastback — shows a relatively modest shift, while **Estateback** (a more distinct rear-end shape) and the **DrivaerML** / **ShiftSUV** classes (entirely different vehicle datasets) produce substantially larger disagreement.  This query-by-committee disagreement provides a strong, interpretable OOD detection signal.
 
-**Right — GP Predictive Std Dev:** The GP's posterior standard deviation shows a subtle but consistent shift: in-distribution samples cluster in a narrow peak, while OOD samples spread to higher values.  The signal is weaker than disagreement alone, but the two are complementary — the joint UQ metric `max(|disagreement|, 2 * GP_std)` combines both for more robust OOD flagging.
+**Right — GP Predictive Std Dev:** The GP's posterior standard deviation shows a subtle but consistent shift: in-distribution samples cluster in a narrow peak, while OOD samples spread to higher values.  The signal is weaker than disagreement alone, but the two are complementary — the joint UQ metric, for example `max(|disagreement|, 2 * GP_std)` combines both for more robust OOD flagging.
 
 ### Key Design Choices
 
