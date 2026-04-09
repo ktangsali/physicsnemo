@@ -1,23 +1,31 @@
-"""Combined training: GeoTransolver (field prediction) + Variational GP (drag prediction).
+"""Combined training: GeoTransolver backbone + uncertainty-aware drag head.
 
 Trains both models jointly with three loss terms:
-  1. MSE loss on per-point surface fields (pressure + wall shear stress)
-  2. Variational ELBO loss on GP drag prediction from learned embeddings
-  3. Consistency loss between GP-predicted drag and field-integrated drag
+  1. **Field MSE** — per-point surface fields (pressure + wall shear stress).
+  2. **Head loss** — variational ELBO (GP) or MSE (MLP) on scalar drag.
+  3. **Consistency loss** — aligns head drag prediction with field-integrated
+     drag from the same forward pass.
 
-The GP and consistency losses activate after a configurable warmup period with a
-linear ramp (default: epoch 50-60).  Inducing points are re-initialised at the
-warmup start from the now-meaningful GeoTransolver embeddings.
+The head and consistency losses activate after a configurable warmup period
+with a linear ramp (default: epochs 50–60).  For the GP head, inducing points
+are re-initialised at the warmup start from the now-meaningful embeddings.
 
-Key config overrides (command-line):
-    +lambda_gp=0.01            GP ELBO loss weight (after ramp reaches 1.0)
-    +lambda_consistency=1.0    Consistency loss weight (0 disables)
-    +gp_warmup_start=50        Epoch at which GP/consistency ramp begins
-    +gp_warmup_end=60          Epoch at which ramp reaches full weight
-    +consistency_every_n=1     Compute consistency loss every N steps
-    +consistency_detach_transolver=true   Detach GeoTransolver in consistency loss (false = backprop through it)
-    +n_inducing=128            Number of GP inducing points
-    +embed_dim=32              Dimension of GP embedding
+The ``head_type`` config key selects the drag head:
+  * ``gp``  — :class:`~physicsnemo.experimental.uq.VariationalGPHead`
+  * ``mlp`` — :class:`DragMLP` (simple baseline with identical interface)
+
+Key config overrides (command-line examples)::
+
+    ++head_type=gp
+    ++lambda_gp=0.01
+    ++lambda_consistency=1.0
+    ++gp_warmup_start=50
+    ++gp_warmup_end=60
+    ++consistency_detach_transolver=false
+    ++spectral_norm_embedding=true
+    ++normalize_embeddings=true
+    ++embed_dim=32
+    ++n_inducing=128
 """
 
 import os
@@ -47,6 +55,8 @@ from physicsnemo.utils.logging import PythonLogger, RankZeroLoggingWrapper
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.datapipes.cae.transolver_datapipe import create_transolver_dataset
 
+from physicsnemo.experimental.uq import VariationalGPHead
+
 from train import (
     CombinedOptimizer,
     get_autocast_context,
@@ -56,11 +66,16 @@ from train import (
     loss_fn,
     update_model_params_for_fp8,
 )
-from train_variational_gp import (
+from gp_utils import (
     DRAG_COEFF_SCALE,
+    DragMLP,
+    compute_drag_from_subsampled_outputs,
     compute_drag_target_from_batch,
+    compute_force_coefficients_torch,
     create_embedding_reduction,
-    DragGP,
+    gp_ramp_weight,
+    reinitialize_inducing_points,
+    sync_non_ddp_gradients,
 )
 from metrics import metrics_fn
 from utils import tensorwise
@@ -86,89 +101,8 @@ torch.serialization.add_safe_globals([omegaconf.base.Metadata])
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Full-mesh drag (validation only)
 # ---------------------------------------------------------------------------
-
-def gp_ramp_weight(epoch: int, warmup_start: int, warmup_end: int) -> float:
-    """0 before *warmup_start*, linear 0→1 over [start, end), 1 after."""
-    if epoch < warmup_start:
-        return 0.0
-    if epoch >= warmup_end:
-        return 1.0
-    return (epoch - warmup_start) / (warmup_end - warmup_start)
-
-
-def sync_non_ddp_gradients(modules: list[nn.Module], world_size: int) -> None:
-    """All-reduce gradients for modules that are NOT wrapped in DDP."""
-    if world_size <= 1:
-        return
-    for module in modules:
-        for p in module.parameters():
-            if p.grad is not None:
-                dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-
-
-@torch.no_grad()
-def reinitialize_inducing_points(
-    model: nn.Module,
-    embedding_reduction: nn.Module,
-    gp: DragGP,
-    dataloader,
-    n_inducing: int,
-    n_train: int,
-    train_indices: list[int],
-    precision: str,
-    device: torch.device,
-    logger,
-) -> None:
-    """Re-collect inducing-point embeddings from the current (trained) model.
-
-    Temporarily uses the full (undistributed) dataset so that every rank can
-    collect at least *n_inducing* samples, then restores the distributed
-    indices before returning.
-    """
-    dataloader.dataset.set_indices(list(range(n_train)))
-
-    model.eval()
-    embedding_reduction.eval()
-    init_embeddings: list[torch.Tensor] = []
-    for batch in dataloader:
-        if len(init_embeddings) >= n_inducing:
-            break
-        features = cast_precisions(batch["fx"], precision)
-        embeddings = cast_precisions(batch["embeddings"], precision)
-        geometry = (
-            cast_precisions(batch["geometry"], precision)
-            if "geometry" in batch
-            else None
-        )
-        local_positions = embeddings[:, :, :3]
-        _, _, emb_states = model(
-            global_embedding=features,
-            local_embedding=embeddings,
-            geometry=geometry,
-            local_positions=local_positions,
-        )
-        reduced = embedding_reduction(emb_states.flatten(1, 2))
-        init_embeddings.append(reduced.cpu())
-
-    dataloader.dataset.set_indices(train_indices)
-
-    init_embeddings_t = torch.cat(init_embeddings, dim=0)[:n_inducing].to(device)
-    gp.gp_layer.variational_strategy.inducing_points.data.copy_(init_embeddings_t)
-
-    # Reset variational distribution to match new inducing locations
-    vd = gp.gp_layer.variational_strategy._variational_distribution
-    vd.variational_mean.data.zero_()
-    vd.chol_variational_covar.data.copy_(
-        torch.eye(n_inducing, device=device) * 0.01
-    )
-    logger.info(
-        f"Re-initialised {n_inducing} inducing points from current embeddings "
-        f"(norm range [{init_embeddings_t.norm(dim=1).min():.4f}, "
-        f"{init_embeddings_t.norm(dim=1).max():.4f}])"
-    )
-
 
 def compute_transolver_drag_full_mesh(
     batch_full: dict,
@@ -177,55 +111,43 @@ def compute_transolver_drag_full_mesh(
     surface_factors: dict,
     device: torch.device,
     precision: str,
-    detach: bool = True,
 ) -> torch.Tensor:
-    """Run GeoTransolver on full mesh in chunks; integrate predicted fields to Cd.
+    """Run GeoTransolver on full mesh in chunks and integrate to Cd.
 
-    Returns a (1,) tensor in GP-scaled drag space (Cd / DRAG_COEFF_SCALE).
-    When *detach=True* (default) the forward pass runs under ``torch.no_grad()``
-    and intermediates are offloaded to CPU for memory savings.  When *detach=False*
-    gradients flow through the full-mesh pass back into the GeoTransolver (higher
-    memory, but allows the consistency loss to update the GeoTransolver).
+    Used only during validation for accurate drag-gap measurement.
+    Returns ``(1,)`` in GP-scaled drag space.
     """
-    ctx = torch.no_grad() if detach else nullcontext()
-    with ctx:
-        fx_full = cast_precisions(batch_full["fx"].to(device), precision)
-        geo_full = (
-            cast_precisions(batch_full["geometry"].to(device), precision)
-            if "geometry" in batch_full
-            else None
+    fx_full = cast_precisions(batch_full["fx"].to(device), precision)
+    geo_full = (
+        cast_precisions(batch_full["geometry"].to(device), precision)
+        if "geometry" in batch_full else None
+    )
+
+    N = batch_full["embeddings"].shape[1]
+    indices = torch.randperm(N, device=device)
+    index_blocks = torch.split(indices, chunk_size)
+
+    preds: list[torch.Tensor] = []
+    for idx_block in index_blocks:
+        local_emb = cast_precisions(
+            batch_full["embeddings"][:, idx_block].to(device), precision,
         )
+        local_pos = local_emb[:, :, :3]
+        outputs = model(
+            global_embedding=fx_full,
+            local_embedding=local_emb,
+            geometry=geo_full,
+            local_positions=local_pos,
+        )
+        preds.append(outputs.cpu())
 
-        N = batch_full["embeddings"].shape[1]
-        indices = torch.randperm(N, device=device)
-        index_blocks = torch.split(indices, chunk_size)
+    stitched = torch.cat(preds, dim=1)
+    inverse = torch.empty_like(indices, device="cpu")
+    inverse[indices.cpu()] = torch.arange(N)
+    outputs_full = stitched[:, inverse].to(device)
 
-        preds: list[torch.Tensor] = []
-        for idx_block in index_blocks:
-            local_emb = cast_precisions(
-                batch_full["embeddings"][:, idx_block].to(device), precision
-            )
-            local_pos = local_emb[:, :, :3]
-            outputs, *_ = model(
-                global_embedding=fx_full,
-                local_embedding=local_emb,
-                geometry=geo_full,
-                local_positions=local_pos,
-            )
-            preds.append(outputs.cpu() if detach else outputs)
-
-        stitched = torch.cat(preds, dim=1)
-        if detach:
-            inverse = torch.empty_like(indices, device="cpu")
-            inverse[indices.cpu()] = torch.arange(N)
-            outputs_full = stitched[:, inverse].to(device)
-        else:
-            inverse = torch.empty_like(indices)
-            inverse[indices] = torch.arange(N, device=device)
-            outputs_full = stitched[:, inverse]
-
-        mod = dict(batch_full)
-        mod["fields_full"] = outputs_full
+    mod = dict(batch_full)
+    mod["fields_full"] = outputs_full
     return compute_drag_target_from_batch(mod, surface_factors, device)
 
 
@@ -237,22 +159,40 @@ def main(cfg: DictConfig):
     DistributedManager.initialize()
     dist_manager = DistributedManager()
     logger = RankZeroLoggingWrapper(
-        PythonLogger(name="combined_training"), dist_manager
+        PythonLogger(name="combined_training"), dist_manager,
     )
 
-    # ---- Configurable hyper-parameters with sane defaults ----
+    # ---- Parse config with sane defaults ----
+    head_type = getattr(cfg, "head_type", "gp")
+    use_gp = head_type == "gp"
     gp_warmup_start = getattr(cfg, "gp_warmup_start", 50)
     gp_warmup_end = getattr(cfg, "gp_warmup_end", 60)
     lambda_gp = getattr(cfg, "lambda_gp", 0.01)
     lambda_consistency = getattr(cfg, "lambda_consistency", 1.0)
     consistency_every_n = getattr(cfg, "consistency_every_n_steps", 1)
-    consistency_detach = getattr(cfg, "consistency_detach_transolver", True)
-    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", False)
+    consistency_detach = getattr(cfg, "consistency_detach_transolver", False)
+    use_spectral_norm = getattr(cfg, "spectral_norm_embedding", True)
     n_inducing = getattr(cfg, "n_inducing", 128)
     embed_dim = getattr(cfg, "embed_dim", 32)
     feat_dim = getattr(cfg, "embedding_feat_dim", 256)
     accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
     use_consistency = lambda_consistency > 0
+    mlp_head_hidden_cfg = getattr(cfg, "mlp_head_hidden", None)
+    mlp_head_hidden = (
+        list(mlp_head_hidden_cfg) if mlp_head_hidden_cfg is not None
+        else [256, 256]
+    )
+
+    normalize_embeddings = getattr(cfg, "normalize_embeddings", True)
+    embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
+
+    ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 1.0]))
+    ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
+    ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
+    os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
+    os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
+    mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
+    mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
 
     # ---- Directories and writers ----
     checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or cfg.output_dir
@@ -261,10 +201,10 @@ def main(cfg: DictConfig):
     if dist_manager.rank == 0:
         os.makedirs(ckpt_path, exist_ok=True)
         writer = SummaryWriter(
-            log_dir=f"{cfg.output_dir}/{cfg.run_id}/combined_train"
+            log_dir=f"{cfg.output_dir}/{cfg.run_id}/combined_train",
         )
         val_writer = SummaryWriter(
-            log_dir=f"{cfg.output_dir}/{cfg.run_id}/combined_val"
+            log_dir=f"{cfg.output_dir}/{cfg.run_id}/combined_val",
         )
     else:
         writer = val_writer = None
@@ -272,11 +212,27 @@ def main(cfg: DictConfig):
     logger.info(f"Config:\n{omegaconf.OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info(f"Output directory: {cfg.output_dir}/{cfg.run_id}")
     logger.info(f"Checkpoint directory: {ckpt_path}")
+    logger.info(f"Head type: {head_type}")
     logger.info(
-        f"GP warmup: epochs {gp_warmup_start}-{gp_warmup_end}, "
-        f"lambda_gp={lambda_gp}, lambda_consistency={lambda_consistency}, "
+        f"Warmup: epochs {gp_warmup_start}-{gp_warmup_end}, "
+        f"lambda_head={lambda_gp}, lambda_consistency={lambda_consistency}, "
         f"consistency_detach_transolver={consistency_detach}, "
         f"spectral_norm_embedding={use_spectral_norm}"
+    )
+    logger.info(
+        f"Embedding normalize={normalize_embeddings}, "
+        f"target_scale={embedding_target_scale}"
+    )
+    if use_gp:
+        logger.info(
+            f"GP kernel: lengthscale_range={ls_range}, "
+            f"lengthscale_prior={ls_prior}, outputscale_prior={os_prior}, "
+            f"gp_mlp_hidden={mlp_hidden}"
+        )
+    else:
+        logger.info(f"MLP head hidden: {mlp_head_hidden}")
+    logger.info(
+        "Consistency mode: reuse training forward pass (subsampled mesh)"
     )
 
     precision = cfg.precision
@@ -294,11 +250,13 @@ def main(cfg: DictConfig):
     num_geo_params = sum(p.numel() for p in model.parameters())
     logger.info(f"GeoTransolver parameters: {num_geo_params:,}")
 
-    # ---- Embedding reduction + GP (non-DDP; synced manually) ----
+    # ---- Embedding reduction (non-DDP; synced manually) ----
     pooling_type = cfg.get("embedding_pooling", "attention")
     embedding_reduction = create_embedding_reduction(
         pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
+        normalize=normalize_embeddings,
+        target_scale=embedding_target_scale,
     )
     embedding_reduction.to(dist_manager.device)
 
@@ -334,16 +292,12 @@ def main(cfg: DictConfig):
         )
         cfg_data_full.resolution = None
         cfg_data_full.return_mesh_features = True
-        train_dl_full = create_transolver_dataset(
-            cfg_data_full, phase="train",
-            surface_factors=surface_factors, volume_factors=volume_factors,
-        )
         val_dl_full = create_transolver_dataset(
             cfg_data_full, phase="val",
             surface_factors=surface_factors, volume_factors=volume_factors,
         )
     else:
-        train_dl_full = val_dl_full = None
+        val_dl_full = None
 
     # ---- Distributed samplers ----
     num_replicas = dist_manager.world_size
@@ -357,17 +311,27 @@ def main(cfg: DictConfig):
         shuffle=False, drop_last=True,
     )
 
-    # ---- GP (needs n_train) ----
+    # ---- Drag head (GP or MLP) ----
     n_train = len(train_dl)
-    gp = DragGP(
-        embed_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
-    )
-    gp.to(dist_manager.device)
-    num_gp_params = (
+    if use_gp:
+        head = VariationalGPHead(
+            input_dim=embed_dim, n_inducing=n_inducing, n_train=n_train,
+            lengthscale_range=ls_range,
+            lengthscale_prior=ls_prior,
+            outputscale_prior=os_prior,
+            mlp_hidden=mlp_hidden,
+        )
+    else:
+        head = DragMLP(input_dim=embed_dim, hidden=mlp_head_hidden)
+    head.to(dist_manager.device)
+    num_head_params = (
         sum(p.numel() for p in embedding_reduction.parameters())
-        + sum(p.numel() for p in gp.parameters())
+        + sum(p.numel() for p in head.parameters())
     )
-    logger.info(f"Embedding reduction + GP parameters: {num_gp_params:,}")
+    logger.info(
+        f"Embedding reduction + {head_type.upper()} head parameters: "
+        f"{num_head_params:,}"
+    )
 
     # ---- Optimizer ----
     geo_muon_params = [p for p in model.parameters() if p.ndim == 2]
@@ -382,16 +346,24 @@ def main(cfg: DictConfig):
         weight_decay=cfg.training.optimizer.weight_decay,
         adjust_lr_fn="match_rms_adamw",
     )
-    gp_opt = torch.optim.AdamW(
-        [
+    if use_gp:
+        head_param_groups = [
             {"params": embedding_reduction.parameters(), "lr": 1e-3},
-            {"params": gp.gp_layer.variational_parameters(), "lr": 1e-2},
-            {"params": gp.gp_layer.hyperparameters(), "lr": 1e-2},
-            {"params": gp.likelihood.parameters(), "lr": 1e-2},
-        ],
-        weight_decay=1e-4,
-    )
-    optimizer = CombinedOptimizer([geo_muon, geo_adamw, gp_opt])
+            {"params": head.gp_layer.variational_parameters(), "lr": 1e-2},
+            {"params": head.gp_layer.hyperparameters(), "lr": 1e-2},
+            {"params": head.likelihood.parameters(), "lr": 1e-2},
+        ]
+        if head.feature_extractor is not None:
+            head_param_groups.append(
+                {"params": head.feature_extractor.parameters(), "lr": 1e-3}
+            )
+    else:
+        head_param_groups = [
+            {"params": embedding_reduction.parameters(), "lr": 1e-3},
+            {"params": head.parameters(), "lr": 1e-3},
+        ]
+    head_opt = torch.optim.AdamW(head_param_groups, weight_decay=1e-4)
+    optimizer = CombinedOptimizer([geo_muon, geo_adamw, head_opt])
 
     # ---- Scheduler ----
     scheduler_params = dict(cfg.training.scheduler.params)
@@ -408,14 +380,13 @@ def main(cfg: DictConfig):
         "path": ckpt_path,
         "optimizer": optimizer,
         "scheduler": scheduler,
-        "models": [model, embedding_reduction, gp],
+        "models": [model, embedding_reduction, head],
     }
     loaded_epoch = load_checkpoint(device=dist_manager.device, **ckpt_args)
-    inducing_reinit_done = loaded_epoch > gp_warmup_start
+    inducing_reinit_done = (not use_gp) or loaded_epoch > gp_warmup_start
 
     chunk_size = getattr(cfg.data, "resolution", 51200) or 51200
 
-    # Field-metric modes (surface / volume / combined)
     data_mode = cfg.data.mode
     if data_mode == "combined":
         modes = ["surface", "volume"]
@@ -424,7 +395,9 @@ def main(cfg: DictConfig):
     else:
         modes = ["volume"]
 
-    # ---- Training loop ----
+    # ==================================================================
+    # Training loop
+    # ==================================================================
     logger.info("Starting combined training ...")
     for epoch in range(loaded_epoch, cfg.training.num_epochs):
         train_sampler.set_epoch(epoch)
@@ -433,48 +406,41 @@ def main(cfg: DictConfig):
         val_indices = list(val_sampler)
         train_dl.dataset.set_indices(train_indices)
         val_dl.dataset.set_indices(val_indices)
-        if use_consistency:
-            train_dl_full.dataset.set_indices(train_indices)
+        if val_dl_full is not None:
             val_dl_full.dataset.set_indices(val_indices)
 
         epoch_len = len(train_indices)
         w_gp = gp_ramp_weight(epoch, gp_warmup_start, gp_warmup_end)
 
-        # Re-initialise inducing points once at warmup start
-        if epoch == gp_warmup_start and not inducing_reinit_done:
+        if use_gp and epoch == gp_warmup_start and not inducing_reinit_done:
             reinitialize_inducing_points(
-                model, embedding_reduction, gp, train_dl,
+                model, embedding_reduction, head, train_dl,
                 n_inducing, n_train, train_indices,
                 precision, dist_manager.device, logger,
             )
             inducing_reinit_done = True
 
-        # Accumulators
         epoch_mse = 0.0
-        epoch_gp_loss = 0.0
+        epoch_head_loss = 0.0
         epoch_consistency = 0.0
         epoch_total = 0.0
-        epoch_gp_train_mse = 0.0
+        epoch_head_train_mse = 0.0
 
         model.train()
         embedding_reduction.train()
-        gp.train()
-        gp.likelihood.train()
+        head.train()
+        if use_gp:
+            head.likelihood.train()
 
-        full_iter = iter(train_dl_full) if use_consistency else None
         start_time = time.time()
 
         for i, batch in enumerate(train_dl):
-            # Keep full-res iter in sync even if we skip the consistency loss
-            batch_full = next(full_iter) if full_iter is not None else None
-
             features = cast_precisions(batch["fx"], precision)
             embeddings = cast_precisions(batch["embeddings"], precision)
             targets = batch["fields"]
             geometry = (
                 cast_precisions(batch["geometry"], precision)
-                if "geometry" in batch
-                else None
+                if "geometry" in batch else None
             )
 
             # ---- GeoTransolver forward (with grad) ----
@@ -486,11 +452,12 @@ def main(cfg: DictConfig):
 
                 if geometry is not None:
                     local_positions = embeddings[:, :, :3]
-                    outputs, _, embedding_states = model(
+                    outputs, embedding_states = model(
                         global_embedding=features,
                         local_embedding=embeddings,
                         geometry=geometry,
                         local_positions=local_positions,
+                        return_embedding_states=True,
                     )
                     outputs = unpad_output_for_fp8(outputs, output_pad_size)
                     mse_loss = torch.mean(loss_fn(outputs, targets))
@@ -506,9 +473,9 @@ def main(cfg: DictConfig):
                     "Combined training requires a GeoTransolver (geometry) model."
                 )
 
-            # ---- GP ELBO loss ----
-            gp_loss_val = 0.0
-            gp_train_mse_val = 0.0
+            # ---- Head loss (GP ELBO or MLP MSE) ----
+            head_loss_val = 0.0
+            head_train_mse_val = 0.0
 
             if w_gp > 0:
                 reduced = embedding_reduction(embedding_states.flatten(1, 2))
@@ -516,34 +483,31 @@ def main(cfg: DictConfig):
                     batch, surface_factors, dist_manager.device,
                 ).to(reduced.dtype)
 
-                gp_dist = gp(reduced)
-                gp_mean = gp_dist.mean
-                gp_loss = -gp.mll(gp_dist, drag_target)
+                head_mean, head_loss = head.forward_and_loss(reduced, drag_target)
 
                 with torch.no_grad():
-                    gp_train_mse_val = F.mse_loss(gp_mean, drag_target).item()
-                gp_loss_val = gp_loss.detach().item()
+                    head_train_mse_val = F.mse_loss(
+                        head_mean, drag_target
+                    ).item()
+                head_loss_val = head_loss.detach().item()
             else:
-                gp_loss = torch.tensor(0.0, device=dist_manager.device)
-                gp_mean = None
+                head_loss = torch.tensor(0.0, device=dist_manager.device)
+                head_mean = None
 
             # ---- Consistency loss ----
             c_loss_val = 0.0
             if (
                 use_consistency
                 and w_gp > 0
-                and gp_mean is not None
-                and batch_full is not None
+                and head_mean is not None
                 and (i % consistency_every_n == 0)
             ):
-                transolver_cd = compute_transolver_drag_full_mesh(
-                    batch_full, model, chunk_size,
-                    surface_factors, dist_manager.device, precision,
-                    detach=consistency_detach,
-                ).to(gp_mean.dtype)
+                transolver_cd = compute_drag_from_subsampled_outputs(
+                    outputs, batch, surface_factors, dist_manager.device,
+                ).to(head_mean.dtype)
                 if consistency_detach:
                     transolver_cd = transolver_cd.detach()
-                c_loss = F.mse_loss(gp_mean, transolver_cd)
+                c_loss = F.mse_loss(head_mean, transolver_cd)
                 c_loss_val = c_loss.detach().item()
             else:
                 c_loss = torch.tensor(0.0, device=dist_manager.device)
@@ -551,7 +515,7 @@ def main(cfg: DictConfig):
             # ---- Weighted total ----
             total_loss = (
                 mse_loss
-                + w_gp * lambda_gp * gp_loss
+                + w_gp * lambda_gp * head_loss
                 + w_gp * lambda_consistency * c_loss
             )
 
@@ -572,7 +536,7 @@ def main(cfg: DictConfig):
 
             if is_step_boundary:
                 sync_non_ddp_gradients(
-                    [embedding_reduction, gp], dist_manager.world_size,
+                    [embedding_reduction, head], dist_manager.world_size,
                 )
                 if scaler is not None:
                     scaler.step(optimizer)
@@ -584,10 +548,10 @@ def main(cfg: DictConfig):
             mse_val = mse_loss.detach().item()
             total_val = total_loss.detach().item()
             epoch_mse += mse_val
-            epoch_gp_loss += gp_loss_val
+            epoch_head_loss += head_loss_val
             epoch_consistency += c_loss_val
             epoch_total += total_val
-            epoch_gp_train_mse += gp_train_mse_val
+            epoch_head_train_mse += head_train_mse_val
 
             end_time = time.time()
             duration = end_time - start_time
@@ -595,22 +559,20 @@ def main(cfg: DictConfig):
 
             logger.info(
                 f"Epoch {epoch} [{i}/{epoch_len}] "
-                f"Loss: {mse_val:.6f}  GP Loss: {gp_loss_val:.6f}  "
+                f"Loss: {mse_val:.6f}  Head Loss: {head_loss_val:.6f}  "
                 f"Cons Loss: {c_loss_val:.6f}  Total Loss: {total_val:.6f}  "
-                f"Train MSE: {gp_train_mse_val:.6f}  w_gp: {w_gp:.3f}  "
+                f"Train MSE: {head_train_mse_val:.6f}  w_gp: {w_gp:.3f}  "
                 f"Duration: {duration:.2f}s"
             )
 
             if dist_manager.rank == 0 and writer is not None:
                 gs = i + epoch_len * epoch
                 writer.add_scalar("batch/mse_loss", mse_val, gs)
-                writer.add_scalar("batch/gp_loss", gp_loss_val, gs)
+                writer.add_scalar("batch/head_loss", head_loss_val, gs)
                 writer.add_scalar("batch/consistency_loss", c_loss_val, gs)
                 writer.add_scalar("batch/total_loss", total_val, gs)
-                writer.add_scalar("batch/gp_train_mse", gp_train_mse_val, gs)
-                writer.add_scalar(
-                    "batch/gp_weight", w_gp * lambda_gp, gs,
-                )
+                writer.add_scalar("batch/head_train_mse", head_train_mse_val, gs)
+                writer.add_scalar("batch/head_weight", w_gp * lambda_gp, gs)
                 writer.add_scalar(
                     "batch/consistency_weight", w_gp * lambda_consistency, gs,
                 )
@@ -620,64 +582,70 @@ def main(cfg: DictConfig):
                 )
 
         # ---- Epoch-level training summary ----
-        avg_mse = epoch_mse / max(epoch_len, 1)
-        avg_gp = epoch_gp_loss / max(epoch_len, 1)
-        avg_cons = epoch_consistency / max(epoch_len, 1)
-        avg_total = epoch_total / max(epoch_len, 1)
-        avg_gp_mse = epoch_gp_train_mse / max(epoch_len, 1)
+        n = max(epoch_len, 1)
+        avg_mse = epoch_mse / n
+        avg_head = epoch_head_loss / n
+        avg_cons = epoch_consistency / n
+        avg_total = epoch_total / n
+        avg_head_mse = epoch_head_train_mse / n
 
         logger.info(
             f"Epoch [{epoch}/{cfg.training.num_epochs}] "
-            f"Avg Train GP Loss: {avg_gp:.6f}  Avg Train MSE: {avg_gp_mse:.6f}  "
-            f"Avg Field MSE: {avg_mse:.6f}  Avg Cons Loss: {avg_cons:.6f}  "
+            f"Avg Train Head Loss: {avg_head:.6f}  "
+            f"Avg Train MSE: {avg_head_mse:.6f}  "
+            f"Avg Field MSE: {avg_mse:.6f}  "
+            f"Avg Cons Loss: {avg_cons:.6f}  "
             f"Avg Total Loss: {avg_total:.6f}"
         )
 
         if dist_manager.rank == 0 and writer is not None:
             writer.add_scalar("epoch/mse_loss", avg_mse, epoch)
-            writer.add_scalar("epoch/gp_loss", avg_gp, epoch)
+            writer.add_scalar("epoch/head_loss", avg_head, epoch)
             writer.add_scalar("epoch/consistency_loss", avg_cons, epoch)
             writer.add_scalar("epoch/total_loss", avg_total, epoch)
-            writer.add_scalar("epoch/gp_train_mse", avg_gp_mse, epoch)
-            writer.add_scalar("epoch/gp_weight", w_gp * lambda_gp, epoch)
+            writer.add_scalar("epoch/head_train_mse", avg_head_mse, epoch)
+            writer.add_scalar("epoch/head_weight", w_gp * lambda_gp, epoch)
             writer.add_scalar(
                 "epoch/consistency_weight", w_gp * lambda_consistency, epoch,
             )
 
         if w_gp > 0:
-            ls = gp.gp_layer.covar_module.base_kernel.lengthscale.detach().cpu()
-            os_ = gp.gp_layer.covar_module.outputscale.detach().cpu().item()
-            noise = gp.likelihood.noise.detach().cpu().item()
-            logger.info(
-                f"  GP hypers — lengthscale: min={ls.min():.4f} "
-                f"max={ls.max():.4f} mean={ls.mean():.4f} | "
-                f"outputscale={os_:.6f} | noise={noise:.6f}"
-            )
-            logger.info(
-                f"  last-batch embedding norm: {reduced.detach().norm(dim=1).mean():.4f}"
-            )
-            if dist_manager.rank == 0 and writer is not None:
-                writer.add_scalar(
-                    "epoch/gp_lengthscale_mean", ls.mean().item(), epoch,
+            if use_gp:
+                ls = head.gp_layer.covar_module.base_kernel.lengthscale.detach().cpu()
+                os_ = head.gp_layer.covar_module.outputscale.detach().cpu().item()
+                noise = head.likelihood.noise.detach().cpu().item()
+                logger.info(
+                    f"  GP hypers — lengthscale: min={ls.min():.4f} "
+                    f"max={ls.max():.4f} mean={ls.mean():.4f} | "
+                    f"outputscale={os_:.6f} | noise={noise:.6f}"
                 )
-                writer.add_scalar("epoch/gp_outputscale", os_, epoch)
-                writer.add_scalar("epoch/gp_noise", noise, epoch)
+                if dist_manager.rank == 0 and writer is not None:
+                    writer.add_scalar(
+                        "epoch/gp_lengthscale_mean", ls.mean().item(), epoch,
+                    )
+                    writer.add_scalar("epoch/gp_outputscale", os_, epoch)
+                    writer.add_scalar("epoch/gp_noise", noise, epoch)
+            logger.info(
+                f"  last-batch embedding norm: "
+                f"{reduced.detach().norm(dim=1).mean():.4f}"
+            )
 
-        # ================================================================
+        # ==============================================================
         # Validation
-        # ================================================================
+        # ==============================================================
         model.eval()
         embedding_reduction.eval()
-        gp.eval()
-        gp.likelihood.eval()
+        head.eval()
+        if use_gp:
+            head.likelihood.eval()
 
         val_epoch_len = len(val_indices)
         val_mse_sum = 0.0
-        val_gp_mse_sum = 0.0
+        val_head_mse_sum = 0.0
         val_consistency_gap_sum = 0.0
         val_metrics_sum: dict[str, float] = {}
 
-        full_val_iter = iter(val_dl_full) if use_consistency else None
+        full_val_iter = iter(val_dl_full) if val_dl_full is not None else None
 
         with torch.no_grad():
             for vi, batch in enumerate(val_dl):
@@ -690,8 +658,7 @@ def main(cfg: DictConfig):
                 targets = batch["fields"]
                 geometry = (
                     cast_precisions(batch["geometry"], precision)
-                    if "geometry" in batch
-                    else None
+                    if "geometry" in batch else None
                 )
 
                 with get_autocast_context(precision):
@@ -701,18 +668,18 @@ def main(cfg: DictConfig):
                         )
 
                     local_positions = embeddings_v[:, :, :3]
-                    outputs, _, emb_states_v = model(
+                    outputs, emb_states_v = model(
                         global_embedding=features,
                         local_embedding=embeddings_v,
                         geometry=geometry,
                         local_positions=local_positions,
+                        return_embedding_states=True,
                     )
                     outputs = unpad_output_for_fp8(outputs, output_pad_size)
                     val_mse = torch.mean(loss_fn(outputs, targets)).item()
 
                 val_mse_sum += val_mse
 
-                # Per-field metrics (unscaled)
                 air_density = batch.get("air_density", None)
                 stream_velocity = batch.get("stream_velocity", None)
                 unscaled_out = tensorwise(val_dl.unscale_model_targets)(
@@ -744,17 +711,15 @@ def main(cfg: DictConfig):
                             val_metrics_sum.get(k, 0.0) + float(step_metrics[k])
                         )
 
-                # GP drag validation
                 reduced_v = embedding_reduction(emb_states_v.flatten(1, 2))
                 drag_target_v = compute_drag_target_from_batch(
                     batch, surface_factors, dist_manager.device,
                 ).to(reduced_v.dtype)
 
-                pred_mean, pred_var, _, _ = gp.predict(reduced_v)
-                val_gp_mse = F.mse_loss(pred_mean, drag_target_v).item()
-                val_gp_mse_sum += val_gp_mse
+                pred_mean, pred_var, _, _ = head.predict(reduced_v)
+                val_head_mse = F.mse_loss(pred_mean, drag_target_v).item()
+                val_head_mse_sum += val_head_mse
 
-                # Consistency gap
                 if batch_full_v is not None:
                     trans_cd = compute_transolver_drag_full_mesh(
                         batch_full_v, model, chunk_size,
@@ -765,19 +730,19 @@ def main(cfg: DictConfig):
 
                 logger.info(
                     f"Val [{vi}/{val_epoch_len}] "
-                    f"Field MSE: {val_mse:.6f}  GP MSE: {val_gp_mse:.6f}"
+                    f"Field MSE: {val_mse:.6f}  Head MSE: {val_head_mse:.6f}"
                 )
 
         # ---- Epoch-level validation summary ----
-        n = max(val_epoch_len, 1)
-        avg_val_mse = val_mse_sum / n
-        avg_val_gp_mse = val_gp_mse_sum / n
-        avg_val_gap = val_consistency_gap_sum / n
-        avg_val_metrics = {k: v / n for k, v in val_metrics_sum.items()}
+        vn = max(val_epoch_len, 1)
+        avg_val_mse = val_mse_sum / vn
+        avg_val_head_mse = val_head_mse_sum / vn
+        avg_val_gap = val_consistency_gap_sum / vn
+        avg_val_metrics = {k: v / vn for k, v in val_metrics_sum.items()}
 
         logger.info(
             f"Epoch [{epoch}/{cfg.training.num_epochs}] "
-            f"Avg Val GP MSE: {avg_val_gp_mse:.6f}  "
+            f"Avg Val Head MSE: {avg_val_head_mse:.6f}  "
             f"Avg Val Field MSE: {avg_val_mse:.6f}  "
             f"Avg Val Consistency Gap: {avg_val_gap:.6f}"
         )
@@ -791,10 +756,8 @@ def main(cfg: DictConfig):
 
         if dist_manager.rank == 0 and val_writer is not None:
             val_writer.add_scalar("epoch/mse_loss", avg_val_mse, epoch)
-            val_writer.add_scalar("epoch/gp_mse", avg_val_gp_mse, epoch)
-            val_writer.add_scalar(
-                "epoch/consistency_gap", avg_val_gap, epoch,
-            )
+            val_writer.add_scalar("epoch/head_mse", avg_val_head_mse, epoch)
+            val_writer.add_scalar("epoch/consistency_gap", avg_val_gap, epoch)
             for mk, mv in avg_val_metrics.items():
                 val_writer.add_scalar(f"epoch/{mk}", mv, epoch)
 
@@ -808,7 +771,11 @@ def main(cfg: DictConfig):
     logger.info("Training completed!")
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="geotransolver_surface_combined")
+@hydra.main(
+    version_base=None,
+    config_path="conf",
+    config_name="geotransolver_surface_gp",
+)
 def launch(cfg: DictConfig):
     main(cfg)
 

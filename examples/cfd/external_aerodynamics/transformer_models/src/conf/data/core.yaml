@@ -16,34 +16,9 @@
 
 # Paths to your data:
 train:
-  data_path:  /data/datasets/drivaerstar/surface_files_zarr/class_F/train
+  data_path:  /lustre/fsw/portfolios/coreai/projects/coreai_modulus_cae/datasets/drivaer_aws/domino/train/
 val:
-  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_F/val
-
-# OOD test splits (used only by plot_gp_predictions.py)
-# All keys matching "test_*" are auto-discovered by the script.
-test_notchback:
-  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_N/val
-test_estateback:
-  data_path: /data/datasets/drivaerstar/surface_files_zarr/class_E/val
-# test_suv:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_suv_zarr
-# test_sedan:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sedan_zarr
-# test_pickup:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_pickup_zarr
-# test_hatchback:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_hatchback_zarr
-# test_van:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_van_zarr
-# test_sports_car:
-#   data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_sports_car_zarr
-test_drivaerml:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_drivaerml_100_zarr
-test_shiftsuv_estate:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_estate_100_zarr
-test_shiftsuv_fastback:
-  data_path: /workspace/active_learning/modulus/examples/cfd/external_aerodynamics/transformer_models/test_shiftsuv_fastback_100_zarr
+  data_path: /lustre/fsw/portfolios/coreai/projects/coreai_modulus_cae/datasets/drivaer_aws/domino/val/
 
 # You can set a normalization factor directory:
 normalization_dir: "src/"
@@ -54,9 +29,8 @@ preload_depth: 1
 # Pin memory for GPU transfers?
 pin_memory: true
 
-# Sampling resolution of the point clouds (number of surface points per sample).
-# Lower this if you hit OOM; 100_000 is very large. Try 8192 or 4096 for a 44GB GPU.
-resolution: 51200
+# Sampling resolution of the point clouds:
+resolution: 200_000
 
 # Surface / Volume / (combined, if supported)
 mode: ???
@@ -82,5 +56,4 @@ broadcast_global_features: true
 
 # Return the mesh areas and normals?  You don't usually want this for training.
 # We switch it on automatically for inference.
-return_mesh_features: true
-
+return_mesh_features: false

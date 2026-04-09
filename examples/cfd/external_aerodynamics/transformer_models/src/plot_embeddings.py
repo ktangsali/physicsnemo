@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""
-Visualize GeoTransolver embedding distributions from a combined-trained model.
+"""Visualize GeoTransolver embedding distributions from a combined-trained model.
 
 Produces three figures:
   1. embedding_comparison.png  — per-sample line plot (first 10 dims, both poolings)
   2. embedding_histograms.png  — histogram grid of ALL reduced dimensions
   3. embedding_summary.png     — per-dimension mean±std bars and box plots
 
-Usage (from transformer_models/src):
-  python plot_embeddings.py
-  python plot_embeddings.py checkpoint_dir=/path/to/runs run_id=my_run
+Usage (from transformer_models/src)::
+
+    python plot_embeddings.py
+    python plot_embeddings.py checkpoint_dir=/path/to/runs run_id=my_run
 
 Output: saves to <output_dir>/<run_id>/
 """
@@ -25,7 +25,6 @@ import omegaconf
 import torch
 from omegaconf import DictConfig
 
-# Allowlist for torch.load(weights_only=True) when loading checkpoints (PyTorch 2.6+)
 torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
 torch.serialization.add_safe_globals([omegaconf.base.ContainerMetadata])
 torch.serialization.add_safe_globals([Any])
@@ -40,11 +39,11 @@ from physicsnemo.distributed import DistributedManager
 from physicsnemo.datapipes.cae.transolver_datapipe import create_transolver_dataset
 from physicsnemo.utils import load_checkpoint
 
-from train_variational_gp import (
+from gp_utils import (
     apply_spectral_norm_to_model,
+    cast_precisions,
     create_embedding_reduction,
     load_pretrained_model_only,
-    cast_precisions,
 )
 
 N_DIMS_LINE_PLOT = 10
@@ -180,7 +179,11 @@ def plot_summary_stats(
     plt.close(fig)
 
 
-@hydra.main(version_base=None, config_path="conf", config_name="geotransolver_surface_combined")
+@hydra.main(
+    version_base=None,
+    config_path="conf",
+    config_name="geotransolver_surface_gp",
+)
 def main(cfg: DictConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DistributedManager.initialize()
@@ -191,7 +194,7 @@ def main(cfg: DictConfig) -> None:
 
     if not use_combined:
         pretrained_ckpt_path = getattr(
-            cfg, "pretrained_checkpoint_path", None
+            cfg, "pretrained_checkpoint_path", None,
         ) or f"{checkpoint_dir}/{cfg.run_id}/checkpoints"
         gp_ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_gp"
 
@@ -208,10 +211,8 @@ def main(cfg: DictConfig) -> None:
     }
 
     val_dataloader = create_transolver_dataset(
-        cfg.data,
-        phase="val",
-        surface_factors=surface_factors,
-        volume_factors=None,
+        cfg.data, phase="val",
+        surface_factors=surface_factors, volume_factors=None,
     )
 
     feat_dim = getattr(cfg, "embedding_feat_dim", 256)
@@ -229,9 +230,7 @@ def main(cfg: DictConfig) -> None:
     normalize_embeddings = getattr(cfg, "normalize_embeddings", False)
     embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
     embedding_reduction_model = create_embedding_reduction(
-        pooling=pooling_type,
-        feat_dim=feat_dim,
-        embed_dim=embed_dim,
+        pooling=pooling_type, feat_dim=feat_dim, embed_dim=embed_dim,
         spectral_norm=use_spectral_norm,
         normalize=normalize_embeddings,
         target_scale=embedding_target_scale,
@@ -264,23 +263,26 @@ def main(cfg: DictConfig) -> None:
         for batch in val_dataloader:
             features = batch["fx"]
             embeddings = batch["embeddings"]
-            if "geometry" in batch:
-                geometry = cast_precisions(batch["geometry"], precision)
-            else:
-                geometry = None
+            geometry = (
+                cast_precisions(batch["geometry"], precision)
+                if "geometry" in batch else None
+            )
             features = cast_precisions(features, precision)
             embeddings = cast_precisions(embeddings, precision)
             local_positions = embeddings[:, :, :3]
 
-            _, learned_embeddings, embedding_states = model(
+            _, embedding_states = model(
                 global_embedding=features,
                 local_embedding=embeddings,
                 geometry=geometry,
                 local_positions=local_positions,
+                return_embedding_states=True,
             )
 
             mean_pooled = embedding_states.flatten(1, 2).mean(dim=1)
-            attn_pooled = embedding_reduction_model(embedding_states.flatten(1, 2))
+            attn_pooled = embedding_reduction_model(
+                embedding_states.flatten(1, 2)
+            )
 
             mean_embeds_list.append(mean_pooled.cpu().numpy())
             attn_embeds_list.append(attn_pooled.cpu().numpy())

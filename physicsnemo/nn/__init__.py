@@ -108,6 +108,7 @@ from .module.transformer_layers import (
     FuserLayer,
     SwinTransformer,
 )
+from .module.pooling import AttentionPooling, MeanPooling
 from .module.unet_layers import UNetBlock
 from .module.weight_fact import WeightFactLinear
 from .module.weight_norm import WeightNormLinear
