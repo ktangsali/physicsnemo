@@ -275,10 +275,11 @@ torchrun --nproc_per_node=8 \
     ++data.train.data_path=/path/to/surface_files_zarr/class_F/train \
     ++data.val.data_path=/path/to/surface_files_zarr/class_F/val \
     ++data.resolution=51200 \
+    ++data.geometry_sampling=51200 \
     ++data.return_mesh_features=true
 ```
 
-The default config (`geotransolver_surface_gp.yaml`) includes tuned GP hyperparameter priors and embedding normalization settings.  The data-path overrides above point to the [DrivAerStar](https://arxiv.org/abs/2510.16857) surface zarr files; `resolution=51200` subsamples each mesh to fit in GPU memory (the base config defaults to 200k for the original DrivaerML dataset).
+The default config (`geotransolver_surface_gp.yaml`) includes tuned GP hyperparameter priors and embedding normalization settings.  The data-path overrides above point to the [DrivAerStar](https://arxiv.org/abs/2510.16857) surface zarr files; `resolution` and `geometry_sampling` are lowered from the defaults (200k / 300k) to 51200 to fit in GPU memory.
 
 ### Evaluation and OOD Detection
 
@@ -291,6 +292,7 @@ python src/plot_gp_predictions.py \
     ++data.train.data_path=/path/to/surface_files_zarr/class_F/train \
     ++data.val.data_path=/path/to/surface_files_zarr/class_F/val \
     ++data.resolution=51200 \
+    ++data.geometry_sampling=51200 \
     ++data.return_mesh_features=true \
     ++data.test_notchback.data_path=/path/to/surface_files_zarr/class_N/val \
     ++data.test_estateback.data_path=/path/to/surface_files_zarr/class_E/val
