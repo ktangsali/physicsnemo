@@ -223,6 +223,7 @@ def plot_summary_stats(
     config_name="geotransolver_surface_gp",
 )
 def main(cfg: DictConfig) -> None:
+    """Load model and plot embedding distributions from a trained checkpoint."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DistributedManager.initialize()
 

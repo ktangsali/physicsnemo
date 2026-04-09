@@ -67,6 +67,7 @@ DRAG_COEFF_SCALE = 0.35  # GP target = Cd / DRAG_COEFF_SCALE
 # Force-coefficient computation
 # ---------------------------------------------------------------------------
 
+
 def compute_force_coefficients_torch(
     normals: torch.Tensor,
     area: torch.Tensor,
@@ -99,7 +100,9 @@ def compute_force_coefficients_torch(
     """
     if force_direction is None:
         force_direction = torch.tensor(
-            [1.0, 0.0, 0.0], device=normals.device, dtype=normals.dtype,
+            [1.0, 0.0, 0.0],
+            device=normals.device,
+            dtype=normals.dtype,
         )
     area = area.view(-1)
     n_dot_f = (normals * force_direction).sum(dim=-1)
@@ -137,7 +140,7 @@ def compute_drag_target_from_batch(
     area = batch["surface_areas"].squeeze(0).to(device, dtype=fields_phys.dtype)
     p, wss = p.to(device), wss.to(device)
 
-    coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY ** 2)
+    coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY**2)
     c_total, _, _ = compute_force_coefficients_torch(normals, area, coeff, p, wss)
     return (c_total / drag_scale).unsqueeze(0)
 
@@ -155,21 +158,29 @@ def compute_drag_from_subsampled_outputs(
     flow back into the GeoTransolver.  Returns ``(1,)`` in GP-scaled space.
     """
     fields_phys = unstandardize(
-        outputs, surface_factors["mean"], surface_factors["std"],
+        outputs,
+        surface_factors["mean"],
+        surface_factors["std"],
     ).squeeze(0)
     p = fields_phys[:, 0]
     wss = fields_phys[:, 1:4]
 
-    normals = batch["surface_normals_sub"].squeeze(0).to(device, dtype=fields_phys.dtype)
+    normals = (
+        batch["surface_normals_sub"].squeeze(0).to(device, dtype=fields_phys.dtype)
+    )
     areas = batch["surface_areas_sub"].squeeze(0).to(device, dtype=fields_phys.dtype)
 
     n_full = batch["surface_areas"].squeeze(0).shape[0]
     n_sub = p.shape[0]
-    coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY ** 2)
+    coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY**2)
     scale = n_full / n_sub
 
     c_total, _, _ = compute_force_coefficients_torch(
-        normals, areas, coeff * scale, p, wss,
+        normals,
+        areas,
+        coeff * scale,
+        p,
+        wss,
     )
     return (c_total / drag_scale).unsqueeze(0)
 
@@ -177,6 +188,7 @@ def compute_drag_from_subsampled_outputs(
 # ---------------------------------------------------------------------------
 # DragMLP — simple baseline head
 # ---------------------------------------------------------------------------
+
 
 class DragMLP(nn.Module):
     """Simple MLP head for drag prediction — drop-in replacement for GP head.
@@ -210,19 +222,24 @@ class DragMLP(nn.Module):
         return self.net(embedding).squeeze(-1)
 
     def forward_and_loss(
-        self, embedding: torch.Tensor, target: torch.Tensor,
+        self,
+        embedding: torch.Tensor,
+        target: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         pred = self.forward(embedding)
         return pred, F.mse_loss(pred, target)
 
     def loss(self, embedding: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute MSE loss between predicted and target drag."""
         _, mse = self.forward_and_loss(embedding, target)
         return mse
 
     @torch.no_grad()
     def predict(
-        self, embedding: torch.Tensor,
+        self,
+        embedding: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Predict drag with zero variance (MLP has no uncertainty estimate)."""
         self.eval()
         pred = self.forward(embedding)
         zeros = torch.zeros_like(pred)
@@ -232,6 +249,7 @@ class DragMLP(nn.Module):
 # ---------------------------------------------------------------------------
 # Embedding-reduction factory
 # ---------------------------------------------------------------------------
+
 
 def create_embedding_reduction(
     pooling: Literal["attention", "mean"],
@@ -258,16 +276,20 @@ def create_embedding_reduction(
     """
     if pooling == "attention":
         return AttentionPooling(
-            feat_dim=feat_dim, embed_dim=embed_dim,
+            feat_dim=feat_dim,
+            embed_dim=embed_dim,
             spectral_norm=spectral_norm,
-            normalize=normalize, target_scale=target_scale,
+            normalize=normalize,
+            target_scale=target_scale,
             **kwargs,
         )
     if pooling == "mean":
         return MeanPooling(
-            feat_dim=feat_dim, embed_dim=embed_dim,
+            feat_dim=feat_dim,
+            embed_dim=embed_dim,
             spectral_norm=spectral_norm,
-            normalize=normalize, target_scale=target_scale,
+            normalize=normalize,
+            target_scale=target_scale,
         )
     raise ValueError(f"Unknown pooling: {pooling!r}. Use 'attention' or 'mean'.")
 
@@ -275,6 +297,7 @@ def create_embedding_reduction(
 # ---------------------------------------------------------------------------
 # GP warmup helpers
 # ---------------------------------------------------------------------------
+
 
 def gp_ramp_weight(epoch: int, warmup_start: int, warmup_end: int) -> float:
     """Linear ramp: 0 before *warmup_start*, 0→1 over [start, end), 1 after."""
@@ -325,7 +348,8 @@ def reinitialize_inducing_points(
         embeddings = cast_precisions(batch["embeddings"], precision)
         geometry = (
             cast_precisions(batch["geometry"], precision)
-            if "geometry" in batch else None
+            if "geometry" in batch
+            else None
         )
         local_positions = embeddings[:, :, :3]
         _, emb_states = model(
@@ -347,9 +371,7 @@ def reinitialize_inducing_points(
 
     vd = head.gp_layer.variational_strategy._variational_distribution
     vd.variational_mean.data.zero_()
-    vd.chol_variational_covar.data.copy_(
-        torch.eye(n_inducing, device=device) * 0.01
-    )
+    vd.chol_variational_covar.data.copy_(torch.eye(n_inducing, device=device) * 0.01)
     logger.info(
         f"Re-initialised {n_inducing} inducing points from current embeddings "
         f"(norm range [{init_embeddings_t.norm(dim=1).min():.4f}, "
@@ -360,6 +382,7 @@ def reinitialize_inducing_points(
 # ---------------------------------------------------------------------------
 # Spectral-norm utilities
 # ---------------------------------------------------------------------------
+
 
 def apply_spectral_norm_to_model(
     model: nn.Module,
@@ -375,9 +398,7 @@ def apply_spectral_norm_to_model(
         if skip_output_proj and "ln_mlp_out" in name:
             continue
         if isinstance(module, nn.Linear):
-            parent_name, attr_name = (
-                name.rsplit(".", 1) if "." in name else ("", name)
-            )
+            parent_name, attr_name = name.rsplit(".", 1) if "." in name else ("", name)
             parent = model.get_submodule(parent_name) if parent_name else model
             wrapped = torch.nn.utils.parametrizations.spectral_norm(module)
             if coeff != 1.0:
@@ -394,6 +415,7 @@ def apply_spectral_norm_to_model(
 # ---------------------------------------------------------------------------
 # Checkpoint loading
 # ---------------------------------------------------------------------------
+
 
 def load_pretrained_model_only(
     model: torch.nn.Module,
@@ -416,7 +438,10 @@ def load_pretrained_model_only(
         if not isinstance(m, physicsnemo.core.Module):
             continue
         file_name = _get_checkpoint_filename(
-            path, base_name=name, index=epoch, model_type="mdlus",
+            path,
+            base_name=name,
+            index=epoch,
+            model_type="mdlus",
         )
         if fs.exists(file_name):
             m.load(file_name)

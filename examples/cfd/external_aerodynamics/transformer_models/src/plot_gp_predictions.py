@@ -113,6 +113,7 @@ def predict_full_mesh_in_chunks(
     config_name="geotransolver_surface_gp",
 )
 def main(cfg: DictConfig) -> None:
+    """Evaluate GP and GeoTransolver drag predictions and generate diagnostic plots."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     DistributedManager.initialize()
 
