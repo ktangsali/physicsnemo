@@ -37,6 +37,7 @@ import torch
 from physicsnemo.core.filesystem import _download_cached, _get_fs
 from physicsnemo.core.meta import ModelMetaData
 from physicsnemo.core.registry import _ENTRYPOINT_TYPES, ModelRegistry
+from physicsnemo.core.version_check import get_physicsnemo_pkg_info
 
 # Used for saving checkpoints of nested modules
 _BASE_CKPT_PREFIX = "__physicsnemo.Module__"
@@ -435,16 +436,17 @@ class Module(torch.nn.Module):
 
     def save(
         self,
-        file_name: Union[str, None] = None,
+        file_name: Path | str | None = None,
         verbose: bool = False,
         legacy_format: bool = False,
+        _state_dict: dict | None = None,
     ) -> None:
         """
         Utility method for saving a ``Module`` instance to a '.mdlus' checkpoint file.
 
         Parameters
         ----------
-        file_name : Union[str,None], optional, default=None
+        file_name : Path | str | None, optional, default=None
             File name to save the model checkpoint to. When ``None`` is provided it will default to
             the model's class name.
         verbose : bool, optional, default=False
@@ -452,6 +454,12 @@ class Module(torch.nn.Module):
         legacy_format : bool, optional, default=False
             Whether to save the model in legacy tar format. If True, saves as tar archive.
             If False (default), saves as zip archive.
+        _state_dict : dict | None, optional, default=None
+            Internal pre-computed state dictionary to save.  When provided the model's
+            own ``state_dict()`` is **not** called and ``state_dict`` is
+            serialized directly.  This is used by
+            :func:`~physicsnemo.utils.checkpoint.save_checkpoint` to pass a
+            pre-gathered full state dictionary for FSDP / DTensor models.
 
         Raises
         ------
@@ -537,30 +545,25 @@ class Module(torch.nn.Module):
 
             return
 
-        if file_name is not None and not file_name.endswith(self._file_extension):
-            raise ValueError(
-                f"File name must end with {self._file_extension} extension"
-            )
+        if file_name is not None:
+            file_name = str(file_name)
+            if not file_name.endswith(self._file_extension):
+                raise ValueError(
+                    f"File name must end with {self._file_extension} extension"
+                )
 
         # Strip out torch dynamo wrapper
         if isinstance(self, torch._dynamo.eval_frame.OptimizedModule):
             self._orig_mod.save(file_name, verbose)
             return
 
-        # Save the physicsnemo version and git hash (if available)
+        pkg_info = get_physicsnemo_pkg_info()
         metadata_info = {
-            "physicsnemo_version": importlib.metadata.version("nvidia-physicsnemo"),
+            "physicsnemo_version": pkg_info["version"],
             "mdlus_file_version": self.__model_checkpoint_version__,
         }
-
         if verbose:
-            import git
-
-            try:
-                repo = git.Repo(search_parent_directories=True)
-                metadata_info["git_hash"] = repo.head.object.hexsha
-            except git.InvalidGitRepositoryError:
-                metadata_info["git_hash"] = None
+            metadata_info["git_hash"] = pkg_info["git_hash"]
 
         # Copy self._args to avoid side effects
         _args = self._args.copy()
@@ -585,7 +588,8 @@ class Module(torch.nn.Module):
                 with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as archive:
                     # Save model state dict
                     state_dict_buffer = io.BytesIO()
-                    torch.save(self.state_dict(), state_dict_buffer)
+                    _sd = _state_dict if _state_dict is not None else self.state_dict()
+                    torch.save(_sd, state_dict_buffer)
                     archive.writestr("model.pt", state_dict_buffer.getvalue())
 
                     # Save args
@@ -608,7 +612,8 @@ class Module(torch.nn.Module):
                 local_path = Path(temp_dir)
 
                 # Save model state dict
-                torch.save(self.state_dict(), local_path / "model.pt")
+                _sd = _state_dict if _state_dict is not None else self.state_dict()
+                torch.save(_sd, local_path / "model.pt")
 
                 # Save args
                 with open(local_path / "args.json", "w") as f:
@@ -673,7 +678,7 @@ class Module(torch.nn.Module):
 
     def load(
         self,
-        file_name: str,
+        file_name: Path | str,
         map_location: Union[None, str, torch.device] = None,
         strict: bool = True,
     ) -> None:
@@ -686,7 +691,7 @@ class Module(torch.nn.Module):
 
         Parameters
         ----------
-        file_name : str
+        file_name : Path | str
             Checkpoint file name. Must be a valid '.mdlus' checkpoint file.
         map_location : Union[None, str, torch.device], optional, default=None
             Map location for loading the model weights, ``None`` will use the model's device.
@@ -727,6 +732,7 @@ class Module(torch.nn.Module):
             # Or load to a specific GPU
             model.load("FullyConnected.mdlus", map_location=torch.device("cuda:0"))
         """
+        file_name = str(file_name)
 
         # Download and cache the checkpoint file if needed
         cached_file_name = _download_cached(file_name)
@@ -785,7 +791,7 @@ class Module(torch.nn.Module):
     @classmethod
     def from_checkpoint(
         cls,
-        file_name: str,
+        file_name: Path | str,
         override_args: Optional[Dict[str, Any]] = None,
         strict: bool = True,
     ) -> "Module":
@@ -795,7 +801,7 @@ class Module(torch.nn.Module):
 
         Parameters
         ----------
-        file_name : str
+        file_name : Path | str
             Checkpoint file name. Must be a valid '.mdlus' checkpoint file.
         override_args : Optional[Dict[str, Any]], optional, default=None
             Dictionary of arguments to override the ``__init__`` method's
@@ -1018,6 +1024,8 @@ class Module(torch.nn.Module):
             # Instantiate the module
             model = cls_in.instantiate(args_ptr)
             return model
+
+        file_name = str(file_name)
 
         # Download and cache the checkpoint file if needed
         cached_file_name = _download_cached(file_name)

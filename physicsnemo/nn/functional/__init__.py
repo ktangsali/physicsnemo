@@ -14,13 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .drop_path import drop_path
-from .fft import imag, irfft, irfft2, real, rfft, rfft2, view_as_complex
+from .equivariant_ops import (
+    legendre_polynomials,
+    polar_and_dipole_basis,
+    smooth_log,
+    spherical_basis,
+    vector_project,
+)
+from .fourier_spectral import imag, irfft, irfft2, real, rfft, rfft2, view_as_complex
+from .geometry import signed_distance_field
 from .interpolation import interpolation
-from .knn import knn
-from .radius_search import radius_search
-from .sdf import signed_distance_field
-from .weight_fact import weight_fact
+from .natten import na1d, na2d, na3d
+from .neighbors import knn, radius_search
+from .regularization_parameterization import drop_path, weight_fact
 
 __all__ = [
     "irfft",
@@ -29,11 +35,19 @@ __all__ = [
     "imag",
     "interpolation",
     "knn",
+    "legendre_polynomials",
+    "na1d",
+    "na2d",
+    "na3d",
+    "polar_and_dipole_basis",
     "radius_search",
     "real",
     "rfft",
     "rfft2",
     "signed_distance_field",
+    "smooth_log",
+    "spherical_basis",
+    "vector_project",
     "view_as_complex",
     "weight_fact",
 ]
