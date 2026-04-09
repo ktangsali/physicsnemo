@@ -40,32 +40,37 @@ Requires ``gpytorch`` — install via ``pip install gpytorch`` or use the
 
 from __future__ import annotations
 
+import importlib
+
 import torch
 import torch.nn as nn
 
-try:
-    import gpytorch
-    from gpytorch.models import ApproximateGP
-    from gpytorch.variational import (
-        CholeskyVariationalDistribution,
-        VariationalStrategy,
-    )
-    from gpytorch.mlls import VariationalELBO
+from physicsnemo.core.version_check import check_version_spec
 
-    _GPYTORCH_AVAILABLE = True
-except ImportError:
-    _GPYTORCH_AVAILABLE = False
+_GPYTORCH_AVAILABLE = check_version_spec("gpytorch", hard_fail=False)
+
+if _GPYTORCH_AVAILABLE:
+    gpytorch = importlib.import_module("gpytorch")
+    _ApproximateGP = gpytorch.models.ApproximateGP
+    CholeskyVariationalDistribution = (
+        gpytorch.variational.CholeskyVariationalDistribution
+    )
+    VariationalStrategy = gpytorch.variational.VariationalStrategy
+    VariationalELBO = gpytorch.mlls.VariationalELBO
+else:
+    _ApproximateGP = nn.Module
 
 
 def _require_gpytorch() -> None:
     if not _GPYTORCH_AVAILABLE:
         raise ImportError(
-            "VariationalGPHead requires gpytorch.  "
-            "Install it with: pip install gpytorch"
+            "physicsnemo.experimental.uq.VariationalGPHead requires "
+            "gpytorch. Install it with: pip install gpytorch  "
+            "(or: pip install nvidia-physicsnemo[uq-extras])"
         )
 
 
-class _VariationalGPLayer(ApproximateGP):
+class _VariationalGPLayer(_ApproximateGP):
     """Low-level variational GP with Matérn-5/2 ARD kernel.
 
     This is an internal building block used by :class:`VariationalGPHead`.

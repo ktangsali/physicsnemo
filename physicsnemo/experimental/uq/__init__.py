@@ -23,7 +23,9 @@ backbones to produce calibrated uncertainty estimates.  Currently available:
   GPyTorch.  Requires ``gpytorch`` (``pip install gpytorch``).
 """
 
-try:
+from physicsnemo.core.version_check import check_version_spec
+
+_GPYTORCH_AVAILABLE = check_version_spec("gpytorch", hard_fail=False)
+
+if _GPYTORCH_AVAILABLE:
     from .variational_gp_head import VariationalGPHead
-except ImportError:
-    pass
