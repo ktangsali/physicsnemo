@@ -307,6 +307,16 @@ This produces:
 
 OOD test sets are auto-discovered from the config — any key matching `test_*` under `data:` is loaded automatically.  Add as many as you like via command-line overrides (`++data.test_myclass.data_path=...`).  The evaluation results are saved to `prediction_results.npz` for offline re-plotting without re-running inference.
 
+#### Example: KDE of ID vs OOD signals
+
+![KDE of disagreement and GP std dev for in-distribution vs OOD samples](../../../docs/img/kde_id_vs_ood.png)
+
+The model was trained exclusively on **DrivAerStar Fastback** geometries (class F).  The figure above shows kernel density estimates of the two UQ signals evaluated on the in-distribution Fastback validation set and five OOD vehicle classes from different sources and body styles.
+
+**Left — Disagreement:** The distribution of |Cd_GP − Cd_GeoTransolver| is tightly concentrated near zero for in-distribution Fastback samples (solid blue), indicating strong agreement between the two independent drag predictions.  OOD classes exhibit heavier tails and wider spread, meaning the GP and GeoTransolver diverge more when encountering unfamiliar geometries.  Notably, the disagreement signal correlates with geometric similarity to the training distribution: **Notchback** — the DrivAerStar body style most resembling Fastback — shows a relatively modest shift, while **Estateback** (a more distinct rear-end shape) and the **DrivaerML** / **ShiftSUV** classes (entirely different vehicle datasets) produce substantially larger disagreement.  This query-by-committee disagreement provides a strong, interpretable OOD detection signal.
+
+**Right — GP Predictive Std Dev:** The GP's posterior standard deviation shows a subtle but consistent shift: in-distribution samples cluster in a narrow peak, while OOD samples spread to higher values.  The signal is weaker than disagreement alone, but the two are complementary — the joint UQ metric `max(|disagreement|, 2 * GP_std)` combines both for more robust OOD flagging.
+
 ### Key Design Choices
 
 | Choice | Rationale |
