@@ -223,9 +223,9 @@ Transolver++ is supported with the `plus` flag to the model. In our experiments,
 This recipe extends the GeoTransolver backbone with a **variational Gaussian Process (GP) head** that provides calibrated uncertainty estimates on a scalar quantity of interest — in this case, the aerodynamic drag coefficient (Cd).  The GP head enables two complementary uncertainty signals:
 
 1. **Query-by-Committee disagreement** — The GeoTransolver predicts Cd by integrating its per-point field predictions; the GP head predicts Cd directly from the learned geometry embeddings.  When these two independent predictions disagree, the input is likely out-of-distribution (OOD).
-2. **GP predictive variance** — The GP's posterior variance provides a data-driven measure of how far a new input lies from the training distribution in embedding space.
+2. **GP predictive variance** — The GP's posterior variance provides a data-driven measure of how far a new input lies from the training distribution in embedding space.  Unlike an ensemble of GeoTransolvers, the GP learns from a finite set of inducing points and its uncertainty naturally grows as inputs move away from the in-distribution region, providing a principled distance-aware uncertainty signal.
 
-Together, these signals form a **joint UQ estimate** suitable for flagging OOD samples, guiding active-learning sample selection, and building trust in surrogate-model predictions.
+Together, these signals form a **joint UQ estimate** suitable for flagging OOD samples, which can be used to guide active learning sample selection and build trust in surrogate-model predictions.
 
 > **Active learning** — An active-learning loop that uses the joint UQ signal to automatically select the most informative geometries for labelling is coming soon.
 
@@ -246,7 +246,7 @@ Together, these signals form a **joint UQ estimate** suitable for flagging OOD s
                                                                   └─────────────────┘
 ```
 
-The GeoTransolver's `embedding_states` — the geometry/global context computed before the GALE cross-attention blocks — capture *what the geometry looks like* before any flow-field prediction.  These are reduced to a fixed-size embedding via attention pooling, then fed to the GP head.
+The GeoTransolver's `embedding_states` — the geometry/global context of shape `(B, H, S, D_c)` computed before the GALE cross-attention blocks — capture *what the geometry looks like* before any flow-field prediction.  Here `D_c` is the per-head context dimension from the GeoTransolver, while `D` (the final GP input dimension) is the reduced embedding size after attention pooling.  The pooling step reduces the variable-length `(B, H, S, D_c)` states to a fixed-size `(B, D)` embedding that is then fed to the GP head.
 
 Key library modules used:
 
@@ -259,7 +259,7 @@ Key library modules used:
 
 Training is a two-phase process using a single script (`train_gp_combined.py`):
 
-1. **Warmup (epochs 0–49):** Only the GeoTransolver backbone is trained with per-point field MSE loss.
+1. **Warmup (epochs 0–49):** Only the GeoTransolver backbone is trained with per-point field MSE loss.  The GP head is frozen during this phase because it needs meaningful geometric embeddings — training it on random, untrained backbone representations would produce a poorly conditioned variational posterior.
 2. **Joint training (epochs 50+):** The GP head, embedding reduction, and consistency loss activate via a linear ramp.  Three losses are combined:
    - **Field MSE** — standard per-point loss on pressure + wall shear stress
    - **GP ELBO** — variational evidence lower bound on the drag prediction

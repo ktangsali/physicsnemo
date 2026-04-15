@@ -227,14 +227,15 @@ class GeoTransolver(Module):
 
     Outputs
     -------
-    torch.Tensor | tuple[torch.Tensor, ...]
+    Float[torch.Tensor, "batch tokens out_dim"] | tuple[Float[torch.Tensor, "batch tokens out_dim"], ...]
         When ``return_embedding_states=False`` (default), output tensor of
         shape :math:`(B, N, C_{out})`. Returns a single tensor if input was
         a single tensor, or a tuple if input was a tuple.
 
         When ``return_embedding_states=True``, returns a 2-tuple
-        ``(output, embedding_states)`` where ``embedding_states`` has shape
-        :math:`(B, H, S, D_c)` (geometry/global context) or ``None`` if no
+        ``(output, embedding_states)`` where ``embedding_states`` is
+        ``Float[torch.Tensor, "batch heads slices context_dim"]`` of shape
+        :math:`(B, H, S, D_c)` (geometry/global context), or ``None`` if no
         context sources were provided.
 
     Raises
@@ -502,7 +503,7 @@ class GeoTransolver(Module):
 
         Returns
         -------
-        torch.Tensor | tuple
+        Float[torch.Tensor, "batch tokens out_dim"] | tuple[Float[torch.Tensor, "batch tokens out_dim"], Float[torch.Tensor, "batch heads slices context_dim"]]
             When ``return_embedding_states=False`` (default): output tensor of
             shape :math:`(B, N, C_{out})`.
 

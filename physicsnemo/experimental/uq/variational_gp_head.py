@@ -23,14 +23,15 @@ inducing points.
 
 Key design choices
 ------------------
-* **Float64 GP internals** — Short lengthscales on L2-normalised embeddings
-  make the inducing-point covariance matrix K_uu ill-conditioned in float32.
-  All GP computations (kernel, variational strategy, likelihood) run in
-  float64; inputs are upcast on entry and outputs are downcast on exit so
-  gradients flow through the encoder seamlessly.
+* **Float64 GP internals (default)** — Short lengthscales on L2-normalised
+  embeddings make the inducing-point covariance matrix K_uu ill-conditioned
+  in float32.  By default, GP computations (kernel, variational strategy,
+  likelihood) run in float64; inputs are upcast on entry and outputs are
+  downcast on exit so gradients flow through the encoder seamlessly.
+  This behaviour is controlled by the *use_double* flag.
 * **Optional DKL feature extractor** — A small MLP can be inserted between
   the encoder embedding and the GP kernel (Deep Kernel Learning).  The MLP
-  runs in float32 for speed.
+  runs in the caller's precision for speed.
 * **Matérn-5/2 ARD kernel** — A smooth, twice-differentiable kernel with
   per-dimension lengthscales (Automatic Relevance Determination).
 
@@ -41,9 +42,11 @@ Requires ``gpytorch`` — install via ``pip install gpytorch`` or use the
 from __future__ import annotations
 
 import importlib
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float
 
 from physicsnemo.core.version_check import check_version_spec
 
@@ -139,11 +142,33 @@ class _VariationalGPLayer(_ApproximateGP):
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
 
+class GPPrediction(NamedTuple):
+    """Structured output of :meth:`VariationalGPHead.predict`.
+
+    Attributes
+    ----------
+    mean : torch.Tensor
+        Predictive mean, shape ``(B,)``.
+    variance : torch.Tensor
+        Predictive variance, shape ``(B,)``.
+    lower : torch.Tensor
+        Lower bound of the confidence interval, shape ``(B,)``.
+    upper : torch.Tensor
+        Upper bound of the confidence interval, shape ``(B,)``.
+    """
+
+    mean: torch.Tensor
+    variance: torch.Tensor
+    lower: torch.Tensor
+    upper: torch.Tensor
+
+
 class VariationalGPHead(nn.Module):
-    """Variational GP head that operates entirely in float64.
+    """Variational GP head with configurable precision and jitter.
 
     Attach this module to any encoder that produces fixed-size embeddings to
     obtain calibrated uncertainty estimates for a scalar regression target.
+    See individual methods for per-method details.
 
     Parameters
     ----------
@@ -171,24 +196,35 @@ class VariationalGPHead(nn.Module):
         Hidden layer sizes for an optional DKL feature extractor MLP
         inserted before the GP kernel.  ``None`` means the embedding
         feeds the GP directly. Default is ``None``.
+    use_double : bool, optional
+        If ``True``, GP internals run in float64 for numerical stability
+        of the Cholesky decomposition on K_uu.  Disable at your own risk
+        when embeddings are well-conditioned. Default is ``True``.
+    jitter : tuple[float, float], optional
+        ``(float_value, double_value)`` passed to
+        ``gpytorch.settings.cholesky_jitter`` as a safety net for
+        near-singular covariance matrices. Default is ``(1e-3, 1e-4)``.
+    confidence_z : float, optional
+        Z-score multiplier for the confidence interval returned by
+        :meth:`predict`.  Default is ``1.96`` (95 % interval).
 
     Attributes
     ----------
     gp_layer : _VariationalGPLayer
-        The variational GP (float64).
+        The variational GP.
     likelihood : gpytorch.likelihoods.GaussianLikelihood
-        Observation noise model (float64).
+        Observation noise model.
     mll : gpytorch.mlls.VariationalELBO
         Marginal log-likelihood objective.
     feature_extractor : nn.Sequential | None
-        Optional DKL MLP (float32).
+        Optional DKL MLP.
 
     Examples
     --------
     >>> head = VariationalGPHead(input_dim=32, n_inducing=128, n_train=3200)
     >>> emb = torch.randn(4, 32)
-    >>> mean, var, lo95, hi95 = head.predict(emb)
-    >>> mean.shape
+    >>> pred = head.predict(emb)
+    >>> pred.mean.shape
     torch.Size([4])
     """
 
@@ -202,11 +238,18 @@ class VariationalGPHead(nn.Module):
         lengthscale_prior: tuple[float, float] | None = None,
         outputscale_prior: tuple[float, float] | None = None,
         mlp_hidden: list[int] | None = None,
+        use_double: bool = True,
+        jitter: tuple[float, float] = (1e-3, 1e-4),
+        confidence_z: float = 1.96,
     ) -> None:
         super().__init__()
         _require_gpytorch()
         if n_train is None:
             raise ValueError("n_train is required for the ELBO normalisation constant")
+
+        self._use_double = use_double
+        self._jitter = jitter
+        self._confidence_z = confidence_z
 
         if mlp_hidden:
             layers: list[nn.Module] = []
@@ -230,37 +273,47 @@ class VariationalGPHead(nn.Module):
             with torch.no_grad():
                 inducing_points = self.feature_extractor(inducing_points)
 
-        self.gp_layer = _VariationalGPLayer(
+        gp_layer = _VariationalGPLayer(
             inducing_points,
             gp_input_dim,
             lengthscale_range=lengthscale_range,
             lengthscale_prior=lengthscale_prior,
             outputscale_prior=outputscale_prior,
-        ).double()
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood().double()
+        )
+        likelihood = gpytorch.likelihoods.GaussianLikelihood()
+
+        if use_double:
+            gp_layer = gp_layer.double()
+            likelihood = likelihood.double()
+
+        self.gp_layer = gp_layer
+        self.likelihood = likelihood
         self.mll = VariationalELBO(self.likelihood, self.gp_layer, num_data=n_train)
 
-    @staticmethod
-    def _gp_context():
-        """Safety-net jitter in case float64 K_uu is still marginal."""
+    def _gp_context(self):
+        """Safety-net jitter for near-singular covariance matrices."""
         return gpytorch.settings.cholesky_jitter(
-            float_value=1e-3, double_value=1e-4
+            float_value=self._jitter[0], double_value=self._jitter[1]
         )
 
-    def _apply_fe(self, embedding: torch.Tensor) -> torch.Tensor:
-        """Run optional feature extractor (float32), return float64 for GP."""
+    def _apply_fe(
+        self, embedding: Float[torch.Tensor, "batch dim"]
+    ) -> Float[torch.Tensor, "batch gp_dim"]:
+        """Run optional feature extractor, then cast to GP precision."""
         if self.feature_extractor is not None:
             embedding = self.feature_extractor(embedding)
-        return embedding.double()
+        if self._use_double:
+            return embedding.double()
+        return embedding
 
     def forward(
-        self, embedding: torch.Tensor
+        self, embedding: Float[torch.Tensor, "batch dim"]
     ) -> gpytorch.distributions.MultivariateNormal:
         """Forward pass returning a GP predictive distribution.
 
         Parameters
         ----------
-        embedding : torch.Tensor
+        embedding : Float[torch.Tensor, "batch dim"]
             Global embedding of shape ``(B, D)`` from the encoder.
 
         Returns
@@ -278,16 +331,16 @@ class VariationalGPHead(nn.Module):
 
     def forward_and_loss(
         self,
-        embedding: torch.Tensor,
-        target: torch.Tensor,
+        embedding: Float[torch.Tensor, "batch dim"],
+        target: Float[torch.Tensor, " batch"],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass returning both the predictive mean and ELBO loss.
 
         Parameters
         ----------
-        embedding : torch.Tensor
+        embedding : Float[torch.Tensor, "batch dim"]
             Global embedding of shape ``(B, D)``.
-        target : torch.Tensor
+        target : Float[torch.Tensor, " batch"]
             Scalar target values of shape ``(B,)``.
 
         Returns
@@ -297,19 +350,24 @@ class VariationalGPHead(nn.Module):
             ELBO loss (scalar), both in the caller's dtype.
         """
         orig_dtype = embedding.dtype
+        gp_target = target.double() if self._use_double else target
         with self._gp_context():
             dist = self.gp_layer(self._apply_fe(embedding))
-            neg_elbo = -self.mll(dist, target.double())
+            neg_elbo = -self.mll(dist, gp_target)
         return dist.mean.to(orig_dtype), neg_elbo.to(orig_dtype)
 
-    def loss(self, embedding: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def loss(
+        self,
+        embedding: Float[torch.Tensor, "batch dim"],
+        target: Float[torch.Tensor, " batch"],
+    ) -> torch.Tensor:
         """Compute the negative ELBO loss.
 
         Parameters
         ----------
-        embedding : torch.Tensor
+        embedding : Float[torch.Tensor, "batch dim"]
             Global embedding of shape ``(B, D)``.
-        target : torch.Tensor
+        target : Float[torch.Tensor, " batch"]
             Scalar target values of shape ``(B,)``.
 
         Returns
@@ -322,35 +380,41 @@ class VariationalGPHead(nn.Module):
 
     @torch.no_grad()
     def predict(
-        self, embedding: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, embedding: Float[torch.Tensor, "batch dim"]
+    ) -> GPPrediction:
         """Produce predictions with calibrated uncertainty intervals.
 
         Parameters
         ----------
-        embedding : torch.Tensor
+        embedding : Float[torch.Tensor, "batch dim"]
             Global embedding of shape ``(B, D)``.
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-            ``(mean, variance, lower_95, upper_95)`` — all ``(B,)`` tensors
-            in the caller's dtype.  The 95 % interval is
-            ``mean ± 1.96 * sqrt(variance)``.
+        GPPrediction
+            Named tuple with fields ``(mean, variance, lower, upper)`` —
+            all ``(B,)`` tensors in the caller's dtype.  The confidence
+            interval is ``mean ± confidence_z * sqrt(variance)``.
         """
         orig_dtype = embedding.dtype
+        was_training = self.training
         self.eval()
         self.likelihood.eval()
-        with self._gp_context(), gpytorch.settings.fast_pred_var():
-            dist = self.gp_layer(self._apply_fe(embedding))
-            pred = self.likelihood(dist)
-            mean = pred.mean
-            var = pred.variance
-            lower = mean - 1.96 * var.sqrt()
-            upper = mean + 1.96 * var.sqrt()
-        return (
-            mean.to(orig_dtype),
-            var.to(orig_dtype),
-            lower.to(orig_dtype),
-            upper.to(orig_dtype),
-        )
+        try:
+            with self._gp_context(), gpytorch.settings.fast_pred_var():
+                dist = self.gp_layer(self._apply_fe(embedding))
+                pred = self.likelihood(dist)
+                mean = pred.mean
+                var = pred.variance
+                z = self._confidence_z
+                lower = mean - z * var.sqrt()
+                upper = mean + z * var.sqrt()
+            return GPPrediction(
+                mean=mean.to(orig_dtype),
+                variance=var.to(orig_dtype),
+                lower=lower.to(orig_dtype),
+                upper=upper.to(orig_dtype),
+            )
+        finally:
+            if was_training:
+                self.train()

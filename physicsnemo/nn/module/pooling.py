@@ -37,6 +37,8 @@ import torch
 import torch.nn as nn
 from jaxtyping import Float
 
+from physicsnemo.nn.module.activations import get_activation
+
 
 def _maybe_spectral_norm(layer: nn.Module, enable: bool) -> nn.Module:
     """Optionally wrap *layer* with spectral normalization."""
@@ -59,6 +61,14 @@ class AttentionPooling(nn.Module):
         Output embedding dimension. Default is 32.
     hidden : int, optional
         Hidden dimension of the attention scoring network. Default is 128.
+    projector_hidden : list[int] | None, optional
+        Hidden layer sizes for the projector MLP.  Each hidden layer is
+        followed by *activation* and ``LayerNorm``.  Default is
+        ``[256, 128]``.
+    activation : str, optional
+        Activation function name passed to
+        :func:`~physicsnemo.nn.module.activations.get_activation`.
+        Default is ``"relu"``.
     spectral_norm : bool, optional
         If ``True``, apply spectral normalization to all linear layers.
         Default is ``False``.
@@ -81,26 +91,33 @@ class AttentionPooling(nn.Module):
         feat_dim: int = 256,
         embed_dim: int = 32,
         hidden: int = 128,
+        projector_hidden: list[int] | None = None,
+        activation: str = "relu",
         spectral_norm: bool = False,
         normalize: bool = False,
         target_scale: float = 1.0,
     ) -> None:
         super().__init__()
+        if projector_hidden is None:
+            projector_hidden = [256, 128]
+
         sn = spectral_norm
         self.attention = nn.Sequential(
             _maybe_spectral_norm(nn.Linear(feat_dim, hidden), sn),
             nn.Tanh(),
             _maybe_spectral_norm(nn.Linear(hidden, 1), sn),
         )
-        self.projector = nn.Sequential(
-            _maybe_spectral_norm(nn.Linear(feat_dim, 256), sn),
-            nn.ReLU(),
-            nn.LayerNorm(256),
-            _maybe_spectral_norm(nn.Linear(256, 128), sn),
-            nn.ReLU(),
-            nn.LayerNorm(128),
-            _maybe_spectral_norm(nn.Linear(128, embed_dim), sn),
-        )
+
+        proj_layers: list[nn.Module] = []
+        in_dim = feat_dim
+        for h in projector_hidden:
+            proj_layers.append(_maybe_spectral_norm(nn.Linear(in_dim, h), sn))
+            proj_layers.append(get_activation(activation))
+            proj_layers.append(nn.LayerNorm(h))
+            in_dim = h
+        proj_layers.append(_maybe_spectral_norm(nn.Linear(in_dim, embed_dim), sn))
+        self.projector = nn.Sequential(*proj_layers)
+
         self.normalize = normalize
         self.target_scale = target_scale
 
