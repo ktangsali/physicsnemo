@@ -214,7 +214,13 @@ entire mesh.  The outputs are then saved to .vtp files for downstream analysis. 
 
 Transolver++ is supported with the `plus` flag to the model. In our experiments, we did not see gains, but you are welcome to try it and share your results with us on GitHub!
 
-## Model Uncertainty Quantification with a Variational GP Head
+---
+
+## Uncertainty Quantification
+
+GeoTransolver supports two complementary UQ methods: a **Variational GP Head** for scalar-level (drag coefficient) uncertainty, and **Concrete Dropout / MC-Dropout** for per-point field uncertainty.  They can be used independently or together.
+
+## Variational GP Head
 
 ### Overview
 
@@ -385,7 +391,10 @@ pip install gpytorch
 - **Variational GPs:** [Scalable Variational Gaussian Process Classification](https://arxiv.org/abs/1411.2005) — Hensman et al., 2015
 - **Deep Kernel Learning:** [Deep Kernel Learning](https://arxiv.org/abs/1511.02222) — Wilson et al., 2016
 - **SNGP / DUE:** [Simple and Principled Uncertainty Estimation with Deterministic Deep Learning](https://arxiv.org/abs/2006.10108) — van Amersfoort et al., 2020
-## Model Uncertainty Quantification with Concrete Dropout
+
+---
+
+## Concrete Dropout / MC-Dropout
 
 GeoTransolver supports **model uncertainty quantification (UQ)** via **Concrete Dropout** ([Gal, Hron & Kendall, NeurIPS 2017](https://arxiv.org/abs/1705.07832)). Model UQ captures the uncertainty arising from the model itself -- given finite training data, there are many plausible sets of model weights, and model UQ estimates how much predictions vary across them. Instead of manually tuning per-layer dropout rates, Concrete Dropout learns the optimal dropout probability for each layer during training using a differentiable relaxation. At inference time, **MC-Dropout** (Monte Carlo Dropout) approximates Bayesian inference by running multiple stochastic forward passes, producing both a mean prediction and a per-point uncertainty estimate.
 

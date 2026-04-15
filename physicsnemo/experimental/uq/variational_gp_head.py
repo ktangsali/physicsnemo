@@ -164,11 +164,10 @@ class GPPrediction(NamedTuple):
 
 
 class VariationalGPHead(nn.Module):
-    """Variational GP head with configurable precision and jitter.
+    r"""Variational GP head with configurable precision and jitter.
 
     Attach this module to any encoder that produces fixed-size embeddings to
     obtain calibrated uncertainty estimates for a scalar regression target.
-    See individual methods for per-method details.
 
     Parameters
     ----------
@@ -207,6 +206,19 @@ class VariationalGPHead(nn.Module):
     confidence_z : float, optional
         Z-score multiplier for the confidence interval returned by
         :meth:`predict`.  Default is ``1.96`` (95 % interval).
+
+    Forward
+    -------
+    embedding : Float[torch.Tensor, "batch dim"]
+        Global embedding of shape :math:`(B, D)` from the encoder.
+
+    Outputs
+    -------
+    gpytorch.distributions.MultivariateNormal
+        Predictive distribution in the caller's original dtype.  Use
+        :meth:`forward_and_loss` to also obtain the ELBO loss, or
+        :meth:`predict` for a structured :class:`GPPrediction` with
+        mean, variance, and confidence bounds.
 
     Attributes
     ----------
@@ -309,17 +321,21 @@ class VariationalGPHead(nn.Module):
     def forward(
         self, embedding: Float[torch.Tensor, "batch dim"]
     ) -> gpytorch.distributions.MultivariateNormal:
-        """Forward pass returning a GP predictive distribution.
+        r"""Forward pass through the variational GP.
+
+        Runs the optional DKL feature extractor, casts to the GP's working
+        precision, and returns the predictive distribution over the batch.
 
         Parameters
         ----------
         embedding : Float[torch.Tensor, "batch dim"]
-            Global embedding of shape ``(B, D)`` from the encoder.
+            Global embedding of shape :math:`(B, D)` from the encoder.
 
         Returns
         -------
         gpytorch.distributions.MultivariateNormal
-            Predictive distribution in the caller's original dtype.
+            Predictive distribution of shape :math:`(B,)` in the caller's
+            original dtype.
         """
         orig_dtype = embedding.dtype
         with self._gp_context():
@@ -334,19 +350,19 @@ class VariationalGPHead(nn.Module):
         embedding: Float[torch.Tensor, "batch dim"],
         target: Float[torch.Tensor, " batch"],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass returning both the predictive mean and ELBO loss.
+        r"""Forward pass returning both the predictive mean and ELBO loss.
 
         Parameters
         ----------
         embedding : Float[torch.Tensor, "batch dim"]
-            Global embedding of shape ``(B, D)``.
+            Global embedding of shape :math:`(B, D)`.
         target : Float[torch.Tensor, " batch"]
-            Scalar target values of shape ``(B,)``.
+            Scalar target values of shape :math:`(B,)`.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor]
-            ``(mean, neg_elbo)`` — predictive mean ``(B,)`` and negative
+            ``(mean, neg_elbo)`` — predictive mean :math:`(B,)` and negative
             ELBO loss (scalar), both in the caller's dtype.
         """
         orig_dtype = embedding.dtype
@@ -361,14 +377,14 @@ class VariationalGPHead(nn.Module):
         embedding: Float[torch.Tensor, "batch dim"],
         target: Float[torch.Tensor, " batch"],
     ) -> torch.Tensor:
-        """Compute the negative ELBO loss.
+        r"""Compute the negative ELBO loss.
 
         Parameters
         ----------
         embedding : Float[torch.Tensor, "batch dim"]
-            Global embedding of shape ``(B, D)``.
+            Global embedding of shape :math:`(B, D)`.
         target : Float[torch.Tensor, " batch"]
-            Scalar target values of shape ``(B,)``.
+            Scalar target values of shape :math:`(B,)`.
 
         Returns
         -------
@@ -382,18 +398,21 @@ class VariationalGPHead(nn.Module):
     def predict(
         self, embedding: Float[torch.Tensor, "batch dim"]
     ) -> GPPrediction:
-        """Produce predictions with calibrated uncertainty intervals.
+        r"""Produce predictions with calibrated uncertainty intervals.
+
+        Temporarily switches the module to eval mode, runs inference with
+        the likelihood, and restores the prior training state on exit.
 
         Parameters
         ----------
         embedding : Float[torch.Tensor, "batch dim"]
-            Global embedding of shape ``(B, D)``.
+            Global embedding of shape :math:`(B, D)`.
 
         Returns
         -------
         GPPrediction
             Named tuple with fields ``(mean, variance, lower, upper)`` —
-            all ``(B,)`` tensors in the caller's dtype.  The confidence
+            all :math:`(B,)` tensors in the caller's dtype.  The confidence
             interval is ``mean ± confidence_z * sqrt(variance)``.
         """
         orig_dtype = embedding.dtype
