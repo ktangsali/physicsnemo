@@ -185,33 +185,49 @@ def main(cfg: DictConfig):
     )
 
     # ---- Parse config with sane defaults ----
+    # head_type: "gp" = variational GP head, "mlp" = simple MLP baseline
     head_type = getattr(cfg, "head_type", "gp")
     use_gp = head_type == "gp"
+    # gp_warmup_start/end: epoch range over which GP + consistency losses ramp 0→1
     gp_warmup_start = getattr(cfg, "gp_warmup_start", 50)
     gp_warmup_end = getattr(cfg, "gp_warmup_end", 60)
+    # lambda_gp: weight of the head loss (GP ELBO or MLP MSE) after warmup ramp
     lambda_gp = getattr(cfg, "lambda_gp", 0.01)
+    # lambda_consistency: weight of the Cd consistency loss (0 disables)
     lambda_consistency = getattr(cfg, "lambda_consistency", 1.0)
+    # consistency_every_n_steps: compute consistency loss every N training steps
     consistency_every_n = getattr(cfg, "consistency_every_n_steps", 1)
+    # consistency_detach_transolver: if true, stop gradients through GeoTransolver
+    # in the consistency loss path (saves memory, weakens signal)
     consistency_detach = getattr(cfg, "consistency_detach_transolver", False)
+    # spectral_norm_embedding: apply spectral norm to the embedding reduction
+    # (pooling) layers for distance-preserving embeddings (SNGP-style)
     use_spectral_norm = getattr(cfg, "spectral_norm_embedding", True)
+    # n_inducing: number of variational inducing points for the GP
     n_inducing = getattr(cfg, "n_inducing", 128)
+    # embed_dim: output dimension of the embedding reduction fed to the GP head
     embed_dim = getattr(cfg, "embed_dim", 32)
+    # embedding_feat_dim: input feature dimension from GeoTransolver context
     feat_dim = getattr(cfg, "embedding_feat_dim", 256)
     accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
     use_consistency = lambda_consistency > 0
+    # mlp_head_hidden: hidden layer sizes for the MLP head (head_type=mlp only)
     mlp_head_hidden_cfg = getattr(cfg, "mlp_head_hidden", None)
     mlp_head_hidden = (
         list(mlp_head_hidden_cfg) if mlp_head_hidden_cfg is not None else [256, 256]
     )
 
+    # normalize_embeddings: L2-normalize embeddings to a sphere of radius target_scale
     normalize_embeddings = getattr(cfg, "normalize_embeddings", True)
     embedding_target_scale = getattr(cfg, "embedding_target_scale", 1.0)
 
+    # GP kernel hyperparameter priors and constraints
     ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 1.0]))
     ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
     ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
     os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
     os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
+    # gp_mlp_hidden: DKL feature extractor MLP before GP kernel (null = no MLP)
     mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
     mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
 

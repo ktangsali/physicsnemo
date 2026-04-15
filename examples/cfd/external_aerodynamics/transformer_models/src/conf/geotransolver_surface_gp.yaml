@@ -35,8 +35,8 @@ normalize_embeddings: true     # L2-normalize embeddings to a sphere of radius t
 embedding_target_scale: 1.0    # Radius of the embedding sphere
 
 # --- GP parameters ---
-embed_dim: 32
-n_inducing: 128
+embed_dim: 32                  # Output dimension of the embedding reduction (GP input size)
+n_inducing: 128                # Number of variational inducing points for the GP
 
 # --- GP DKL feature extractor ---
 # Hidden layer sizes for MLP between embedding reduction and GP kernel.
