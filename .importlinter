@@ -13,7 +13,7 @@ containers=
 layers = 
    experimental
    active_learning : diffusion
-   models : datapipes : metrics : domain_parallel : optim
+   models : datapipes : metrics : domain_parallel : optim : sym
    mesh
    nn
    utils
