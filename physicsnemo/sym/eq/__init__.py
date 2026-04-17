@@ -17,7 +17,6 @@
 from physicsnemo.sym.eq.gradients import (
     GradientCalculator,
     compute_connectivity_tensor,
-    compute_stencil3d,
 )
 from physicsnemo.sym.eq.pde import PDE
 from physicsnemo.sym.eq.phy_informer import PhysicsInformer
@@ -27,5 +26,4 @@ __all__ = [
     "PDE",
     "PhysicsInformer",
     "compute_connectivity_tensor",
-    "compute_stencil3d",
 ]

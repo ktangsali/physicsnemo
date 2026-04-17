@@ -96,7 +96,21 @@ class GradientsAutoDiff(torch.nn.Module):
 
 
 class GradientsFiniteDifference(torch.nn.Module):
-    """Compute spatial derivatives on uniform grids via ``UniformGridGradient``."""
+    """Compute spatial derivatives on uniform grids via ``UniformGridGradient``.
+
+    Parameters
+    ----------
+    invar : str
+        Name of the variable to differentiate (e.g. ``"u"``).
+    dx : float or list[float]
+        Uniform grid spacing per axis.
+    dim : int
+        Spatial dimensionality (1, 2, or 3).
+    order : int
+        Derivative order (1 or 2).
+    return_mixed_derivs : bool
+        If True and ``order=2``, include cross-derivatives like ``u__x__y``.
+    """
 
     def __init__(
         self,
@@ -114,6 +128,9 @@ class GradientsFiniteDifference(torch.nn.Module):
         self.dx = [dx] * dim if isinstance(dx, (float, int)) else list(dx)
 
     def forward(self, input_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # Lazy import: nn.functional.derivatives sits in a lower layer and pulls
+        # in warp/FunctionSpec machinery; deferring keeps `import physicsnemo.sym`
+        # lightweight and avoids import-linter layer violations.
         from physicsnemo.nn.functional.derivatives import uniform_grid_gradient
 
         u = input_dict[self.invar]
@@ -174,6 +191,7 @@ class GradientsSpectral(torch.nn.Module):
         self.ell = [ell] * dim if isinstance(ell, (float, int)) else list(ell)
 
     def forward(self, input_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # Lazy import (see GradientsFiniteDifference.forward for rationale).
         from physicsnemo.nn.functional.derivatives import spectral_grid_gradient
 
         u = input_dict[self.invar]
@@ -291,6 +309,7 @@ class GradientsLeastSquares(torch.nn.Module):
         self.return_mixed_derivs = return_mixed_derivs
 
     def forward(self, input_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        # Lazy import (see GradientsFiniteDifference.forward for rationale).
         from physicsnemo.nn.functional.derivatives import mesh_lsq_gradient
 
         coords = input_dict["coordinates"].detach()
@@ -382,7 +401,7 @@ class GradientCalculator:
 # ---------------------------------------------------------------------------
 
 
-def compute_stencil3d(
+def _compute_stencil3d(
     coords: torch.Tensor,
     model: torch.nn.Module,
     dx: float,

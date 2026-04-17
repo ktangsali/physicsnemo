@@ -20,8 +20,8 @@ import torch
 
 from physicsnemo.sym.eq.gradients import (
     GradientCalculator,
+    _compute_stencil3d,
     compute_connectivity_tensor,
-    compute_stencil3d,
 )
 
 
@@ -154,7 +154,7 @@ def test_gradients_meshless_fd(general_setup):
     coords, coords_unstructured, grad_u_analytical, model = general_setup
     grad_calc = GradientCalculator(device=coords.device)
 
-    po_posx, po_negx, po_posy, po_negy, po_posz, po_negz = compute_stencil3d(
+    po_posx, po_negx, po_posy, po_negy, po_posz, po_negz = _compute_stencil3d(
         coords_unstructured, model, dx=0.001
     )
     input_dict = {

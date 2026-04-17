@@ -15,5 +15,3 @@ Symbolic PDE residual computation for physics-informed training.
    :members:
 
 .. autofunction:: physicsnemo.sym.eq.gradients.compute_connectivity_tensor
-
-.. autofunction:: physicsnemo.sym.eq.gradients.compute_stencil3d

@@ -19,7 +19,7 @@ import pytest
 import torch
 from sympy import Function, Number, Symbol
 
-from physicsnemo.sym.eq.gradients import compute_stencil3d
+from physicsnemo.sym.eq.gradients import _compute_stencil3d
 from physicsnemo.sym.eq.pde import PDE
 from physicsnemo.sym.eq.phy_informer import PhysicsInformer
 
@@ -271,7 +271,7 @@ def test_residuals_autodiff(general_setup):
 @pytest.mark.parametrize("general_setup", ["cuda"], indirect=True)
 def test_residuals_meshless_fd(general_setup):
     coords, coords_unstructured, residuals_analytical, model = general_setup
-    po_posx, po_negx, po_posy, po_negy, po_posz, po_negz = compute_stencil3d(
+    po_posx, po_negx, po_posy, po_negy, po_posz, po_negz = _compute_stencil3d(
         coords_unstructured, model, dx=0.001
     )
 
