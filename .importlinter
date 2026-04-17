@@ -104,6 +104,18 @@ layers =
    noise_schedulers
    utils
 
+[importlinter:contract:physicsnemo-sym]
+name = Control Internal Dependencies in PhysicsNeMo sym
+type = layers
+containers=
+   physicsnemo.sym
+layers = 
+   eq
+   graph
+   computation
+   utils
+   constants
+
 [importlinter:contract:physicsnemo-external-imports]
 name = Prevent Non-listed external imports in physicsnemo
 type = forbidden_import
