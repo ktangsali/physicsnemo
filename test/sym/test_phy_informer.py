@@ -284,38 +284,20 @@ def test_residuals_meshless_fd(general_setup):
         device=coords.device,
     )
     pred_outvar = model(coords_unstructured)
-    residuals = phy_informer.forward(
-        {
-            "u": pred_outvar[:, 0:1],
-            "v": pred_outvar[:, 1:2],
-            "w": pred_outvar[:, 2:3],
-            "p": pred_outvar[:, 3:4],
-            "u>>x::1": po_posx[:, 0:1],
-            "v>>x::1": po_posx[:, 1:2],
-            "w>>x::1": po_posx[:, 2:3],
-            "p>>x::1": po_posx[:, 3:4],
-            "u>>x::-1": po_negx[:, 0:1],
-            "v>>x::-1": po_negx[:, 1:2],
-            "w>>x::-1": po_negx[:, 2:3],
-            "p>>x::-1": po_negx[:, 3:4],
-            "u>>y::1": po_posy[:, 0:1],
-            "v>>y::1": po_posy[:, 1:2],
-            "w>>y::1": po_posy[:, 2:3],
-            "p>>y::1": po_posy[:, 3:4],
-            "u>>y::-1": po_negy[:, 0:1],
-            "v>>y::-1": po_negy[:, 1:2],
-            "w>>y::-1": po_negy[:, 2:3],
-            "p>>y::-1": po_negy[:, 3:4],
-            "u>>z::1": po_posz[:, 0:1],
-            "v>>z::1": po_posz[:, 1:2],
-            "w>>z::1": po_posz[:, 2:3],
-            "p>>z::1": po_posz[:, 3:4],
-            "u>>z::-1": po_negz[:, 0:1],
-            "v>>z::-1": po_negz[:, 1:2],
-            "w>>z::-1": po_negz[:, 2:3],
-            "p>>z::-1": po_negz[:, 3:4],
-        },
-    )
+    var_names = ["u", "v", "w", "p"]
+    stencil_map = {
+        "x::1": po_posx,
+        "x::-1": po_negx,
+        "y::1": po_posy,
+        "y::-1": po_negy,
+        "z::1": po_posz,
+        "z::-1": po_negz,
+    }
+    inputs = {name: pred_outvar[:, i : i + 1] for i, name in enumerate(var_names)}
+    for suffix, stencil in stencil_map.items():
+        for i, name in enumerate(var_names):
+            inputs[f"{name}>>{suffix}"] = stencil[:, i : i + 1]
+    residuals = phy_informer.forward(inputs)
 
     pad = 2
     for key in residuals_analytical.keys():

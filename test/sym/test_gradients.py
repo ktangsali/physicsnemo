@@ -157,15 +157,16 @@ def test_gradients_meshless_fd(general_setup):
     po_posx, po_negx, po_posy, po_negy, po_posz, po_negz = _compute_stencil3d(
         coords_unstructured, model, dx=0.001
     )
-    input_dict = {
-        "u": model(coords_unstructured),
-        "u>>x::1": po_posx,
-        "u>>x::-1": po_negx,
-        "u>>y::1": po_posy,
-        "u>>y::-1": po_negy,
-        "u>>z::1": po_posz,
-        "u>>z::-1": po_negz,
+    stencil_map = {
+        "x::1": po_posx,
+        "x::-1": po_negx,
+        "y::1": po_posy,
+        "y::-1": po_negy,
+        "z::1": po_posz,
+        "z::-1": po_negz,
     }
+    input_dict = {"u": model(coords_unstructured)}
+    input_dict.update({f"u>>{k}": v for k, v in stencil_map.items()})
     grads_u_meshless_fd = grad_calc.compute_gradients(
         input_dict, method_name="meshless_finite_difference", invar="u", dx=0.001
     )
