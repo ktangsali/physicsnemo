@@ -407,57 +407,46 @@ def _compute_stencil3d(
     dx: float,
     return_mixed_derivs: bool = False,
 ):
-    """Evaluate *model* at axis-aligned offset points around *coords*."""
-    posx = coords[:, 0:1] + dx
-    negx = coords[:, 0:1] - dx
-    posy = coords[:, 1:2] + dx
-    negy = coords[:, 1:2] - dx
-    posz = coords[:, 2:3] + dx
-    negz = coords[:, 2:3] - dx
+    """Evaluate *model* at axis-aligned (and optionally diagonal) offset points.
 
-    uposx = model(torch.cat([posx, coords[:, 1:2], coords[:, 2:3]], dim=1))
-    unegx = model(torch.cat([negx, coords[:, 1:2], coords[:, 2:3]], dim=1))
-    uposy = model(torch.cat([coords[:, 0:1], posy, coords[:, 2:3]], dim=1))
-    unegy = model(torch.cat([coords[:, 0:1], negy, coords[:, 2:3]], dim=1))
-    uposz = model(torch.cat([coords[:, 0:1], coords[:, 1:2], posz], dim=1))
-    unegz = model(torch.cat([coords[:, 0:1], coords[:, 1:2], negz], dim=1))
+    Returns a tuple of model outputs at shifted coordinates.  Without mixed
+    derivs: 6 evaluations ``(+x, -x, +y, -y, +z, -z)``.  With mixed derivs:
+    18 evaluations (6 axis-aligned + 12 diagonal pairs).
+    """
+    base = [coords[:, i : i + 1] for i in range(3)]
+
+    def _eval(offsets):
+        shifted = [base[i] + offsets[i] * dx for i in range(3)]
+        return model(torch.cat(shifted, dim=1))
+
+    axis_offsets = [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ]
+    results = tuple(_eval(o) for o in axis_offsets)
 
     if not return_mixed_derivs:
-        return uposx, unegx, uposy, unegy, uposz, unegz
+        return results
 
-    uposxposy = model(torch.cat([posx, posy, coords[:, 2:3]], dim=1))
-    uposxnegy = model(torch.cat([posx, negy, coords[:, 2:3]], dim=1))
-    unegxposy = model(torch.cat([negx, posy, coords[:, 2:3]], dim=1))
-    unegxnegy = model(torch.cat([negx, negy, coords[:, 2:3]], dim=1))
-    uposxposz = model(torch.cat([posx, coords[:, 1:2], posz], dim=1))
-    uposxnegz = model(torch.cat([posx, coords[:, 1:2], negz], dim=1))
-    unegxposz = model(torch.cat([negx, coords[:, 1:2], posz], dim=1))
-    unegxnegz = model(torch.cat([negx, coords[:, 1:2], negz], dim=1))
-    uposyposz = model(torch.cat([coords[:, 0:1], posy, posz], dim=1))
-    uposynegz = model(torch.cat([coords[:, 0:1], posy, negz], dim=1))
-    unegyposz = model(torch.cat([coords[:, 0:1], negy, posz], dim=1))
-    unegynegz = model(torch.cat([coords[:, 0:1], negy, negz], dim=1))
-
-    return (
-        uposx,
-        unegx,
-        uposy,
-        unegy,
-        uposz,
-        unegz,
-        uposxposy,
-        uposxnegy,
-        unegxposy,
-        unegxnegy,
-        uposxposz,
-        uposxnegz,
-        unegxposz,
-        unegxnegz,
-        uposyposz,
-        uposynegz,
-        unegyposz,
-        unegynegz,
-    )
+    diag_offsets = [
+        (1, 1, 0),
+        (1, -1, 0),
+        (-1, 1, 0),
+        (-1, -1, 0),
+        (1, 0, 1),
+        (1, 0, -1),
+        (-1, 0, 1),
+        (-1, 0, -1),
+        (0, 1, 1),
+        (0, 1, -1),
+        (0, -1, 1),
+        (0, -1, -1),
+    ]
+    return results + tuple(_eval(o) for o in diag_offsets)
 
 
 _edges_to_adjacency = None
