@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`autodiff`, `finite_difference`, `spectral`, `meshless_finite_difference`,
   `least_squares`); spatial derivatives are computed automatically using the
   `nn.functional.derivatives` functionals.
+- Added geometry functionals in `physicsnemo.nn.functional` for
+  `mesh_poisson_disk_sample`, `mesh_to_voxel_fraction`, and
+  `signed_distance_field`.
 
 ### Changed
 

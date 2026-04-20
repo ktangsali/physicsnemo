@@ -30,7 +30,11 @@ from .equivariant_ops import (
     vector_project,
 )
 from .fourier_spectral import imag, irfft, irfft2, real, rfft, rfft2, view_as_complex
-from .geometry import signed_distance_field
+from .geometry import (
+    mesh_poisson_disk_sample,
+    mesh_to_voxel_fraction,
+    signed_distance_field,
+)
 from .interpolation import (
     grid_to_point_interpolation,
     interpolation,
@@ -52,6 +56,8 @@ __all__ = [
     "mesh_green_gauss_gradient",
     "meshless_fd_derivatives",
     "mesh_lsq_gradient",
+    "mesh_poisson_disk_sample",
+    "mesh_to_voxel_fraction",
     "na1d",
     "na2d",
     "na3d",
