@@ -26,7 +26,6 @@ import logging
 from itertools import combinations
 from typing import Dict, List, Union
 
-import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
@@ -449,69 +448,15 @@ def _compute_stencil3d(
     return results + tuple(_eval(o) for o in diag_offsets)
 
 
-_edges_to_adjacency = None
-
-
-def _get_edges_to_adjacency():
-    """Lazy-load the numba-JIT-compiled adjacency builder on first use."""
-    global _edges_to_adjacency
-    if _edges_to_adjacency is not None:
-        return _edges_to_adjacency
-
-    import importlib
-
-    try:
-        _numba = importlib.import_module("numba")
-    except ModuleNotFoundError as exc:
-        raise ImportError(
-            "numba is required for compute_connectivity_tensor. "
-            "Install with: pip install nvidia-physicsnemo[sym]"
-        ) from exc
-
-    @_numba.njit
-    def _impl(sorted_bidirectional_edges, n_points):
-        n_edges = len(sorted_bidirectional_edges)
-        offsets = np.zeros(n_points + 1, dtype=sorted_bidirectional_edges.dtype)
-        indices = np.zeros(n_edges, dtype=sorted_bidirectional_edges.dtype)
-
-        edge_idx = 0
-        for adj_index in range(n_points):
-            start_offset = offsets[adj_index]
-            while edge_idx < n_edges:
-                start_idx = sorted_bidirectional_edges[edge_idx, 0]
-                if start_idx == adj_index:
-                    indices[start_offset] = sorted_bidirectional_edges[edge_idx, 1]
-                    start_offset += 1
-                elif start_idx > adj_index:
-                    break
-                edge_idx += 1
-            offsets[adj_index + 1] = start_offset
-
-        return offsets, indices
-
-    _impl(np.zeros((0, 2), dtype=np.int64), 0)
-    _edges_to_adjacency = _impl
-    return _edges_to_adjacency
-
-
-def _unique_axis0_fast(array: np.ndarray) -> np.ndarray:
-    """Fast unique rows for sorted 2-D arrays."""
-    if len(array) == 0:
-        return array
-    idxs = np.lexsort(array.T[::-1])
-    array = array[idxs]
-    unique_idxs = np.empty(len(array), dtype=np.bool_)
-    unique_idxs[0] = True
-    unique_idxs[1:] = np.any(array[:-1, :] != array[1:, :], axis=-1)
-    return array[unique_idxs]
-
-
 def compute_connectivity_tensor(
     nodes: torch.Tensor,
     edges: torch.Tensor,
     max_neighbors: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build CSR adjacency from node/edge lists.
+
+    Uses vectorized PyTorch ops (argsort + bincount) via the
+    ``physicsnemo.mesh.neighbors`` utilities.
 
     Parameters
     ----------
@@ -528,37 +473,40 @@ def compute_connectivity_tensor(
         ``(offsets, indices, neighbor_matrix)`` — CSR representation plus a
         padded ``(N, max_neighbors)`` neighbor matrix for batched computation.
     """
-    edges_np = edges.cpu().numpy()
-    nodes_np = nodes.cpu().numpy().flatten()
+    from physicsnemo.mesh.neighbors._adjacency import build_adjacency_from_pairs
 
-    bidirectional = np.concatenate((edges_np, edges_np[:, ::-1]), axis=0)
-    order = np.lexsort((bidirectional[:, 1], bidirectional[:, 0]))
-    sorted_edges = bidirectional[order]
-    unique_edges = _unique_axis0_fast(sorted_edges)
+    num_nodes = nodes.numel()
+    device = nodes.device
 
-    num_nodes = len(nodes_np)
-    offsets, indices_arr = _get_edges_to_adjacency()(unique_edges, num_nodes)
+    bidir = torch.cat([edges, edges.flip(1)], dim=0)
 
-    offsets_tensor = torch.tensor(offsets, dtype=torch.long, device=nodes.device)
-    indices_tensor = torch.tensor(indices_arr, dtype=torch.long, device=nodes.device)
+    sort_by_target = torch.argsort(bidir[:, 1], stable=True)
+    sort_indices = sort_by_target[torch.argsort(bidir[sort_by_target, 0], stable=True)]
+    sorted_edges = bidir[sort_indices]
+
+    mask = torch.ones(len(sorted_edges), dtype=torch.bool, device=device)
+    mask[1:] = (sorted_edges[:-1] != sorted_edges[1:]).any(dim=1)
+    unique_edges = sorted_edges[mask]
+
+    adj = build_adjacency_from_pairs(unique_edges[:, 0], unique_edges[:, 1], num_nodes)
+
+    offsets = adj.offsets
+    indices = adj.indices
 
     if max_neighbors is None:
-        neighbor_counts = offsets[1:] - offsets[:-1]
-        max_neighbors = int(np.max(neighbor_counts)) if len(neighbor_counts) > 0 else 0
+        counts = offsets[1:] - offsets[:-1]
+        max_neighbors = int(counts.max().item()) if len(counts) > 0 else 0
 
     neighbor_matrix = torch.full(
-        (num_nodes, max_neighbors), -1, dtype=torch.long, device=nodes.device
+        (num_nodes, max_neighbors), -1, dtype=torch.long, device=device
     )
     for i in range(num_nodes):
-        start_idx = offsets[i]
-        end_idx = offsets[i + 1]
-        num_neighbors = end_idx - start_idx
-        if num_neighbors > 0:
-            neighbor_matrix[i, :num_neighbors] = torch.tensor(
-                indices_arr[start_idx:end_idx], dtype=torch.long, device=nodes.device
-            )
+        s, e = offsets[i].item(), offsets[i + 1].item()
+        n_neigh = e - s
+        if n_neigh > 0:
+            neighbor_matrix[i, :n_neigh] = indices[s:e]
 
-    return offsets_tensor, indices_tensor, neighbor_matrix
+    return offsets, indices, neighbor_matrix
 
 
 # ---------------------------------------------------------------------------

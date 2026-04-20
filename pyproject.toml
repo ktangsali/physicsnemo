@@ -281,7 +281,6 @@ gnns = [
 
 sym = [
     "sympy>=1.12",
-    "numba",
 ]
 
 perf = [
