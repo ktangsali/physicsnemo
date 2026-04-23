@@ -22,7 +22,7 @@ where some of these steps are automated and abstracted, we recommend the
 ### Prerequisites
 
 If you are running this example outside of the PhysicsNeMo container, install
-PhysicsNeMo Sym using the instructions from [here](https://github.com/NVIDIA/physicsnemo-sym?tab=readme-ov-file#pypi)
+PhysicsNeMo with the sym extra: `pip install "nvidia-physicsnemo[sym]"`
 
 ### Training
 

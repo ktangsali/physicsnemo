@@ -82,7 +82,7 @@ Install the requirements using:
 
 ```bash
 pip install -r requirements.txt
-pip install nvidia-physicsnemo.sym --no-build-isolation
+pip install "nvidia-physicsnemo[sym]"
 ```
 
 ## Getting Started

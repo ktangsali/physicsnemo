@@ -22,19 +22,62 @@ from physicsnemo.distributed import DistributedManager
 from physicsnemo.utils.logging import PythonLogger
 from physicsnemo.models.fno import FNO
 from physicsnemo.models.mlp.fully_connected import FullyConnected
-from physicsnemo.sym.eq.pdes.navier_stokes import NavierStokes
+from sympy import Abs, Eq, Function, Number, Symbol
+
+from physicsnemo.sym.eq.pde import PDE
 from physicsnemo.sym.eq.phy_informer import PhysicsInformer
-from physicsnemo.sym.geometry.geometry_dataloader import GeometryDatapipe
-from physicsnemo.sym.geometry.primitives_2d import Rectangle
+from physicsnemo.sym.geometry.geometry_dataloader import (
+    GeometryDatapipe,
+)  # TODO: Tier 4 - replace with Mesh/PyVista
+from physicsnemo.sym.geometry.primitives_2d import (
+    Rectangle,
+)  # TODO: Tier 4 - replace with Mesh/PyVista
+
 from physicsnemo.utils import StaticCaptureEvaluateNoGrad, StaticCaptureTraining
 from omegaconf import DictConfig
-from sympy import Abs, Eq, Symbol
 from torch.nn import MSELoss
 from torch.optim import Adam, lr_scheduler
 
 
+class NavierStokes(PDE):
+    """Incompressible Navier-Stokes equations (steady, 2D).
+
+    Simplified from the compressible form in physicsnemo-sym for the case
+    where ``rho`` is constant and ``time=False``.
+
+    Reference: https://turbmodels.larc.nasa.gov/implementrans.html
+    """
+
+    def __init__(self, nu=0.01, rho=1.0, dim=2, time=False):
+        self.dim = dim
+        x, y = Symbol("x"), Symbol("y")
+        iv = {"x": x, "y": y}
+        u = Function("u")(*iv.values())
+        v = Function("v")(*iv.values())
+        p = Function("p")(*iv.values())
+        nu, rho = Number(nu), Number(rho)
+        self.equations = {
+            "continuity": u.diff(x) + v.diff(y),
+            "momentum_x": (
+                u * u.diff(x)
+                + v * u.diff(y)
+                + (1 / rho) * p.diff(x)
+                - nu * u.diff(x, 2)
+                - nu * u.diff(y, 2)
+            ),
+            "momentum_y": (
+                u * v.diff(x)
+                + v * v.diff(y)
+                + (1 / rho) * p.diff(y)
+                - nu * v.diff(x, 2)
+                - nu * v.diff(y, 2)
+            ),
+        }
+
+
 @hydra.main(version_base="1.3", config_path=".", config_name="config.yaml")
 def ldc_trainer(cfg: DictConfig) -> None:
+    """Main function for the LDC PINNs."""
     DistributedManager.initialize()  # Only call this once in the entire script!
     dist = DistributedManager()  # call if required elsewhere
 

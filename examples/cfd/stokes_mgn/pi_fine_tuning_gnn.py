@@ -48,7 +48,7 @@ from physicsnemo.utils.logging.wandb import initialize_wandb
 from physicsnemo.models.meshgraphnet import MeshGraphNet
 from physicsnemo.sym.eq.pde import PDE
 from physicsnemo.sym.eq.phy_informer import PhysicsInformer
-from physicsnemo.sym.eq.spatial_grads.spatial_grads import compute_connectivity_tensor
+from physicsnemo.sym.eq.gradients import compute_connectivity_tensor
 from sympy import Function, Number, Symbol
 
 from utils import get_dataset, relative_lp_error
@@ -191,11 +191,13 @@ class PhysicsInformedFineTuner:
         )
 
     def parabolic_inflow(self, y, U_max=0.3):
+        """Compute the parabolic inflow velocity."""
         u = 4 * U_max * y * (0.4 - y) / (0.4**2)
         v = torch.zeros_like(y)
         return u, v
 
     def loss(self):
+        """Compute the loss for the physics-informed fine-tuning."""
         out = self.model(self.pyg_graph.x, self.pyg_graph.edge_attr, self.pyg_graph)
 
         # inflow points
@@ -358,6 +360,7 @@ class PhysicsInformedFineTuner:
 
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
+    """Main function for the Stokes physics-informed fine-tuning."""
     # CUDA support
     if torch.cuda.is_available():
         device = torch.device("cuda")

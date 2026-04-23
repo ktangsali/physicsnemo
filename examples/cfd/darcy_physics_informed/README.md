@@ -79,7 +79,7 @@ darcy_physics_informed_fno.py
 ### Note
 
 If you are running this example outside of the PhysicsNeMo container, install
-PhysicsNeMo Sym using the instructions from [here](https://github.com/NVIDIA/physicsnemo-sym?tab=readme-ov-file#pypi)
+PhysicsNeMo with the sym extra: `pip install "nvidia-physicsnemo[sym]"`
 
 ## References
 

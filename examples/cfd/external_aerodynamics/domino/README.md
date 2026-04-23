@@ -340,7 +340,7 @@ library. Install it using
 
 ```bash
 pip install "Cython"
-pip install "nvidia-physicsnemo.sym>2.1.0" --no-build-isolation
+pip install "nvidia-physicsnemo[sym]"
 ```
 
 To execute the training using physics losses, run the `train.py` with the

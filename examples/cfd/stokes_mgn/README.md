@@ -92,7 +92,7 @@ Install the requirements using:
 
 ```bash
 pip install -r requirements.txt
-pip install nvidia-physicsnemo.sym --no-build-isolation
+pip install "nvidia-physicsnemo[sym]"
 ```
 
 ## Getting Started
@@ -160,7 +160,7 @@ The fine-tuning step involves training of a PINN model to first refine the
 predictions of the MeshGraphNet model followed by an inference of the PINN model.
 
 If you are running this fine-tuning outside of the PhysicsNeMo container, install
-PhysicsNeMo Sym using the instructions from [here](https://github.com/NVIDIA/physicsnemo-sym?tab=readme-ov-file#pypi)
+PhysicsNeMo with the sym extra: `pip install "nvidia-physicsnemo[sym]"`
 
 This will save the predictions for the test dataset in `.vtp` format in the `results`
 directory. Use ParaView to open and explore the results.
