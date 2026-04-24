@@ -335,7 +335,7 @@ Note, if you wish to modify the PDEs used for DoMINO, please edit the
 
 #### Prerequisites for PDE residuals
 
-The computation of Physics residuals is supported using the PhysicsNeMo-Sym
+The computation of Physics residuals is supported using the `physicsnemo.sym`
 library. Install it using
 
 ```bash

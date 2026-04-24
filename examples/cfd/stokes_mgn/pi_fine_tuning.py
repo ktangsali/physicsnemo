@@ -222,8 +222,8 @@ class PhysicsInformedFineTuner:
 
         self.node_pde = Stokes(nu=self.nu, dim=2)
 
-        # note: this example uses the PhysicsInformer class from PhysicsNeMo Sym to
-        # construct the computational graph. This allows you to leverage PhysicsNeMo Sym's
+        # note: this example uses the PhysicsInformer class from `physicsnemo.sym` to
+        # construct the computational graph. This allows you to leverage physicsnemo.sym's
         # optimized derivative backend to compute the derivatives, along with other
         # benefits like symbolic definition of PDEs and leveraging the PDEs from PhysicsNeMo
         # Sym's PDE module.

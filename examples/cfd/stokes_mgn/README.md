@@ -4,8 +4,9 @@ This example demonstrates how to train the MeshGraphNet model to learn the flow 
 of Stokes flow and further
 improve the accuracy of the model predictions by physics-informed inference. This example
 also demonstrates how to use physics utilities from
-[PhysicsNeMo-Sym](https://github.com/NVIDIA/physicsnemo-sym) to introduce physics-based
-constraints.
+the `physicsnemo.sym` module
+(install with `pip install "nvidia-physicsnemo[sym]"`)
+to introduce physics-based constraints.
 
 ## Problem overview
 
