@@ -154,8 +154,8 @@ def ldc_trainer(cfg: DictConfig) -> None:
         int_data = sample_interior(4000, dist.device)
 
         y_vals = bc_data["y"]
-        mask_no_slip = y_vals < height / 2
         mask_top_wall = y_vals >= height / 2 - 1e-7
+        mask_no_slip = ~mask_top_wall
 
         no_slip_xy = torch.stack(
             [bc_data["x"][mask_no_slip], bc_data["y"][mask_no_slip]], dim=-1
