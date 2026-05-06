@@ -84,9 +84,7 @@ class AdvectionDiffusion(PDE):
             D = Number(D)
         self.equations = {
             "advection_diffusion": (
-                u * c.diff(x)
-                + v * c.diff(y)
-                - D * (c.diff(x, 2) + c.diff(y, 2))
+                u * c.diff(x) + v * c.diff(y) - D * (c.diff(x, 2) + c.diff(y, 2))
             ),
         }
 
@@ -128,11 +126,33 @@ def main(cfg: DictConfig) -> None:
     coords, flow_fields, c = _load_data(cfg.data.csv_file, cfg.data.base_temp)
     log.info(f"Loaded {len(coords)} data points")
 
-    # Generate networks
+    # Networks that memorize the OpenFOAM data (the same in both modes).
     flow_net = FullyConnected(in_features=2, out_features=3).to(dist.device)
     heat_net = FullyConnected(in_features=2, out_features=1).to(dist.device)
-    invert_net_nu = FullyConnected(in_features=2, out_features=1).to(dist.device)
-    invert_net_D = FullyConnected(in_features=2, out_features=1).to(dist.device)
+
+    # Inversion variables: choose between two natural model classes.
+    #   - ``scalar``: a single learnable parameter per coefficient, in
+    #     log-space so positivity is enforced and the optimizer searches
+    #     over orders of magnitude. The right inductive bias when the truth
+    #     is a constant (as it is here).
+    #   - ``field``:  an MLP coords -> coefficient. The right model when the
+    #     unknown coefficient could vary in space.
+    inversion_mode = cfg.inversion.mode
+    if inversion_mode == "scalar":
+        init_log = float(np.log(cfg.inversion.init_value))
+        log_nu = torch.nn.Parameter(torch.full((), init_log, device=dist.device))
+        log_D = torch.nn.Parameter(torch.full((), init_log, device=dist.device))
+        inversion_params = [log_nu, log_D]
+    elif inversion_mode == "field":
+        invert_net_nu = FullyConnected(in_features=2, out_features=1).to(dist.device)
+        invert_net_D = FullyConnected(in_features=2, out_features=1).to(dist.device)
+        inversion_params = list(invert_net_nu.parameters()) + list(
+            invert_net_D.parameters()
+        )
+    else:
+        raise ValueError(
+            f"inversion.mode must be 'scalar' or 'field', got {inversion_mode!r}"
+        )
 
     # Define the PDEs using string for coefficients (these will be inferred)
     navier_stokes = NavierStokes(nu="nu")
@@ -145,9 +165,19 @@ def main(cfg: DictConfig) -> None:
         grad_method="autodiff",
         device=dist.device,
         detach_names=[
-            "u", "u__x", "u__x__x", "u__y", "u__y__y",
-            "v", "v__x", "v__x__x", "v__y", "v__y__y",
-            "p", "p__x", "p__y",
+            "u",
+            "u__x",
+            "u__x__x",
+            "u__y",
+            "u__y__y",
+            "v",
+            "v__x",
+            "v__x__x",
+            "v__y",
+            "v__y__y",
+            "p",
+            "p__x",
+            "p__y",
         ],
     )
 
@@ -161,10 +191,7 @@ def main(cfg: DictConfig) -> None:
 
     # Optimizer and Learning Rate Scheduler
     all_params = (
-        list(flow_net.parameters())
-        + list(heat_net.parameters())
-        + list(invert_net_nu.parameters())
-        + list(invert_net_D.parameters())
+        list(flow_net.parameters()) + list(heat_net.parameters()) + inversion_params
     )
     optimizer = Adam(all_params, lr=cfg.scheduler.initial_lr)
 
@@ -193,8 +220,16 @@ def main(cfg: DictConfig) -> None:
 
         flow_pred = flow_net(coords_batch)
         c_pred = heat_net(coords_batch)
-        nu_pred = invert_net_nu(coords_batch)
-        D_pred = invert_net_D(coords_batch)
+
+        # Predict nu, D as either a broadcast scalar or an MLP-evaluated field.
+        # Both branches produce tensors of shape [batch, 1] so the rest of the
+        # training loop is mode-agnostic.
+        if inversion_mode == "scalar":
+            nu_pred = log_nu.exp().expand(coords_batch.shape[0], 1)
+            D_pred = log_D.exp().expand(coords_batch.shape[0], 1)
+        else:  # "field"
+            nu_pred = invert_net_nu(coords_batch)
+            D_pred = invert_net_D(coords_batch)
 
         # Data-fitting loss
         data_loss = torch.nn.functional.mse_loss(
@@ -221,12 +256,15 @@ def main(cfg: DictConfig) -> None:
             }
         )
 
-        phy_loss = (
+        # Per-residual physics losses; weighted to balance contributions
+        # since the AD residual is naturally smaller than the NS residuals.
+        ns_loss = (
             ns_residuals["continuity"] ** 2
             + ns_residuals["momentum_x"] ** 2
             + ns_residuals["momentum_y"] ** 2
-            + ad_residuals["advection_diffusion"] ** 2
         ).mean()
+        ad_loss = (ad_residuals["advection_diffusion"] ** 2).mean()
+        phy_loss = cfg.loss_weights.ns * ns_loss + cfg.loss_weights.ad * ad_loss
 
         loss = data_loss + phy_loss
         loss.backward()
@@ -234,12 +272,23 @@ def main(cfg: DictConfig) -> None:
         scheduler.step()
 
         if step % log_freq == 0 or step == max_steps - 1:
-            mean_nu = nu_pred.mean().item()
-            mean_D = D_pred.mean().item()
+            # Report nu, D differently per mode: a single scalar for ``scalar``
+            # mode, mean+std over the batch for ``field`` mode (the std is
+            # informative -- in this problem the truth is constant so any
+            # non-zero std is structure the network has invented to absorb
+            # data-fit residual).
+            if inversion_mode == "scalar":
+                coef_str = f"nu={nu_pred[0, 0].item():.6f} D={D_pred[0, 0].item():.6f}"
+            else:
+                coef_str = (
+                    f"nu={nu_pred.mean().item():.6f}±{nu_pred.std().item():.4f} "
+                    f"D={D_pred.mean().item():.6f}±{D_pred.std().item():.4f}"
+                )
             log.info(
                 f"step {step:6d} | loss={loss.item():.6e} "
-                f"data={data_loss.item():.6e} phy={phy_loss.item():.6e} "
-                f"| mean_nu={mean_nu:.6f} mean_D={mean_D:.6f} "
+                f"data={data_loss.item():.6e} "
+                f"ns={ns_loss.item():.6e} ad={ad_loss.item():.6e} "
+                f"| {coef_str} "
                 f"| lr={scheduler.get_last_lr()[0]:.6e}"
             )
 

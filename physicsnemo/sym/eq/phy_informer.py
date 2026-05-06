@@ -127,9 +127,7 @@ class PhysicsInformer:
         self.device = device if device is not None else torch.device("cpu")
 
         self.grad_calc = GradientCalculator(device=self.device)
-        self.computations = self.equations.make_computations(
-            detach_names=detach_names
-        )
+        self.computations = self.equations.make_computations(detach_names=detach_names)
 
         self.require_mixed_derivs = False
         self.graph = self._create_graph()
