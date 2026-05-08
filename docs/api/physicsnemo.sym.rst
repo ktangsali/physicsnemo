@@ -3,7 +3,7 @@ PhysicsNeMo Sym
 
 Symbolic PDE residual computation for physics-informed training.
 
-PDE base class
+PDE Base Class
 --------------
 
 .. autoclass:: physicsnemo.sym.eq.pde.PDE
@@ -17,7 +17,7 @@ PhysicsInformer
    :members:
    :show-inheritance:
 
-Gradient calculators
+Gradient Calculators
 --------------------
 
 ``GradientCalculator`` is the user-facing dispatcher that ``PhysicsInformer``
