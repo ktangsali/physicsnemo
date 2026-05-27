@@ -68,6 +68,7 @@ from strategies import (
     ClassBalancedRandomQueryStrategy,
     DummyLabelStrategy,
     JointUQQueryStrategy,
+    LatentNoveltyQueryStrategy,
     RandomQueryStrategy,
 )
 from aero_metrology import FieldMetrologyStrategy
@@ -316,10 +317,19 @@ def main(cfg: DictConfig) -> None:
         query_strategy = RandomQueryStrategy(
             max_samples=samples_per_round, seed=random_seed
         )
+    elif acquisition == "latent_novelty":
+        knn_k = int(getattr(cfg, "latent_novelty_knn_k", 10))
+        query_strategy = LatentNoveltyQueryStrategy(
+            max_samples=samples_per_round,
+            precision=precision,
+            knn_k=knn_k,
+            cold_start_seed=random_seed,
+        )
     else:
         raise ValueError(
             f"Unknown acquisition strategy: {acquisition!r}. "
-            f"Expected one of: 'joint_uq', 'random', 'class_balanced_random'."
+            f"Expected one of: 'joint_uq', 'random', 'class_balanced_random', "
+            f"'latent_novelty'."
         )
 
     metrology = FieldMetrologyStrategy(precision=precision)
