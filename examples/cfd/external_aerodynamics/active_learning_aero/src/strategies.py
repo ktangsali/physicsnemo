@@ -484,9 +484,12 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
         remaining columns are the reduced latent vector.
         """
         pool = self.driver.training_pool
-        index_list = [int(i) for i in (
-            indices.tolist() if isinstance(indices, torch.Tensor) else list(indices)
-        )]
+        index_list = [
+            int(i)
+            for i in (
+                indices.tolist() if isinstance(indices, torch.Tensor) else list(indices)
+            )
+        ]
         n_total = len(index_list)
         # Round-robin shard when work is plentiful; replicate across
         # ranks when work is scarce to keep every rank busy and avoid
@@ -499,9 +502,7 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
 
         for ui, flat_idx in enumerate(my_indices):
             if ui % 50 == 0 and rank == 0:
-                self.logger.info(
-                    f"  {log_prefix}: ~{ui * world_size}/{n_total}"
-                )
+                self.logger.info(f"  {log_prefix}: ~{ui * world_size}/{n_total}")
             flat_idx = int(flat_idx)
             batch = pool.get_by_flat_idx(flat_idx)
             batch = {
@@ -531,9 +532,7 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
             # self-describing and have a non-NaN sentinel column.
             row = torch.cat(
                 [
-                    torch.tensor(
-                        [float(flat_idx)], dtype=torch.float32, device=device
-                    ),
+                    torch.tensor([float(flat_idx)], dtype=torch.float32, device=device),
                     reduced.detach().to(torch.float32).flatten(),
                 ]
             )
@@ -626,9 +625,7 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
 
         for ui, flat_idx in enumerate(my_indices):
             if ui % 50 == 0 and rank == 0:
-                self.logger.info(
-                    f"  novelty scoring: ~{ui * world_size}/{n_total}"
-                )
+                self.logger.info(f"  novelty scoring: ~{ui * world_size}/{n_total}")
             flat_idx = int(flat_idx)
             batch = pool.get_by_flat_idx(flat_idx)
             batch = {

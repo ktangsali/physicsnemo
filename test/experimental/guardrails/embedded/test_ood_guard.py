@@ -231,9 +231,9 @@ def test_score_geometry_returns_distances_and_orders_in_vs_ood(device):
     should yield a large one (~2.0 on the unit sphere).  Verifies both
     the shape contract and the monotonicity that AL acquisition relies on.
     """
-    guard = OODGuard(
-        buffer_size=32, geometry_embed_dim=8, knn_k=4, sensitivity=1.5
-    ).to(device)
+    guard = OODGuard(buffer_size=32, geometry_embed_dim=8, knn_k=4, sensitivity=1.5).to(
+        device
+    )
 
     # Tight cluster of in-distribution latents around +e_0.
     gen = torch.Generator(device=device).manual_seed(13)
@@ -312,9 +312,9 @@ def test_score_geometry_does_not_emit_log_warnings(caplog):
     guard.collect(geometry_latent=torch.randn(8, 4))
     with caplog.at_level(logging.WARNING, logger=_GUARD_LOGGER):
         guard.score_geometry(torch.randn(3, 4))
-    assert not any(
-        "OOD Guard" in r.getMessage() for r in caplog.records
-    ), [r.getMessage() for r in caplog.records]
+    assert not any("OOD Guard" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
 
 
 # ---------------------------------------------------------------------------
