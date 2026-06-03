@@ -39,6 +39,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float
 
 from physicsnemo.nn.functional import knn
 
@@ -200,7 +201,10 @@ class OODGuard(nn.Module):
 
     @torch.compiler.disable
     @torch.no_grad()
-    def score_geometry(self, geometry_latent: torch.Tensor) -> torch.Tensor:
+    def score_geometry(
+        self,
+        geometry_latent: Float[torch.Tensor, "batch dim"],
+    ) -> Float[torch.Tensor, "batch"]:
         """Return per-sample average kNN distance in the geometry latent space.
 
         Same computation as the geometry surface of :meth:`check` but
@@ -252,6 +256,8 @@ class OODGuard(nn.Module):
             )
         # Upcast so cdist against the fp32 store works under AMP inputs.
         pooled = geometry_latent.detach().to(self.geo_embeddings.dtype)
+        # Normalise both query and buffer to unit vectors so that knn returns
+        # cosine distances bounded in [0, 2] on the unit hypersphere.
         z = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-8)
         store = self.geo_embeddings[:n_valid]
         store_norm = store / (store.norm(dim=-1, keepdim=True) + 1e-8)

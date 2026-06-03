@@ -540,16 +540,24 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
 
         local_t = torch.cat(local_rows, dim=0)
         gathered = padded_all_gather(local_t, device)
-        # Dedupe by flat_idx (column 0). This is a no-op for the
-        # round-robin shard mode (shards are disjoint) and removes the
-        # replicated rows produced by the n_total < world_size branch.
-        seen: set[int] = set()
-        keep_mask = torch.zeros(gathered.shape[0], dtype=torch.bool, device=device)
-        for i in range(gathered.shape[0]):
-            fid = int(gathered[i, 0].item())
-            if fid not in seen:
-                seen.add(fid)
-                keep_mask[i] = True
+        # Dedupe by flat_idx (column 0), preserving first-occurrence order.
+        # This is a no-op for the round-robin shard mode (shards are
+        # disjoint) and removes the replicated rows produced by the
+        # n_total < world_size branch.  Vectorised via torch.unique +
+        # scatter_reduce(amin) so the per-row .item() syncs of a Python
+        # loop are replaced by a single device→host sync inside unique.
+        n_rows = gathered.shape[0]
+        flat_ids = gathered[:, 0].long()
+        unique_ids, inverse = torch.unique(flat_ids, return_inverse=True)
+        row_index = torch.arange(n_rows, device=device)
+        first_idx = torch.full(
+            (unique_ids.shape[0],), n_rows, dtype=torch.long, device=device
+        )
+        first_idx.scatter_reduce_(
+            0, inverse, row_index, reduce="amin", include_self=True
+        )
+        keep_mask = torch.zeros(n_rows, dtype=torch.bool, device=device)
+        keep_mask[first_idx] = True
         return gathered[keep_mask]
 
     @torch.no_grad()
@@ -595,7 +603,7 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
                 f"Calibrating OODGuard on {len(labeled)} labeled samples..."
             )
         labeled_table = self._embed_indices(
-            [int(i) for i in labeled.tolist()],
+            labeled,
             backbone=backbone,
             embedding_reduction=embedding_reduction,
             device=device,
@@ -651,11 +659,18 @@ class LatentNoveltyQueryStrategy(QueryStrategy):
             novelty = guard.score_geometry(reduced.detach().to(torch.float32))
             local_rows.append([float(flat_idx), float(novelty.item())])
 
-        local_t = torch.tensor(local_rows, dtype=torch.float64, device=device)
-        if local_t.ndim == 1:
-            local_t = local_t.unsqueeze(0)
+        # Rows are (flat_idx, novelty_score); ranks with no work after the
+        # round-robin slice must contribute an explicit (0, 2) tensor so
+        # padded_all_gather sees a consistent column count across ranks
+        # (an empty list would otherwise produce shape (0,) and a stray
+        # unsqueeze would yield (1, 0), corrupting the gather).
+        if len(local_rows) == 0:
+            local_t = torch.zeros((0, 2), dtype=torch.float64, device=device)
+        else:
+            local_t = torch.tensor(local_rows, dtype=torch.float64, device=device)
         all_data = padded_all_gather(local_t, device).cpu().numpy()
 
+        # Unpack each gathered row into (flat_idx, novelty_score).
         scores = [(int(row[0]), float(row[1])) for row in all_data]
         scores.sort(key=lambda x: x[1], reverse=True)
         selected = scores[: self.max_samples]
