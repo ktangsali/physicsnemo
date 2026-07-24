@@ -105,18 +105,19 @@ jobs:
             gh pr list --state open --base "$DEFAULT_BRANCH" --limit 100 \
               --json url,headRefName,body |
               jq -c --arg rc "$RC_BRANCH" --arg next "$NEXT_DEV_VERSION" '
-                .[]
-                | select(
-                    ((.body // "") | contains(
-                      "<!-- release-rc-branch: " + $rc + " -->"
-                    ))
-                    and
-                    ((.body // "") | contains(
-                      "<!-- release-next-version: " + $next + " -->"
-                    ))
-                  )
-              ' |
-              head -n 1
+                [
+                  .[]
+                  | select(
+                      ((.body // "") | contains(
+                        "<!-- release-rc-branch: " + $rc + " -->"
+                      ))
+                      and
+                      ((.body // "") | contains(
+                        "<!-- release-next-version: " + $next + " -->"
+                      ))
+                    )
+                ][0] // empty
+              '
           )"
           if [[ -n "$existing_pr" ]]; then
             printf 'already_exists=true\n' >> "$GITHUB_OUTPUT"
@@ -152,7 +153,7 @@ jobs:
               )"
               candidate_heading="$(
                 git show "origin/$candidate:CHANGELOG.md" |
-                  sed -n '/^## \[/ { p; q; }'
+                  awk '/^## \[/ && !found { print; found=1 }'
               )"
               next_release_version="${NEXT_DEV_VERSION%a0}"
               expected_heading="## [$next_release_version] - 2026-XX-YY"
@@ -291,8 +292,7 @@ jobs:
           issue_number="$(
             gh issue list --state open --limit 100 --json number,title |
               jq -r --arg title "$tracking_title" \
-                '.[] | select(.title == $title) | .number' |
-              head -n 1
+                '[.[] | select(.title == $title) | .number][0] // empty'
           )"
           if [[ -n "$issue_number" ]]; then
             gh issue comment "$issue_number" \
