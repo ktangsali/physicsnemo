@@ -105,7 +105,7 @@ jobs:
             )"
             existing_heading="$(
               git show "origin/$rc_branch:CHANGELOG.md" |
-                sed -n '/^## \[/ { p; q; }'
+                awk '/^## \[/ && !found { print; found=1 }'
             )"
             expected_heading="## [$RELEASE_VERSION] - $RELEASE_DATE"
             if [[ "$existing_version" != "$RELEASE_VERSION" ||
@@ -159,8 +159,7 @@ jobs:
           tracking_url="$(
             gh issue list --state all --limit 100 --json title,url |
               jq -r --arg title "$tracking_title" \
-                '.[] | select(.title == $title) | .url' |
-              head -n 1
+                '[.[] | select(.title == $title) | .url][0] // empty'
           )"
 
           if [[ -z "$tracking_url" ]]; then
