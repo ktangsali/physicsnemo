@@ -1,5 +1,7 @@
 # NVIDIA PhysicsNeMo
 
+This is supposed to simulate a bug fix that is pushed to RC. 
+
 <!-- markdownlint-disable -->
 
 📝 NVIDIA PhysicsNeMo is undergoing an update to v2.0 - all the features, with easier installation and integration to external packages.  See the [migration guide](https://github.com/NVIDIA/physicsnemo/blob/main/v2.0-MIGRATION-GUIDE.md) for more details!
