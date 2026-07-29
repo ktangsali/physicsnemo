@@ -139,8 +139,16 @@ def compute_drag_target_from_batch(
     p = fields_phys[:, 0]
     wss = fields_phys[:, 1:4]
 
-    normals = batch["surface_normals"].squeeze(0).to(device, dtype=fields_phys.dtype)
-    area = batch["surface_areas"].squeeze(0).to(device, dtype=fields_phys.dtype)
+    # With point subsampling (data.resolution < full mesh) the datapipe emits the
+    # subsampled, field-aligned normals/areas under the *_sub keys and omits the
+    # full arrays. Fall back to those so the integral matches the subsampled
+    # `fields` (this is exactly the field-GP drag path).
+    normals_key = (
+        "surface_normals" if "surface_normals" in batch else "surface_normals_sub"
+    )
+    areas_key = "surface_areas" if "surface_areas" in batch else "surface_areas_sub"
+    normals = batch[normals_key].squeeze(0).to(device, dtype=fields_phys.dtype)
+    area = batch[areas_key].squeeze(0).to(device, dtype=fields_phys.dtype)
     p, wss = p.to(device), wss.to(device)
 
     coeff = 2.0 / (FRONTAL_AREA * REFERENCE_DENSITY * REFERENCE_VELOCITY**2)

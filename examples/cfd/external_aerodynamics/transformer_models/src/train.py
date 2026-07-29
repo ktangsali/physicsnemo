@@ -403,6 +403,10 @@ def train_epoch(
     total_metrics = {}
 
     precision = getattr(cfg, "precision", "float32")
+    # Optional gradient accumulation (default 1 = step every batch). Mirrors
+    # train_field_gp.py so the deterministic baseline can match the GP run's
+    # effective batch size for an apples-to-apples comparison.
+    accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
     start_time = time.time()
 
     for i, batch in enumerate(dataloader):
@@ -425,16 +429,24 @@ def train_epoch(
             if reg_loss.requires_grad:
                 loss = loss + lambda_reg * reg_loss
 
-        optimizer.zero_grad()
-        if precision == "float16" and scaler is not None:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
+        if i % accumulation_steps == 0:
+            optimizer.zero_grad()
 
-        if not isinstance(scheduler, torch.optim.lr_scheduler.StepLR):
+        scaled_loss = loss / accumulation_steps
+        is_step_boundary = (i + 1) % accumulation_steps == 0 or (i + 1) == epoch_len
+        if precision == "float16" and scaler is not None:
+            scaler.scale(scaled_loss).backward()
+            if is_step_boundary:
+                scaler.step(optimizer)
+                scaler.update()
+        else:
+            scaled_loss.backward()
+            if is_step_boundary:
+                optimizer.step()
+
+        if is_step_boundary and not isinstance(
+            scheduler, torch.optim.lr_scheduler.StepLR
+        ):
             scheduler.step()
 
         end_time = time.time()
