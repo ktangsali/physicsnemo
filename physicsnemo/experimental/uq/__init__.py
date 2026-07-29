@@ -17,10 +17,19 @@
 """Uncertainty quantification modules (experimental).
 
 This subpackage provides UQ building blocks that can be attached to encoder
-backbones to produce calibrated uncertainty estimates.  Currently available:
+backbones to produce calibrated uncertainty estimates.  Both heads below are
+variational Gaussian processes with inducing points; they differ in what
+constitutes a data point, and therefore in what they predict:
 
-* :class:`VariationalGPHead` — variational Gaussian process head backed by
-  GPyTorch.  Requires ``gpytorch`` (``pip install gpytorch``).
+* :class:`VariationalGPHead` — takes one pooled embedding per sample and
+  predicts a *scalar* target with uncertainty.  Requires ``gpytorch``
+  (``pip install gpytorch``).
+* :class:`FieldVariationalGPHead` — takes *per-point* features and predicts a
+  multi-channel *field*, with one Gaussian posterior per point per channel.
+  Requires ``gpytorch``.
+
+``FieldGPHead`` / ``FieldGPPrediction`` are retained as aliases of the
+``FieldVariational*`` names for backwards compatibility.
 """
 
 from physicsnemo.core.version_check import check_version_spec
@@ -28,4 +37,10 @@ from physicsnemo.core.version_check import check_version_spec
 _GPYTORCH_AVAILABLE = check_version_spec("gpytorch", hard_fail=False)
 
 if _GPYTORCH_AVAILABLE:
+    from .field_variational_gp_head import (
+        FieldGPHead,
+        FieldGPPrediction,
+        FieldVariationalGPHead,
+        FieldVariationalGPPrediction,
+    )
     from .variational_gp_head import GPPrediction, VariationalGPHead

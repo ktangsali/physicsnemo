@@ -21,6 +21,12 @@ neural-network encoder to produce calibrated uncertainty estimates for a
 scalar target.  Built on GPyTorch's variational inference machinery with
 inducing points.
 
+This head consumes **one pooled embedding per sample** and predicts **one
+scalar per sample**.  For per-point, multi-channel *field* predictions (one
+Gaussian posterior per point per channel), use its sibling
+:class:`~physicsnemo.experimental.uq.FieldVariationalGPHead`, which shares the
+same variational-GP design but keeps the point dimension.
+
 Key design choices
 ------------------
 * **Float64 GP internals (default)** — Short lengthscales on L2-normalised
@@ -395,9 +401,7 @@ class VariationalGPHead(nn.Module):
         return neg_elbo
 
     @torch.no_grad()
-    def predict(
-        self, embedding: Float[torch.Tensor, "batch dim"]
-    ) -> GPPrediction:
+    def predict(self, embedding: Float[torch.Tensor, "batch dim"]) -> GPPrediction:
         r"""Produce predictions with calibrated uncertainty intervals.
 
         Temporarily switches the module to eval mode, runs inference with

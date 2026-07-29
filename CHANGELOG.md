@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocols and `physicsnemo.experimental.uq.VariationalGPHead`, with a
   layered structure (generic AL driver / GP-UQ recipe / aero adapter)
   designed for reuse on other UQ-based regression problems.
+- Adds `FieldVariationalGPHead` to `physicsnemo.experimental.uq`, a pointwise
+  independent multitask variational GP head for per-point, multi-channel *field*
+  uncertainty. It is the field sibling of `VariationalGPHead` (which pools a
+  geometry to one embedding and predicts a scalar): it keeps the point dimension
+  and returns one Gaussian posterior per point per channel, so a single forward
+  pass yields the field prediction, the total predictive variance and the
+  epistemic-only variance — no ensembling or MC-Dropout. Backbone-agnostic (it
+  consumes only a `(..., input_dim)` feature tensor), with an optional DKL MLP,
+  a Matérn-5/2 ARD kernel, float64 GP internals, an `l2_radial` feature
+  normalisation that preserves the radial out-of-distribution cue, and an
+  optional heteroscedastic observation-noise MLP. Includes a surface field-GP
+  training recipe for GeoTransolver
+  (`examples/cfd/external_aerodynamics/transformer_models/src/train_field_gp.py`).
 - Adds `LatentNoveltyQueryStrategy` to the active-learning aero recipe,
   a third acquisition strategy that ranks unlabeled samples by their
   average kNN cosine distance in the encoder's learned geometry latent
