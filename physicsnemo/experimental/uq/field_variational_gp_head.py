@@ -216,8 +216,8 @@ class FieldVariationalGPPrediction(NamedTuple):
     mean : torch.Tensor
         Predictive mean, shape ``(..., num_tasks)``.
     variance : torch.Tensor
-        Total predictive variance (epistemic + aleatoric/observation noise),
-        shape ``(..., num_tasks)``.
+        Total predictive variance (epistemic + input-dependent observation
+        noise), shape ``(..., num_tasks)``.
     lower : torch.Tensor
         Lower bound of the confidence interval, shape ``(..., num_tasks)``.
     upper : torch.Tensor
@@ -304,8 +304,9 @@ class FieldVariationalGPHead(nn.Module):
         *total* predictive std informative for per-point error ranking — with a
         constant noise floor the total std ranks points identically to the
         epistemic std, so all ranking signal comes from the (typically <1 %)
-        epistemic share of the variance.  The epistemic/aleatoric split is
-        retained; only the aleatoric part gains spatial structure.
+        epistemic share of the variance.  The split between the epistemic and
+        observation-noise terms is retained; only the latter gains spatial
+        structure.
     noise_std_range : tuple[float, float], optional
         Hard clamp ``(lo, hi)`` on the per-point noise std, as a safety net
         against a degenerate zero-noise solution.  Default ``(1e-3, 10.0)``.
@@ -438,9 +439,10 @@ class FieldVariationalGPHead(nn.Module):
         # adds zero information to the per-point ranking of |error| — the total
         # std ranks points exactly like the epistemic std. Making the noise a
         # function of the GP-input features lets the other ~99% of the variance
-        # carry ranking signal, and is physically right (a wake has higher
-        # irreducible variance than the hood). The epistemic/aleatoric split is
-        # preserved — and sharpened, since the aleatoric part now varies too.
+        # carry ranking signal. On a deterministic (steady-RANS) target there is
+        # no observational scatter to learn, so this term absorbs mean-model
+        # discrepancy instead: it marks where the surrogate is structurally
+        # wrong, e.g. a wake rather than the hood.
         self._noise_range = (float(noise_std_range[0]), float(noise_std_range[1]))
         if noise_mlp_hidden:
             layers: list[nn.Module] = []
@@ -544,7 +546,20 @@ class FieldVariationalGPHead(nn.Module):
         expected log-likelihood is summed over points and tasks then divided by
         the number of points, and the KL is divided by ``num_data / beta`` — so
         the loss is on the same scale as the homoscedastic path and the existing
-        learning rates and beta/NLL warmup schedules carry over unchanged.
+        learning rates and beta/NLL warmup schedules carry over unchanged.  That
+        normalisation is the stochastic variational bound of Hensman, Fusi &
+        Lawrence (*Gaussian Processes for Big Data*, UAI 2013); ``num_data`` is
+        its :math:`N`.
+
+        Note on interpretation: :math:`\sigma^2(x)` is the variance of the
+        Gaussian likelihood, i.e. input-dependent observation noise.  On a
+        deterministic target (steady RANS) it is not measurement noise — it
+        absorbs mean-model discrepancy, so treat it as a learned discrepancy
+        variance rather than as physical variability.  Unlike the classical
+        variational heteroscedastic GP (Lázaro-Gredilla & Titsias, ICML 2011),
+        which puts a second GP on the log-noise and so carries a second KL term,
+        this amortized network has no prior on :math:`\sigma`; ``noise_std_range``
+        and gradient clipping are the only things preventing it from collapsing.
         """
         mu = dist.mean
         latent_var = dist.variance
@@ -771,8 +786,8 @@ class FieldVariationalGPHead(nn.Module):
                 # floor is added.
                 epistemic_var = dist.variance
                 if self.heteroscedastic:
-                    # Same decomposition, but the aleatoric term now varies
-                    # per point instead of being one scalar per channel.
+                    # Same decomposition, but the observation-noise term now
+                    # varies per point instead of being one scalar per channel.
                     mean = dist.mean
                     var = epistemic_var + self._pointwise_noise_var(gp_in)
                 else:

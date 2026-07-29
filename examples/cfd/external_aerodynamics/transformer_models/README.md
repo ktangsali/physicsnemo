@@ -432,13 +432,52 @@ detection and active learning rather than just error bars.
                                       └──────────────────────────────┘
 ```
 
-`predict()` returns the total predictive variance *and* the epistemic part
-separately.  Use the epistemic term for "where is the model uncertain?" maps and
-active learning; use the total for calibrated prediction intervals.
-
 | Module | Location | Purpose |
 |--------|----------|---------|
-| `FieldVariationalGPHead` | `physicsnemo.experimental.uq` | Per-point independent multitask variational GP with Matérn-5/2 ARD kernel, float64 internals, optional DKL MLP and heteroscedastic noise |
+| `FieldVariationalGPHead` | `physicsnemo.experimental.uq` | Per-point independent multitask variational GP with Matérn-5/2 ARD kernel, float64 internals, optional DKL MLP and input-dependent observation noise |
+
+### The variance decomposition
+
+`predict()` returns the total predictive variance *and* its epistemic part
+separately, so the two can be used for different jobs:
+
+```
+total_variance(x)  =  epistemic_variance(x)  +  sigma^2(x)
+                      ^^^^^^^^^^^^^^^^^^^^      ^^^^^^^^^
+                      GP posterior variance     input-dependent
+                      (distance-aware; grows    observation noise
+                      away from inducing pts)   (the noise MLP)
+```
+
+Use `epistemic_variance` for "where is the model uncertain?" maps, out-of-distribution
+detection and active-learning acquisition; use the total `variance` for calibrated
+prediction intervals and for calibration metrics (z-RMS, coverage, NLPD).
+
+**Naming the second term.** In the loss it is exactly the variance of the Gaussian
+likelihood, so the methods-level name is **input-dependent observation noise** —
+the standard heteroscedastic-GP quantity (Goldberg et al., 1998; Lázaro-Gredilla &
+Titsias, 2011). Do not read it as measurement noise here. DrivAerStar targets are
+deterministic steady-RANS solutions, so a geometry maps to one field and there is
+no irreducible observational scatter to learn. What `sigma^2(x)` actually absorbs is
+the part of the residual the GP mean cannot represent, which makes it a learned
+**model-discrepancy variance** in the Kennedy & O'Hagan (2001) sense — a map of
+where the surrogate is structurally wrong. That reading, not "inherent flow
+variability", is what the per-point noise field supports.
+
+We therefore avoid the word *aleatoric* for it, and reuse only the mechanism from
+Kendall & Gal (2017): `sigma(x)` is amortized by a small MLP on the same DKL
+features the kernel sees, trained through the noise-attenuated Gaussian
+log-likelihood.
+
+**It is a point estimate, and that has a cost.** The classical variational
+treatment places a second GP on the log-noise, so the objective carries its own
+`KL(q(g)||p(g))` term that actively resists the noise function running to extremes.
+Amortizing with a deterministic network drops both the prior and that KL, so
+nothing shrinks `sigma(x)`. `gp_noise_std_range` and `head_grad_clip_norm` are the
+substitute guard, and they are load-bearing rather than cosmetic: an early run with
+a `1e-3` floor collapsed mid-training. A sparse heteroscedastic GP with a second
+variational noise process (Liu et al., 2018b) is the principled alternative and is
+untried here.
 
 ### Training
 
@@ -535,9 +574,30 @@ Two practical notes when porting:
 
 ### References
 
-- **Stochastic Variational Deep Kernel Learning:** [Wilson et al., 2016](https://arxiv.org/abs/1611.00336) — the GP-on-neural-features construction this head implements
-- **Heteroscedastic aleatoric uncertainty:** [What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision?](https://arxiv.org/abs/1703.04977) — Kendall & Gal, NeurIPS 2017; the noise-attenuated likelihood the noise MLP optimises
-- **Multitask / multi-output GPs:** [Remarks on Multi-Output Gaussian Process Regression](https://doi.org/10.1016/j.knosys.2018.03.022) — Liu et al., 2018
+Nothing in this head is novel; it composes four established pieces, and the
+citations below map one-to-one onto the code.
+
+*Sparse variational GP — the inducing points and the ELBO:*
+
+- **Variational Learning of Inducing Variables in Sparse Gaussian Processes:** [Titsias, AISTATS 2009](https://proceedings.mlr.press/v5/titsias09a.html) — the inducing-point variational bound
+- **Gaussian Processes for Big Data:** [Hensman, Fusi & Lawrence, UAI 2013](https://arxiv.org/abs/1309.6835) — the minibatch `(1/N) * sum E_q[log p] - KL` form. `_hetero_neg_elbo` mirrors this normalisation deliberately so it matches GPyTorch's `VariationalELBO`, and `n_train` is the `N` here
+
+*GP on neural-network features:*
+
+- **Stochastic Variational Deep Kernel Learning:** [Wilson, Hu, Salakhutdinov & Xing, NeurIPS 2016](https://arxiv.org/abs/1611.00336) — the construction this head implements (DKL MLP feeding a variational GP)
+- **The Promises and Pitfalls of Deep Kernel Learning:** [Ober, Rasmussen & van der Wilk, UAI 2021](https://arxiv.org/abs/2102.12108) — documents the DKL overfitting and feature-collapse modes. Directly relevant to why `gp_feature_norm` and the lengthscale priors are not optional here
+
+*Input-dependent observation noise:*
+
+- **Regression with Input-dependent Noise: A Gaussian Process Treatment:** Goldberg, Williams & Bishop, NIPS 1997 — the original heteroscedastic GP
+- **Variational Heteroscedastic Gaussian Process Regression:** Lázaro-Gredilla & Titsias, ICML 2011 — the variational treatment, with a second GP on the log-noise
+- **Large-scale Heteroscedastic Regression via Gaussian Process:** [Liu, Ong & Cai, 2018b](https://arxiv.org/abs/1811.01179) — a sparse, minibatch-capable heteroscedastic ELBO; the closest published objective to ours, and the principled alternative to our point-estimate noise MLP
+- **What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision?:** [Kendall & Gal, NeurIPS 2017](https://arxiv.org/abs/1703.04977) — the amortized-network noise head and noise-attenuated likelihood we actually use. We borrow the mechanism, not the "aleatoric" interpretation (see [The variance decomposition](#the-variance-decomposition))
+
+*Interpreting the noise term, and multi-output structure:*
+
+- **Bayesian Calibration of Computer Models:** [Kennedy & O'Hagan, JRSS-B 2001](https://doi.org/10.1111/1467-9868.00294) — model discrepancy: the gap between a deterministic simulator and truth, which is what `sigma^2(x)` absorbs on a deterministic RANS dataset
+- **Remarks on Multi-Output Gaussian Process Regression:** [Liu et al., 2018a](https://doi.org/10.1016/j.knosys.2018.03.022) — multi-output GP structure; this head uses the independent-per-task case (no cross-channel covariance)
 
 ---
 
