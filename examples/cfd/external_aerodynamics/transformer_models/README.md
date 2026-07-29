@@ -218,7 +218,17 @@ Transolver++ is supported with the `plus` flag to the model. In our experiments,
 
 ## Uncertainty Quantification
 
-GeoTransolver supports two complementary UQ methods: a **Variational GP Head** for scalar-level (drag coefficient) uncertainty, and **Concrete Dropout / MC-Dropout** for per-point field uncertainty.  They can be used independently or together.
+GeoTransolver supports three complementary UQ methods:
+
+| Method | Granularity | Cost at inference |
+|--------|-------------|-------------------|
+| **Variational GP Head** | one scalar (drag coefficient) per geometry | single pass |
+| **Field Variational GP Head** | per-point, per-channel field | single pass |
+| **Concrete Dropout / MC-Dropout** | per-point, per-channel field | N stochastic passes |
+
+They can be used independently or together.  The two GP heads are siblings built
+on the same variational-GP machinery — the scalar head pools a geometry to one
+embedding, while the field head keeps the point dimension.
 
 ## Variational GP Head
 
@@ -391,6 +401,143 @@ pip install gpytorch
 - **Variational GPs:** [Scalable Variational Gaussian Process Classification](https://arxiv.org/abs/1411.2005) — Hensman et al., 2015
 - **Deep Kernel Learning:** [Deep Kernel Learning](https://arxiv.org/abs/1511.02222) — Wilson et al., 2016
 - **SNGP / DUE:** [Simple and Principled Uncertainty Estimation with Deterministic Deep Learning](https://arxiv.org/abs/2006.10108) — van Amersfoort et al., 2020
+
+---
+
+## Field Variational GP Head
+
+### Overview
+
+Where the scalar GP head above predicts one number per geometry, the **field**
+GP head (`FieldVariationalGPHead`) *replaces the GeoTransolver readout* and
+predicts the surface field itself: one independent Gaussian posterior per point,
+per channel (pressure + 3 wall-shear-stress components).  The posterior mean is
+the field prediction and the posterior variance is the per-point uncertainty, so
+a **single forward pass** yields both — no ensembling and no MC-Dropout sampling.
+
+The uncertainty is distance-aware: it grows as a point's features move away from
+the learned inducing points, which is what makes it usable for out-of-distribution
+detection and active learning rather than just error bars.
+
+### Architecture
+
+```
+                                      ┌──────────────────────────────┐
+ Input geometry ──► GeoTransolver ──► │  FieldVariationalGPHead      │
+                    (per-point        │                              │
+                     features,        │  DKL MLP ──► feature norm    │──► mean      (B, N, 4)
+                     pre-readout)     │       └──► Matérn-5/2 ARD    │──► variance  (B, N, 4)
+                     (B, N, D)        │            multitask VGP     │──► epistemic (B, N, 4)
+                                      │       └──► noise MLP         │
+                                      └──────────────────────────────┘
+```
+
+`predict()` returns the total predictive variance *and* the epistemic part
+separately.  Use the epistemic term for "where is the model uncertain?" maps and
+active learning; use the total for calibrated prediction intervals.
+
+| Module | Location | Purpose |
+|--------|----------|---------|
+| `FieldVariationalGPHead` | `physicsnemo.experimental.uq` | Per-point independent multitask variational GP with Matérn-5/2 ARD kernel, float64 internals, optional DKL MLP and heteroscedastic noise |
+
+### Training
+
+The settled recipe is the config's defaults, so no hyperparameter overrides are
+needed — only the data paths and a run id:
+
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+torchrun --nproc-per-node=8 src/train_field_gp.py \
+    data.train.data_path=/data/datasets/drivaerstar/surface_files_zarr/class_F/train \
+    data.val.data_path=/data/datasets/drivaerstar/surface_files_zarr/class_F/val \
+    run_id=geotransolver/surface/field_gp
+```
+
+The loss is
+
+```
+w_nll * neg_elbo + lambda_mean_mse * mse + dist_penalty_weight * dist_pen
+```
+
+with both `beta` (the KL weight) and `w_nll` (the weight on the whole negative
+ELBO) ramped from 0 over the first 30 epochs.  The ordering matters: the
+mean-MSE anchor leads the early epochs so the backbone and GP mean become
+accurate *before* the likelihood term is free to shrink the variance.
+
+Three defaults are load-bearing and worth understanding before changing them:
+
+- **`gp_feature_norm: l2_radial`** — fixes the GP-input feature scale so the
+  kernel lengthscale (not the DKL map) does the smoothing, while appending the
+  standardised feature magnitude as an extra ARD dimension.  Normalising onto
+  the unit sphere *without* that magnitude erases the radial OOD cue and drives
+  the OOD/in-distribution std ratio to ~1.0x.
+- **`gp_noise_mlp_hidden: [64, 64]`** — makes the observation noise
+  input-dependent.  With one constant noise per channel the total predictive std
+  ranks points identically to the epistemic std, so per-point error ranking gets
+  no benefit from the (dominant) noise share of the variance.
+- **`gp_noise_std_range: [0.01, 10.0]`** — the heteroscedastic ELBO weights each
+  point by `1/σ²(x)`, so on unit-scale normalised fields a `1e-3` floor permits a
+  weight of `1e6`, and a single collapsing point can destabilise training.
+
+> **Normalization** — DrivAerStar surface fields are stored in raw physical units
+> (Pa), so this config points `data.normalization_dir` at
+> `src/normalization/drivaerstar/`.  The stats in `src/` are nondimensional
+> (pressure-coefficient form) and belong to the DrivAer AWS runs; using them here
+> would mis-scale every field.
+
+### Inference
+
+```bash
+python src/inference_field_gp.py \
+    run_id=geotransolver/surface/field_gp \
+    +checkpoint_epoch=100
+```
+
+### Using the head with another backbone
+
+The head is model-agnostic: it consumes a feature tensor and nothing else.  There
+is no dependency on mesh topology, and coordinates are not a separate input (any
+positional encoding the backbone applies simply arrives inside the features).
+The contract is:
+
+1. the backbone emits per-point features with last dimension `input_dim` — any
+   leading batch/point dims are flattened internally, so `(B, N, D)`, `(N, D)`
+   and `(B, T, N, D)` all work;
+2. targets are `(..., num_tasks)` with matching leading dims.
+
+So attaching it to DoMINO, MeshGraphNet or any other point-wise encoder means
+exposing whatever that model computes before its final projection:
+
+```python
+from physicsnemo.experimental.uq import FieldVariationalGPHead
+
+head = FieldVariationalGPHead(
+    input_dim=feat_dim,          # backbone feature width
+    num_tasks=4,                 # output channels
+    n_train=n_points_per_epoch,  # ELBO normaliser
+    mlp_hidden=[128, 16],
+    feature_norm="l2_radial",
+)
+
+feats = backbone.encode(batch)              # (B, N, feat_dim)
+mean, neg_elbo = head.forward_and_loss(feats, targets, beta=beta)
+loss = neg_elbo + lambda_mse * mse(mean, targets)
+```
+
+Two practical notes when porting:
+
+- **Seed the inducing points** from real features once the backbone is warm
+  (`head.set_inducing_points(...)`); random-normal inducing locations in a
+  feature space the backbone has never visited start the GP badly conditioned.
+- **`n_train`** is the total number of training *points* per epoch (geometries x
+  points per geometry), not the number of geometries.  It only sets the ELBO's
+  KL normalisation, but getting it wrong rescales the KL term.
+
+### References
+
+- **Stochastic Variational Deep Kernel Learning:** [Wilson et al., 2016](https://arxiv.org/abs/1611.00336) — the GP-on-neural-features construction this head implements
+- **Heteroscedastic aleatoric uncertainty:** [What Uncertainties Do We Need in Bayesian Deep Learning for Computer Vision?](https://arxiv.org/abs/1703.04977) — Kendall & Gal, NeurIPS 2017; the noise-attenuated likelihood the noise MLP optimises
+- **Multitask / multi-output GPs:** [Remarks on Multi-Output Gaussian Process Regression](https://doi.org/10.1016/j.knosys.2018.03.022) — Liu et al., 2018
 
 ---
 

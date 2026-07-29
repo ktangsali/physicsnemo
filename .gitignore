@@ -178,6 +178,11 @@ multirun/
 # SLURM
 slurm-*.out
 sbatch_logs/
+slurm_logs/
+
+# Training run artifacts (checkpoints, tensorboard logs, exported fields)
+runs/
+.mplcache/
 
 # ASV
 .asv/
