@@ -133,7 +133,12 @@ model:
 data:
   include_sdf: false
   include_geometry: true
-  geometry_sampling: 300_000
+  # STL points sampled to represent the geometry. Must not exceed the smallest
+  # mesh in the dataset: the datapipe samples without replacement, so a request
+  # larger than the available points is an error. The smallest DrivAerStar
+  # class_F meshes are ~265k points (13% sit below 300k), so 200k clears every
+  # geometry in both the train and val splits.
+  geometry_sampling: 200_000
   broadcast_global_features: false
   # DrivAerStar surface fields are stored in raw physical units (Pa), so they
   # need their own normalisation stats. The stats in `src/` are nondimensional
