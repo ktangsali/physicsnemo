@@ -412,6 +412,19 @@ def main(cfg: DictConfig):
         _convert_="all",
     )
     head.to(dist_manager.device)
+    # The head is not DDP-wrapped, so nothing would otherwise give the ranks a
+    # common starting point: each builds its own randomly initialised DKL and
+    # noise MLPs, and torch seeds itself per process. Averaging gradients later
+    # shares the update but not the parameters, so those initial offsets would
+    # survive the whole run and only rank 0's copy would be checkpointed. This
+    # is what DDP does at construction time. (The feature-norm BatchNorm's
+    # running stats still track each rank's own shard afterwards, which is
+    # harmless: in train mode the batch statistics are used, and eval and the
+    # checkpoint both take rank 0's.)
+    if dist_manager.world_size > 1:
+        with torch.no_grad():
+            for tensor in head.state_dict().values():
+                dist.broadcast(tensor, src=0)
     num_head_params = sum(p.numel() for p in head.parameters())
     logger.info(
         f"Field GP head parameters: {num_head_params:,} "
