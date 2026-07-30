@@ -23,8 +23,6 @@ import torch.nn as nn
 pytest.importorskip("gpytorch", reason="FieldVariationalGPHead requires gpytorch")
 
 from physicsnemo.experimental.uq import (  # noqa: E402
-    FieldGPHead,
-    FieldGPPrediction,
     FieldVariationalGPHead,
     FieldVariationalGPPrediction,
 )
@@ -47,12 +45,6 @@ def make_head(device, **overrides):
     return FieldVariationalGPHead(**kwargs).to(device)
 
 
-def test_aliases_are_the_same_objects():
-    """The pre-rename names must resolve to the new classes, not copies."""
-    assert FieldGPHead is FieldVariationalGPHead
-    assert FieldGPPrediction is FieldVariationalGPPrediction
-
-
 @pytest.mark.parametrize("lead_shape", [(2, 64), (64,), (2, 3, 16)])
 def test_predict_shapes(device, lead_shape):
     """predict() preserves arbitrary leading dims and appends num_tasks."""
@@ -62,6 +54,7 @@ def test_predict_shapes(device, lead_shape):
 
     pred = head.predict(feats)
 
+    assert isinstance(pred, FieldVariationalGPPrediction)
     expected = (*lead_shape, NUM_TASKS)
     for name in ("mean", "variance", "lower", "upper", "epistemic_variance"):
         tensor = getattr(pred, name)

@@ -110,29 +110,22 @@ torch.serialization.add_safe_globals([omegaconf.base.Metadata])
 # epistemic-std spikes. The two helpers below make saves atomic and resumes pick
 # only a fully-written, consistent epoch set.
 
-_CKPT_GROUPS = (
-    ("GeoTransolver.0.*.mdlus", ".mdlus"),
-    # physicsnemo names head checkpoints after the class, so runs started before
-    # FieldGPHead was renamed to FieldVariationalGPHead use the old stem. Accept
-    # either so an in-flight run stays resumable across the rename.
-    (("FieldVariationalGPHead.0.*.pt", "FieldGPHead.0.*.pt"), ".pt"),
-    ("checkpoint.0.*.pt", ".pt"),
+#: The files that together make up one complete epoch: backbone, GP head and
+#: training state. physicsnemo names the first two after their class.
+_CKPT_PATTERNS = (
+    "GeoTransolver.0.*.mdlus",
+    "FieldVariationalGPHead.0.*.pt",
+    "checkpoint.0.*.pt",
 )
 
 
-def _ckpt_indices(ckpt_dir: str, pattern: str | tuple[str, ...]) -> set[int]:
-    """Epoch tags present for one checkpoint-file pattern in ``ckpt_dir``.
-
-    ``pattern`` may be a tuple of alternatives, in which case the union of their
-    matches is returned.
-    """
-    patterns = (pattern,) if isinstance(pattern, str) else pattern
+def _ckpt_indices(ckpt_dir: str, pattern: str) -> set[int]:
+    """Epoch tags present for one checkpoint-file pattern in ``ckpt_dir``."""
     out: set[int] = set()
-    for pat in patterns:
-        for f in glob.glob(os.path.join(ckpt_dir, pat)):
-            m = re.search(r"\.(\d+)\.[^.]+$", os.path.basename(f))
-            if m:
-                out.add(int(m.group(1)))
+    for f in glob.glob(os.path.join(ckpt_dir, pattern)):
+        m = re.search(r"\.(\d+)\.[^.]+$", os.path.basename(f))
+        if m:
+            out.add(int(m.group(1)))
     return out
 
 
@@ -146,10 +139,8 @@ def _safe_resume_epoch(ckpt_dir: str) -> int | None:
     """
     if not os.path.isdir(ckpt_dir):
         return None
-    complete = (
-        _ckpt_indices(ckpt_dir, _CKPT_GROUPS[0][0])
-        & _ckpt_indices(ckpt_dir, _CKPT_GROUPS[1][0])
-        & _ckpt_indices(ckpt_dir, _CKPT_GROUPS[2][0])
+    complete = set.intersection(
+        *(_ckpt_indices(ckpt_dir, pat) for pat in _CKPT_PATTERNS)
     )
     return max(complete) if complete else None
 

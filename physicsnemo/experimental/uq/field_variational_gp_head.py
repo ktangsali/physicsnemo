@@ -25,25 +25,29 @@ This is the *field* member of a two-head family.  Both are variational GPs with
 inducing points, a Matern-5/2 ARD kernel and a variational ELBO; they differ in
 what a "data point" is:
 
-============  ==================================  ==========================
-Head          Input                               Output
-============  ==================================  ==========================
+========================  ======================  ==========================
+Head                      Input                   Output
+========================  ======================  ==========================
 `VariationalGPHead`       one pooled embedding    one scalar per geometry
                           ``(B, D)``              ``(B,)``
 `FieldVariationalGPHead`  per-point features      ``num_tasks`` channels per
                           ``(..., D)``            point ``(..., num_tasks)``
-============  ==================================  ==========================
+========================  ======================  ==========================
+
+``B`` is the number of geometries in the batch, ``D`` the feature width (the
+head's *input_dim*), and ``num_tasks`` the number of output channels.  The
+leading ``...`` stands for any batch/point dimensions, so ``(B, N, D)`` for
+``N`` points per geometry, or ``(N, D)`` for a single unbatched point cloud.
 
 The posterior mean is the field prediction; the posterior variance is the
 per-point uncertainty, which grows as a point's feature moves away from the
-learned inducing points (a distance-aware, single-pass UQ signal that needs no
-ensembling or MC-Dropout).
+learned inducing points (a distance-aware, single-pass UQ signal).
 
 Attaching to a backbone
 -----------------------
-The head is deliberately model-agnostic: it consumes a feature tensor and
+The head is model-agnostic: it consumes a feature tensor and
 nothing else.  There is no dependency on any particular backbone, no assumption
-about mesh topology, and coordinates are *not* required as a separate input
+about mesh topology, and coordinates are not required as a separate input
 (any positional information the backbone encodes simply arrives inside the
 features).  The only contract is:
 
@@ -59,7 +63,7 @@ exposing whatever it already computes before its final projection::
                                   n_train=n_points_per_epoch)
 
     feats = backbone.encode(batch)        # (B, N, feat_dim)
-    mean, neg_elbo = head.forward_and_loss(feats, targets, beta=beta)
+    mean, neg_elbo = head.forward_and_loss(feats, targets)
     loss = neg_elbo + lambda_mse * mse(mean, targets)
 
 At inference, :meth:`FieldVariationalGPHead.predict` returns the mean plus the
@@ -260,7 +264,10 @@ class FieldVariationalGPHead(nn.Module):
     n_train : int
         Total number of *training points* (across all geometries) — used for
         the ELBO normalisation constant so the data term and KL term are
-        balanced when minibatching at the point level.
+        balanced when minibatching at the point level.  Count points, not
+        geometries: 10 geometries of ``N`` points each is ``10 * N``, not 10.
+        If a geometry is subsampled during training, count the points actually
+        fed to the head per pass, i.e. ``n_geometries * points_per_geometry``.
     inducing_points : torch.Tensor | None, optional
         Initial inducing locations, either ``(M, gp_dim)`` (shared init,
         broadcast across tasks) or ``(num_tasks, M, gp_dim)``.  If *None*,
@@ -433,16 +440,17 @@ class FieldVariationalGPHead(nn.Module):
         self._num_data = int(n_train)
 
         # ---- Optional input-dependent (heteroscedastic) observation noise ----
-        # The default MultitaskGaussianLikelihood learns ONE noise scalar per
-        # channel. That constant dominates the total predictive variance (on
-        # DrivAerStar surface pressure it is ~99.6% of it) and, being constant,
-        # adds zero information to the per-point ranking of |error| — the total
-        # std ranks points exactly like the epistemic std. Making the noise a
-        # function of the GP-input features lets the other ~99% of the variance
-        # carry ranking signal. On a deterministic (steady-RANS) target there is
-        # no observational scatter to learn, so this term absorbs mean-model
-        # discrepancy instead: it marks where the surrogate is structurally
-        # wrong, e.g. a wake rather than the hood.
+        # The default MultitaskGaussianLikelihood learns one noise scalar per
+        # channel. That constant can dominate the total predictive variance, and
+        # being constant it adds no information to the per-point ranking of
+        # |error| — the total std then ranks points exactly like the epistemic
+        # std. Making the noise a function of the GP-input features lets that
+        # share of the variance carry ranking signal instead. On a deterministic
+        # target there is no observational scatter to learn, so the term absorbs
+        # mean-model discrepancy: it marks where the surrogate is structurally
+        # wrong. A second variational GP on the log-noise is the classical
+        # alternative; here it is an amortized MLP, which is far cheaper — see
+        # :meth:`_hetero_neg_elbo` for that trade-off and the caveats.
         self._noise_range = (float(noise_std_range[0]), float(noise_std_range[1]))
         if noise_mlp_hidden:
             layers: list[nn.Module] = []
@@ -552,8 +560,8 @@ class FieldVariationalGPHead(nn.Module):
         its :math:`N`.
 
         Note on interpretation: :math:`\sigma^2(x)` is the variance of the
-        Gaussian likelihood, i.e. input-dependent observation noise.  On a
-        deterministic target (steady RANS) it is not measurement noise — it
+        Gaussian likelihood, i.e. input-dependent observation noise. For example,
+        on a deterministic target it is not measurement noise — it
         absorbs mean-model discrepancy, so treat it as a learned discrepancy
         variance rather than as physical variability.  Unlike the classical
         variational heteroscedastic GP (Lázaro-Gredilla & Titsias, ICML 2011),
@@ -614,7 +622,7 @@ class FieldVariationalGPHead(nn.Module):
         """Public wrapper for the DKL + feature-norm transform (GP-input space).
 
         Returns the features the kernel actually sees (same space as the
-        inducing points), *without* the double-precision cast, so callers can
+        inducing points), without the double-precision cast, so callers can
         compute auxiliary losses (e.g. a distance penalty) on the GP-input
         geometry while keeping gradients flowing back into the backbone. Pass
         the result to :meth:`forward_and_loss` with ``pretransformed=True`` to
@@ -813,18 +821,3 @@ class FieldVariationalGPHead(nn.Module):
         finally:
             if was_training:
                 self.train()
-
-
-# ---------------------------------------------------------------------------
-# Backwards-compatible aliases.
-#
-# This head shipped as ``FieldGPHead`` before being renamed to sit alongside
-# the scalar ``VariationalGPHead``. These aliases keep existing imports (e.g.
-# the physicsnemo-cfd evaluation wrapper) working. Note that they do NOT
-# preserve checkpoint filenames: ``save_checkpoint`` derives the file stem from
-# ``type(model).__name__``, which resolves to the new name through an alias, so
-# new runs write ``FieldVariationalGPHead.0.<tag>.pt``. Older
-# ``FieldGPHead.0.<tag>.pt`` files remain loadable by explicit path.
-# ---------------------------------------------------------------------------
-FieldGPHead = FieldVariationalGPHead
-FieldGPPrediction = FieldVariationalGPPrediction

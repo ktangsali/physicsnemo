@@ -27,9 +27,6 @@ constitutes a data point, and therefore in what they predict:
 * :class:`FieldVariationalGPHead` — takes *per-point* features and predicts a
   multi-channel *field*, with one Gaussian posterior per point per channel.
   Requires ``gpytorch``.
-
-``FieldGPHead`` / ``FieldGPPrediction`` are retained as aliases of the
-``FieldVariational*`` names for backwards compatibility.
 """
 
 from physicsnemo.core.version_check import check_version_spec
@@ -38,8 +35,6 @@ _GPYTORCH_AVAILABLE = check_version_spec("gpytorch", hard_fail=False)
 
 if _GPYTORCH_AVAILABLE:
     from .field_variational_gp_head import (
-        FieldGPHead,
-        FieldGPPrediction,
         FieldVariationalGPHead,
         FieldVariationalGPPrediction,
     )
