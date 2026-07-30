@@ -117,14 +117,34 @@ def field_gp_predict_full_mesh(
     return mean_stitched[inverse], std_stitched[inverse]
 
 
+class CheckpointError(RuntimeError):
+    """No usable checkpoint was found, which no individual run can recover from."""
+
+
+def _require_checkpoint_files(checkpoint_dir: str, epoch: int | None) -> None:
+    """Raise unless both the backbone and head checkpoint files are present.
+
+    ``load_checkpoint`` returns 0 instead of raising when it finds nothing, so
+    without this inference would run to completion on randomly initialised
+    weights and write plausible-looking VTK output.
+    """
+    tag = "*" if epoch is None else str(epoch)
+    patterns = (f"GeoTransolver.0.{tag}.mdlus", f"FieldVariationalGPHead.0.{tag}.pt")
+    missing = [p for p in patterns if not list(Path(checkpoint_dir).glob(p))]
+    if missing:
+        raise CheckpointError(
+            f"No usable field-GP checkpoint in {checkpoint_dir}: nothing matches "
+            f"{missing}.  Pass ++checkpoint_dir=... (and +checkpoint_epoch=N) "
+            "pointing at a trained run."
+        )
+
+
 def write_field_gp_predictions_to_vtk(
     vtp_path: str,
     output_path: str,
     mean_norm: torch.Tensor,
     std_norm: torch.Tensor,
     surface_factors: dict,
-    air_density: float,
-    stream_velocity: float,
 ) -> None:
     """Write GP mean field + per-point std (UQ) to a VTP.
 
@@ -134,11 +154,13 @@ def write_field_gp_predictions_to_vtk(
       (physical units).
     * ``StdPressure`` / ``StdWallShearStress`` — GP std in physical units.
 
-    Everything is written in physical units.  Note the four channels carry very
-    different normalisation scales, so the physical stds are *not* comparable
-    across channels; divide each by its ``surface_factors["std"]`` entry (times
-    the dynamic pressure) to recover the dimensionless form when a cross-channel
-    UQ map is what you want.
+    Everything is written in physical units.  The targets are standardized
+    *physical* fields — the DrivAerStar statistics are Pa-scale — so
+    unstandardizing is the whole conversion and no dynamic-pressure factor
+    applies.  Note the four channels carry very different normalisation scales,
+    so the physical stds are not comparable across channels; divide each by its
+    ``surface_factors["std"]`` entry to recover the dimensionless form when a
+    cross-channel UQ map is what you want.
     """
     mesh = pv.read(vtp_path)
     output_mesh = mesh.copy()
@@ -148,21 +170,16 @@ def write_field_gp_predictions_to_vtk(
 
     field_mean = surface_factors["mean"].cpu().numpy().reshape(-1)
     field_std = surface_factors["std"].cpu().numpy().reshape(-1)
-    dynamic_pressure = air_density * stream_velocity**2
 
-    # Mean field: unstandardize (x * std + mean), then to physical units.
+    # Mean field: unstandardize (x * std + mean) back to physical units.
     mean_unscaled = mean_np * field_std + field_mean
-    pred_pressure = mean_unscaled[:, 0] * dynamic_pressure
-    pred_wss = mean_unscaled[:, 1:4] * dynamic_pressure
-    output_mesh.cell_data["PredictedPressure"] = pred_pressure
-    output_mesh.cell_data["PredictedWallShearStress"] = pred_wss
+    output_mesh.cell_data["PredictedPressure"] = mean_unscaled[:, 0]
+    output_mesh.cell_data["PredictedWallShearStress"] = mean_unscaled[:, 1:4]
 
     # Std is a scale: maps through the affine unstandardize as std * field_std.
     std_unscaled = std_np * field_std
-    output_mesh.cell_data["StdPressure"] = std_unscaled[:, 0] * dynamic_pressure
-    output_mesh.cell_data["StdWallShearStress"] = (
-        std_unscaled[:, 1:4] * dynamic_pressure
-    )
+    output_mesh.cell_data["StdPressure"] = std_unscaled[:, 0]
+    output_mesh.cell_data["StdWallShearStress"] = std_unscaled[:, 1:4]
 
     output_mesh.save(output_path)
 
@@ -237,6 +254,8 @@ def inference_field_gp(cfg: DictConfig) -> None:
     checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or (
         f"{cfg.output_dir}/{cfg.run_id}/checkpoints_field_gp"
     )
+    checkpoint_epoch = getattr(cfg, "checkpoint_epoch", None)
+    _require_checkpoint_files(checkpoint_dir, checkpoint_epoch)
 
     for run_dir in this_device_runs:
         run_idx = int(run_dir.name.split("_")[1])
@@ -269,8 +288,14 @@ def inference_field_gp(cfg: DictConfig) -> None:
                     path=checkpoint_dir,
                     models=[model, head],
                     device=device,
-                    epoch=getattr(cfg, "checkpoint_epoch", None),
+                    epoch=checkpoint_epoch,
                 )
+                if loaded_epoch == 0:
+                    raise CheckpointError(
+                        f"load_checkpoint restored nothing from {checkpoint_dir} "
+                        f"(epoch={checkpoint_epoch}); the models are still randomly "
+                        "initialised."
+                    )
                 logger.info(
                     f"Loaded field-GP checkpoint (epoch {loaded_epoch}) from "
                     f"{checkpoint_dir}; feature_dim={feature_dim}, "
@@ -296,12 +321,12 @@ def inference_field_gp(cfg: DictConfig) -> None:
                 mean_norm,
                 std_norm,
                 surface_factors,
-                air_density,
-                stream_velocity,
             )
             elapsed = time.time() - start_time
             logger.info(f"Saved field-GP UQ to {output_vtp} ({elapsed:.2f}s)")
 
+        except CheckpointError:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error processing run {run_idx}: {e}")
             import traceback
