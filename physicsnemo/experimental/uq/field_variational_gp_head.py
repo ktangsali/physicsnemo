@@ -560,6 +560,10 @@ class FieldVariationalGPHead(nn.Module):
         which puts a second GP on the log-noise and so carries a second KL term,
         this amortized network has no prior on :math:`\sigma`; ``noise_std_range``
         and gradient clipping are the only things preventing it from collapsing.
+        The network is chosen for cost: a second variational process would bring
+        its own inducing set, Cholesky factor and KL term, roughly doubling the
+        variational state and the per-step :math:`O(M^3)` work, whereas the noise
+        MLP adds only a few small layers.
         """
         mu = dist.mean
         latent_var = dist.variance

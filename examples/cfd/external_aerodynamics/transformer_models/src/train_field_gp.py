@@ -20,8 +20,7 @@ The GP head *replaces* the GeoTransolver readout: per-point backbone features
 feed a :class:`~physicsnemo.experimental.uq.FieldVariationalGPHead` whose
 posterior mean is the per-point surface field prediction (pressure + 3
 wall-shear-stress) and whose posterior variance is the per-point uncertainty.  A
-single forward pass yields both the field and its calibrated UQ — no MC-Dropout
-or ensembling.
+single forward pass yields both the field and its UQ.
 
 The total loss is::
 
@@ -33,9 +32,7 @@ auxiliary anchor on the GP mean that leads the early epochs, and ``dist_pen`` is
 the within-sample latent distance penalty (see :func:`_dist_penalty`).  ``beta``
 and ``w_nll`` are both ramped from 0 over their warmup windows.
 
-The defaults in ``conf/geotransolver_surface_field_gp.yaml`` are the settled
-recipe; run it with no overrides beyond the data paths and ``run_id``.  See the
-"Field GP" section of the example README for the exact launch command.
+See the "Field GP" section of the example README for the exact launch command.
 """
 
 import os
@@ -75,13 +72,9 @@ from train import (
     update_model_params_for_fp8,
 )
 from field_gp_utils import (
-    NUM_SURFACE_TASKS,
     beta_ramp_weight,
-    build_field_gp_head,
     collect_inducing_features,
-    compute_drag_uq_stats,
     compute_field_targets_from_batch,
-    default_drag_coeff,
     sync_non_ddp_gradients,
 )
 from metrics import metrics_fn
@@ -231,7 +224,7 @@ def _dist_penalty(
     (kernel-space) distance is *smaller* than their target-space distance. This
     forces the encoder to keep points with different target fields far apart in
     the space the kernel measures, so the GP can assign larger variance where
-    predictions differ -- directly improving the epistemic-vs-error correlation.
+    predictions differ.
 
     Both distances are made scale-free by dividing by their (detached) batch
     mean, so the penalty shapes *relative* geometry rather than absolute scale
@@ -280,16 +273,9 @@ def main(cfg: DictConfig):
     )
 
     # ---- Field-GP config ----
-    num_tasks = getattr(cfg, "num_tasks", NUM_SURFACE_TASKS)
-    n_inducing = getattr(cfg, "gp_n_inducing", 256)
-    mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
-    mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
-    ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 10.0]))
-    ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
-    ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
-    os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
-    os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
-    feature_norm = getattr(cfg, "gp_feature_norm", "none")
+    # cfg.gp_head is a hydra _target_ block; the eval scripts instantiate the
+    # same block, so the structure baked into the checkpoint cannot drift apart.
+    n_inducing = cfg.gp_head.n_inducing
 
     # KL annealing window (epochs) and auxiliary mean-MSE weight
     beta_warmup_start = getattr(cfg, "beta_warmup_start", 0)
@@ -311,30 +297,14 @@ def main(cfg: DictConfig):
     # Distance penalty (within-sample, point-level): a one-sided hinge that
     # forces pairs of points with large target differences to also be far apart
     # in GP-input (kernel) space, so the kernel can express larger variance
-    # where predictions differ. Directly targets the epistemic-vs-error
-    # correlation that drives sparsification/drag ranking. 0.0 => disabled.
+    # where predictions differ. 0.0 => disabled.
     dist_penalty_weight = float(getattr(cfg, "dist_penalty_weight", 0.0))
     dist_penalty_pairs = int(getattr(cfg, "dist_penalty_pairs", 4096))
     dist_penalty_margin = float(getattr(cfg, "dist_penalty_margin", 1.0))
 
-    # Input-dependent observation noise. None/[] keeps the homoscedastic
-    # likelihood (the frozen control); a list turns on the noise MLP so the
-    # total predictive std varies per point and can rank |error|.
-    noise_mlp_cfg = getattr(cfg, "gp_noise_mlp_hidden", None)
-    noise_mlp_hidden = list(noise_mlp_cfg) if noise_mlp_cfg else None
-    # Hard clamp on the heteroscedastic noise std. The ELBO weights points by
-    # 1/sigma^2(x), so the 1e-3 default floor allows a 1e6 weight on unit-scale
-    # normalised fields -- the suspected trigger of the epoch-35 blow-up in the
-    # first hetnoise run. Raising the floor caps that weight.
-    noise_range_cfg = getattr(cfg, "gp_noise_std_range", None)
-    noise_std_range = (
-        (float(noise_range_cfg[0]), float(noise_range_cfg[1]))
-        if noise_range_cfg
-        else (1e-3, 10.0)
-    )
     # Max global grad-norm for the GP head (0 / unset = no clipping, which is
     # what every earlier run used). Catches the overcorrection that follows a
-    # noise collapse; the floor above is what prevents the collapse itself.
+    # noise collapse; gp_head.noise_std_range prevents the collapse itself.
     grad_clip_norm = float(getattr(cfg, "head_grad_clip_norm", 0.0) or 0.0)
 
     # Optional further subsampling of points used by the GP each step
@@ -362,11 +332,7 @@ def main(cfg: DictConfig):
     logger.info(f"Config:\n{omegaconf.OmegaConf.to_yaml(cfg, resolve=True)}")
     logger.info(f"Output directory: {cfg.output_dir}/{cfg.run_id}")
     logger.info(f"Checkpoint directory: {ckpt_path}")
-    logger.info(
-        f"Field GP: num_tasks={num_tasks}, n_inducing={n_inducing}, "
-        f"mlp_hidden={mlp_hidden}, lengthscale_range={ls_range}, "
-        f"lengthscale_prior={ls_prior}, outputscale_prior={os_prior}"
-    )
+    logger.info(f"Field GP head: {omegaconf.OmegaConf.to_container(cfg.gp_head)}")
     logger.info(
         f"KL warmup epochs [{beta_warmup_start}, {beta_warmup_end}), "
         f"lambda_mean_mse={lambda_mean_mse}, gp_points_per_step={gp_points_per_step}"
@@ -376,10 +342,7 @@ def main(cfg: DictConfig):
         f"dist_penalty: weight={dist_penalty_weight}, pairs={dist_penalty_pairs}, "
         f"margin={dist_penalty_margin}"
     )
-    logger.info(
-        f"Heteroscedastic noise MLP: {noise_mlp_hidden}, "
-        f"noise_std_range={noise_std_range}, head_grad_clip_norm={grad_clip_norm}"
-    )
+    logger.info(f"head_grad_clip_norm={grad_clip_norm}")
 
     precision = cfg.precision
     cfg, _ = update_model_params_for_fp8(cfg, logger)
@@ -451,18 +414,11 @@ def main(cfg: DictConfig):
     feature_dim = _probe_feature_dim(
         model, train_dl, precision, dist_manager.device, logger
     )
-    head = build_field_gp_head(
+    head = hydra.utils.instantiate(
+        cfg.gp_head,
         input_dim=feature_dim,
-        n_train_points=n_train_points,
-        num_tasks=num_tasks,
-        n_inducing=n_inducing,
-        mlp_hidden=mlp_hidden,
-        lengthscale_range=ls_range,
-        lengthscale_prior=ls_prior,
-        outputscale_prior=os_prior,
-        feature_norm=feature_norm,
-        noise_mlp_hidden=noise_mlp_hidden,
-        noise_std_range=noise_std_range,
+        n_train=n_train_points,
+        _convert_="all",
     )
     head.to(dist_manager.device)
     num_head_params = sum(p.numel() for p in head.parameters())
@@ -473,6 +429,10 @@ def main(cfg: DictConfig):
     )
 
     # ---- Optimizer ----
+    # Rates are set relative to cfg.training.optimizer.lr and split by parameter
+    # kind: GP-native parameters (variational, kernel, noise scale) at 10x it,
+    # network weights at 1x. Keep that ratio when retuning; see "Choosing the
+    # head learning rates" in the README.
     head_param_groups = [
         {"params": head.gp_layer.variational_parameters(), "lr": 1e-2},
         {"params": head.gp_layer.hyperparameters(), "lr": 1e-2},
@@ -736,7 +696,6 @@ def main(cfg: DictConfig):
             logger,
             val_writer,
             epoch,
-            surface_factors,
         )
 
         # Checkpoints are tagged ``epoch + 1`` (the numbering the inference and
@@ -784,23 +743,13 @@ def _validate(
     logger,
     val_writer,
     epoch,
-    surface_factors=None,
 ):
-    """Validate the GP mean field (metrics) and log mean predictive std.
-
-    Also computes the per-epoch **drag ranking Spearman** (rank correlation
-    between per-geometry epistemic drag-std and true drag |error|) so the AL
-    objective is visible directly in the logs instead of a post-hoc sweep.
-    """
+    """Validate the GP mean field (metrics) and log mean predictive std."""
     model.eval()
     head.eval()
     head.likelihood.eval()
-    drag_coeff = default_drag_coeff()
-    drag_err_local: list[float] = []
-    drag_epi_local: list[float] = []
     # Per-geometry, per-point rank correlation between epistemic std and |error|
-    # (averaged over channels). This is the WITHIN-sample error<->variance link
-    # that should propagate up to the cross-geometry drag ranking.
+    # (averaged over channels): the within-sample error<->variance link.
     insample_corr_local: list[float] = []
 
     val_epoch_len = len(val_indices)
@@ -874,35 +823,6 @@ def _validate(
             if _corrs:
                 insample_corr_local.append(float(np.mean(_corrs)))
 
-            # ---- Per-geometry drag UQ (for the ranking Spearman metric) ----
-            # Propagate the epistemic field std into a drag std and record it
-            # against the true drag |error|, so we can rank geometries by
-            # predicted drag uncertainty (the AL acquisition signal).
-            if (
-                surface_factors is not None
-                and "surface_normals_sub" in batch
-                and "surface_areas_sub" in batch
-            ):
-                normals_sub = batch["surface_normals_sub"]
-                areas_sub = batch["surface_areas_sub"]
-                if normals_sub.dim() == 3:
-                    normals_sub = normals_sub.squeeze(0)
-                if areas_sub.dim() >= 2:
-                    areas_sub = areas_sub.reshape(-1)
-                nt = head.num_tasks
-                ds = compute_drag_uq_stats(
-                    mean_norm=mean.reshape(-1, nt),
-                    target_norm=targets.reshape(-1, nt),
-                    epi_std_norm=epi.reshape(-1, nt),
-                    total_std_norm=std.reshape(-1, nt),
-                    normals=normals_sub,
-                    areas=areas_sub,
-                    surface_factors=surface_factors,
-                    coeff=drag_coeff,
-                )
-                drag_err_local.append(float(ds["drag_abs_err"]))
-                drag_epi_local.append(float(ds["drag_epi_std"]))
-
             # NLPD / z-RMS / 95%-coverage on the TOTAL predictive variance
             # (epistemic + observation-noise floor) — the proper scoring rule we
             # early-stop on. Computed in the same normalised space the GP trains
@@ -975,46 +895,26 @@ def _validate(
     val_zrms = (float(z2_sum.item()) / ne) ** 0.5
     val_cov95 = float(cov_sum.item()) / ne
     val_mean_std = float(stdscalar_sum.item()) / ne
-    # ---- Drag ranking Spearman across ALL val geometries (gather per-sample) ----
-    # Gather the per-geometry (epi drag-std, true drag |err|) from every rank so
-    # rank 0 can compute one global rank correlation. All ranks must call the
-    # collective, even those with an empty shard.
-    val_drag_spearman = float("nan")
+    # ---- Within-sample error<->std correlation across ALL val geometries ----
+    # Gather the per-geometry values from every rank so rank 0 can average over
+    # the whole split. All ranks must call the collective, even empty shards.
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-        g_err: list = [None] * dist.get_world_size()
-        g_epi: list = [None] * dist.get_world_size()
         g_ins: list = [None] * dist.get_world_size()
-        dist.all_gather_object(g_err, drag_err_local)
-        dist.all_gather_object(g_epi, drag_epi_local)
         dist.all_gather_object(g_ins, insample_corr_local)
-        all_err = [v for part in g_err for v in part]
-        all_epi = [v for part in g_epi for v in part]
         all_ins = [v for part in g_ins for v in part]
     else:
-        all_err, all_epi, all_ins = drag_err_local, drag_epi_local, insample_corr_local
-    n_drag = len(all_err)
-    if n_drag >= 2:
-        a = np.asarray(all_epi, dtype=np.float64)
-        b = np.asarray(all_err, dtype=np.float64)
-        ra = np.argsort(np.argsort(a)).astype(np.float64)
-        rb = np.argsort(np.argsort(b)).astype(np.float64)
-        if ra.std() > 0 and rb.std() > 0:
-            val_drag_spearman = float(np.corrcoef(ra, rb)[0, 1])
-    # Mean within-sample per-point error<->std correlation over all geometries.
+        all_ins = insample_corr_local
     val_insample_corr = float(np.mean(all_ins)) if all_ins else float("nan")
 
     logger.info(
         f"Epoch [{epoch}] val NLPD(total)={val_nlpd:.4f}  z-RMS={val_zrms:.3f}  "
         f"cov95={val_cov95:.3f}  mean_std={val_mean_std:.4f}  "
-        f"drag_spearman={val_drag_spearman:+.3f} (n={n_drag})  "
         f"pt_err_std_corr={val_insample_corr:+.3f}"
     )
     if dist_manager.rank == 0 and val_writer is not None:
         val_writer.add_scalar("epoch/val_nlpd_total", val_nlpd, epoch)
         val_writer.add_scalar("epoch/val_zrms", val_zrms, epoch)
         val_writer.add_scalar("epoch/val_cov95", val_cov95, epoch)
-        if n_drag >= 2:
-            val_writer.add_scalar("epoch/val_drag_spearman", val_drag_spearman, epoch)
         if all_ins:
             val_writer.add_scalar("epoch/val_pt_err_std_corr", val_insample_corr, epoch)
 
@@ -1023,7 +923,6 @@ def _validate(
         "zrms": val_zrms,
         "cov95": val_cov95,
         "mean_std": val_mean_std,
-        "drag_spearman": val_drag_spearman,
         "pt_err_std_corr": val_insample_corr,
     }
 

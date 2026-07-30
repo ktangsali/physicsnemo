@@ -21,7 +21,7 @@ per-point features, feeds them to the trained :class:`FieldVariationalGPHead`, a
 the GP posterior **mean** (the field prediction) *and* **standard deviation**
 (the per-point uncertainty) for all four surface channels back to a VTP.  Colour
 the resulting mesh by any ``*Std`` array to see which car regions are most
-uncertain — produced in a single forward pass (no MC-Dropout / ensembling).
+uncertain — produced in a single forward pass.
 
 Usage::
 
@@ -54,7 +54,6 @@ from physicsnemo.utils import load_checkpoint
 from physicsnemo.utils.logging import PythonLogger, RankZeroLoggingWrapper
 
 from train import cast_precisions, update_model_params_for_fp8, get_autocast_context
-from field_gp_utils import NUM_SURFACE_TASKS, build_field_gp_head
 
 # Reuse the VTK I/O + datapipe helpers from the deterministic VTK inference.
 from inference_on_vtk import build_data_dict, create_datapipe
@@ -134,8 +133,12 @@ def write_field_gp_predictions_to_vtk(
     * ``PredictedPressure`` / ``PredictedWallShearStress`` — GP mean field
       (physical units).
     * ``StdPressure`` / ``StdWallShearStress`` — GP std in physical units.
-    * ``StdPressure_norm`` / ``StdShear*_norm`` — GP std in normalised space
-      (dimensionless, directly comparable across channels for the UQ map).
+
+    Everything is written in physical units.  Note the four channels carry very
+    different normalisation scales, so the physical stds are *not* comparable
+    across channels; divide each by its ``surface_factors["std"]`` entry (times
+    the dynamic pressure) to recover the dimensionless form when a cross-channel
+    UQ map is what you want.
     """
     mesh = pv.read(vtp_path)
     output_mesh = mesh.copy()
@@ -160,14 +163,6 @@ def write_field_gp_predictions_to_vtk(
     output_mesh.cell_data["StdWallShearStress"] = (
         std_unscaled[:, 1:4] * dynamic_pressure
     )
-
-    # Normalised (dimensionless) std maps — comparable across channels.
-    output_mesh.cell_data["StdPressure_norm"] = std_np[:, 0]
-    output_mesh.cell_data["StdShearX_norm"] = std_np[:, 1]
-    output_mesh.cell_data["StdShearY_norm"] = std_np[:, 2]
-    output_mesh.cell_data["StdShearZ_norm"] = std_np[:, 3]
-    # Aggregate WSS-vector magnitude std as a single scalar UQ map.
-    output_mesh.cell_data["StdShearMag_norm"] = np.linalg.norm(std_np[:, 1:4], axis=1)
 
     output_mesh.save(output_path)
 
@@ -227,17 +222,6 @@ def inference_field_gp(cfg: DictConfig) -> None:
     datapipe = create_datapipe(cfg, data_mode, device, surface_factors, None)
     chunk_size = getattr(cfg.data, "resolution", 51200) or 51200
 
-    # ---- Field GP head config ----
-    num_tasks = getattr(cfg, "num_tasks", NUM_SURFACE_TASKS)
-    n_inducing = getattr(cfg, "gp_n_inducing", 256)
-    mlp_hidden_cfg = getattr(cfg, "gp_mlp_hidden", None)
-    mlp_hidden = list(mlp_hidden_cfg) if mlp_hidden_cfg is not None else None
-    ls_range = tuple(getattr(cfg, "gp_lengthscale_range", [0.01, 10.0]))
-    ls_prior_cfg = getattr(cfg, "gp_lengthscale_prior", None)
-    ls_prior = tuple(ls_prior_cfg) if ls_prior_cfg is not None else None
-    os_prior_cfg = getattr(cfg, "gp_outputscale_prior", None)
-    os_prior = tuple(os_prior_cfg) if os_prior_cfg is not None else None
-
     # ---- Locate runs ----
     if run_indices is not None:
         run_dirs = [input_dir / f"run_{idx}" for idx in run_indices]
@@ -272,15 +256,13 @@ def inference_field_gp(cfg: DictConfig) -> None:
 
             if head is None:
                 feature_dim = _probe_feature_dim(model, batch, precision, device)
-                head = build_field_gp_head(
+                # n_train only normalises the training ELBO, so any value works
+                # here; cfg.gp_head is what must match the checkpoint.
+                head = hydra.utils.instantiate(
+                    cfg.gp_head,
                     input_dim=feature_dim,
-                    n_train_points=1,  # unused at inference
-                    num_tasks=num_tasks,
-                    n_inducing=n_inducing,
-                    mlp_hidden=mlp_hidden,
-                    lengthscale_range=ls_range,
-                    lengthscale_prior=ls_prior,
-                    outputscale_prior=os_prior,
+                    n_train=1,
+                    _convert_="all",
                 )
                 head.to(device)
                 loaded_epoch = load_checkpoint(

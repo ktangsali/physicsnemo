@@ -23,55 +23,61 @@ output_dir: "runs"
 checkpoint_dir: null
 run_id: "geotransolver/surface/field_gp"
 
-# These defaults ARE the settled recipe: running this config with no overrides
-# beyond the data paths and run_id reproduces the reference surface field-GP run.
-
 # --- Field GP head ---
 # The GP head replaces the readout: posterior mean = per-point field
-# prediction, posterior variance = per-point uncertainty.
-num_tasks: 4                   # pressure + 3 wall-shear-stress components
-gp_n_inducing: 1024            # inducing points per task (shared structure)
+# prediction, posterior variance = per-point uncertainty. Instantiated with
+# hydra, so this block is the single source of truth for the head's structure
+# and every script (train / inference / plot) builds it identically -- which is
+# what lets an eval run load a training checkpoint. The two arguments not listed
+# here are supplied at runtime: `input_dim` (the backbone feature width, probed
+# with one forward pass) and `n_train` (the ELBO num_data normaliser).
+gp_head:
+  _target_: physicsnemo.experimental.uq.FieldVariationalGPHead
 
-# DKL feature extractor: pointwise MLP between the (wide) backbone features and
-# the GP kernel. Reduces dim for an efficient ARD kernel + good inducing
-# coverage. null = feed backbone features straight to the GP.
-gp_mlp_hidden: [128, 16]
+  num_tasks: 4                 # pressure + 3 wall-shear-stress components
+  n_inducing: 1024             # inducing points per task (shared structure)
 
-# --- GP kernel ---
-# Lengthscale: [lower, upper] hard constraint on per-dimension ARD lengthscales.
-# The 2.0 cap keeps the kernel from going near-global (which flattens the
-# per-point variance into a single geometry-wide number).
-gp_lengthscale_range: [0.01, 2.0]
-# Lengthscale prior: [concentration, rate] for Gamma. null = no prior.
-gp_lengthscale_prior: [2.0, 3.0]
-# Outputscale prior: [concentration, rate] for Gamma. null = no prior.
-gp_outputscale_prior: [2.0, 0.5]
+  # DKL feature extractor: pointwise MLP between the (wide) backbone features
+  # and the GP kernel. Reduces dim for an efficient ARD kernel + good inducing
+  # coverage. null = feed backbone features straight to the GP.
+  mlp_hidden: [128, 16]
 
-# Feature normalisation applied to the GP-input (DKL) features. Fixes the
-# feature scale so the lengthscale must do the smoothing, preventing the DKL
-# map from shrinking feature distances to defeat the lengthscale cap.
-# One of: none | l2_radial.
-#   l2_radial -> keep the L2-normalised direction AND append the standardised
-#                pre-norm magnitude as one extra ARD dim. The magnitude is what
-#                carries the radial out-of-distribution cue; projecting onto the
-#                unit sphere alone erases it (OOD/in-dist std ratio -> ~1.0x).
-gp_feature_norm: l2_radial
+  # Lengthscale: [lower, upper] hard constraint on per-dimension ARD
+  # lengthscales. The 2.0 cap keeps the kernel from going near-global (which
+  # flattens the per-point variance into a single geometry-wide number).
+  lengthscale_range: [0.01, 2.0]
+  # Lengthscale prior: [concentration, rate] for Gamma. null = no prior.
+  lengthscale_prior: [2.0, 3.0]
+  # Outputscale prior: [concentration, rate] for Gamma. null = no prior.
+  outputscale_prior: [2.0, 0.5]
 
-# --- Heteroscedastic observation noise ---
-# Hidden sizes of an MLP mapping GP-input features -> per-point, per-channel
-# observation noise. null keeps one learned noise scalar per channel, which
-# dominates the total predictive variance and, being constant, makes the total
-# std rank points identically to the epistemic std. Making it input-dependent is
-# what lets the total std rank per-point |error|.
-gp_noise_mlp_hidden: [64, 64]
-# Hard clamp [lo, hi] on the per-point noise std. The lower bound is load
-# bearing: the heteroscedastic ELBO weights each point by 1/sigma^2(x), so on
-# unit-scale normalised fields a 1e-3 floor permits a weight of 1e6 and one
-# collapsing point can blow up the loss. 0.01 caps that at 1e4, which sits just
-# below the range the noise head actually uses.
-gp_noise_std_range: [0.01, 10.0]
-# Max global grad-norm for the GP head (0 = no clipping). Belt and braces
-# against the optimiser overcorrecting after a noise excursion.
+  # Feature normalisation applied to the GP-input (DKL) features. Fixes the
+  # feature scale so the lengthscale must do the smoothing, preventing the DKL
+  # map from shrinking feature distances to defeat the lengthscale cap.
+  # One of: none | l2_radial.
+  #   l2_radial -> keep the L2-normalised direction AND append the standardised
+  #                pre-norm magnitude as one extra ARD dim. The magnitude is
+  #                what carries the radial out-of-distribution cue; projecting
+  #                onto the unit sphere alone erases it (OOD/in-dist std ratio
+  #                -> ~1.0x).
+  feature_norm: l2_radial
+
+  # Heteroscedastic observation noise: hidden sizes of an MLP mapping GP-input
+  # features -> per-point, per-channel observation noise. null keeps one learned
+  # noise scalar per channel, which dominates the total predictive variance and,
+  # being constant, makes the total std rank points identically to the epistemic
+  # std. Making it input-dependent is what lets the total std rank |error|.
+  noise_mlp_hidden: [64, 64]
+  # Hard clamp [lo, hi] on the per-point noise std. The lower bound is load
+  # bearing: the heteroscedastic ELBO weights each point by 1/sigma^2(x), and a
+  # 0.01 floor caps that weight at 1e4 on unit-scale normalised fields, so no
+  # single point can dominate the gradient. It sits just below the sigma band the
+  # trained noise head occupies, which bounds the weight without reshaping the
+  # noise field being learned. The clamp also applies at inference, since
+  # predict() evaluates sigma(x) through it.
+  noise_std_range: [0.01, 10.0]
+
+# Max global grad-norm for the GP head (0 = no clipping).
 head_grad_clip_norm: 10.0
 
 # --- KL / NLL annealing ---
