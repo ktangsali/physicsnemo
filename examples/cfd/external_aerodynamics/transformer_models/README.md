@@ -337,7 +337,7 @@ OOD test sets are auto-discovered from the config — any key matching `test_*` 
 
 #### Example: KDE of ID vs OOD signals
 
-![KDE of disagreement and GP std dev for in-distribution vs OOD samples](../../../docs/img/kde_id_vs_ood.png)
+![KDE of disagreement and GP std dev for in-distribution vs OOD samples](../../../../docs/img/kde_id_vs_ood.png)
 
 The model was trained exclusively on **DrivAerStar Fastback** geometries (class F).  The figure above shows kernel density estimates of the two UQ signals evaluated on the in-distribution Fastback validation set and five OOD vehicle classes from different sources and body styles.
 
@@ -589,6 +589,21 @@ python src/inference_field_gp.py \
     run_id=geotransolver/surface/field_gp \
     +checkpoint_epoch=100
 ```
+
+#### Example: uncertainty across DrivAerStar body styles
+
+![Per-point epistemic std of surface pressure on three DrivAerStar body styles](../../../../docs/img/field_gp_drivaerstar.png)
+
+The head was trained on **Fastback** geometries (class F) alone and then
+evaluated on the **Notchback** and **Estateback** classes.  Each panel shows the
+per-point epistemic standard deviation of surface pressure on a shared color
+scale, all of it from a single forward pass.
+
+The uncertainty field is smooth and follows the geometry rather than scattering
+as per-point noise, and its magnitude tracks geometric similarity to the
+training set.  The Notchback, the closest of the three to a Fastback, stays near
+the in-distribution level, while the Estateback's extended roof and tailgate are
+the most uncertain region in the figure.
 
 ### Using the head with another backbone
 
