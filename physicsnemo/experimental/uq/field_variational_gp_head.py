@@ -281,6 +281,15 @@ class FieldVariationalGPHead(nn.Module):
     outputscale_prior : tuple[float, float] | None, optional
         ``(concentration, rate)`` for a Gamma prior on the output scale.
         Default is ``None``.
+
+        .. note::
+           Both priors reach the objective through GPyTorch's
+           :class:`~gpytorch.mlls.VariationalELBO`, which sums the registered
+           prior log-probabilities into the loss.  Setting *noise_mlp_hidden*
+           switches training to :meth:`_hetero_neg_elbo`, which builds its
+           likelihood term by hand and so carries no prior term: the priors are
+           then inert and only *lengthscale_range*, a hard constraint rather
+           than a prior, still binds.
     mlp_hidden : list[int] | None, optional
         Hidden layer sizes for an optional pointwise DKL feature extractor MLP
         inserted before the GP kernel.  ``None`` feeds the features directly to
@@ -572,6 +581,12 @@ class FieldVariationalGPHead(nn.Module):
         its own inducing set, Cholesky factor and KL term, roughly doubling the
         variational state and the per-step :math:`O(M^3)` work, whereas the noise
         MLP adds only a few small layers.
+
+        This term is assembled directly rather than through
+        :class:`~gpytorch.mlls.VariationalELBO`, so unlike the homoscedastic
+        path it carries no registered-prior or added-loss contribution: any
+        ``lengthscale_prior`` / ``outputscale_prior`` is inert here, and the
+        kernel is shaped by ``lengthscale_range`` alone.
         """
         mu = dist.mean
         latent_var = dist.variance

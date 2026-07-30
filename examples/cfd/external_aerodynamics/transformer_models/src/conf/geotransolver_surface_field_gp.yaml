@@ -47,6 +47,10 @@ gp_head:
   # flattens the per-point variance into a single geometry-wide number).
   lengthscale_range: [0.01, 2.0]
   # Lengthscale prior: [concentration, rate] for Gamma. null = no prior.
+  # Both priors below only enter the loss through GPyTorch's VariationalELBO,
+  # i.e. on the homoscedastic path. noise_mlp_hidden is set further down, so
+  # this recipe trains through the hand-built heteroscedastic ELBO and the
+  # priors are inert; the lengthscale_range constraint above is what binds.
   lengthscale_prior: [2.0, 3.0]
   # Outputscale prior: [concentration, rate] for Gamma. null = no prior.
   outputscale_prior: [2.0, 0.5]
