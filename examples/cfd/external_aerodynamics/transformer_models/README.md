@@ -673,7 +673,7 @@ Three practical notes when porting:
 *Interpreting the noise term, and multi-output structure:*
 
 - **Bayesian Calibration of Computer Models:** [Kennedy & O'Hagan, JRSS-B 2001](https://doi.org/10.1111/1467-9868.00294) — model discrepancy: the gap between a deterministic simulator and truth, which is what `sigma^2(x)` absorbs on a deterministic RANS dataset
-- **Remarks on Multi-Output Gaussian Process Regression:** [Liu et al., 2018a](https://doi.org/10.1016/j.knosys.2018.03.022) — multi-output GP structure; this head uses the independent-per-task case (no cross-channel covariance)
+- **Remarks on Multi-Output Gaussian Process Regression:** [Liu, Cai & Ong, Knowledge-Based Systems 2018a](https://doi.org/10.1016/j.knosys.2017.12.034) — multi-output GP structure; this head uses the independent-per-task case (no cross-channel covariance)
 
 ---
 
