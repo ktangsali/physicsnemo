@@ -151,8 +151,23 @@ def test_invalid_feature_norm_is_rejected():
 
 def test_n_train_is_required():
     """n_train sets the ELBO normaliser, so it cannot be defaulted silently."""
-    with pytest.raises(ValueError, match="n_train"):
+    with pytest.raises(TypeError, match="n_train"):
         FieldVariationalGPHead(input_dim=INPUT_DIM)
+
+
+def test_tuning_knobs_are_keyword_only():
+    """Only input_dim is positional, so a config block cannot be mis-ordered."""
+    with pytest.raises(TypeError):
+        FieldVariationalGPHead(INPUT_DIM, N_TRAIN)
+
+
+@pytest.mark.parametrize("matern_nu", [0.5, 1.5, 2.5])
+def test_matern_order_is_configurable(device, matern_nu):
+    """The kernel's smoothness order is exposed, and reaches the kernel."""
+    head = make_head(device, matern_nu=matern_nu)
+    assert head.gp_layer.covar_module.base_kernel.nu == matern_nu
+    pred = head.predict(torch.randn(1, 32, INPUT_DIM, device=device))
+    assert torch.isfinite(pred.variance).all()
 
 
 @pytest.mark.parametrize("feature_norm", ["none", "l2_radial"])

@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pointwise multitask variational Gaussian Process head for field regression.
+r"""Pointwise multitask variational Gaussian Process head for field regression.
 
 Provides :class:`FieldVariationalGPHead`, a module that can be attached to any
-backbone which exposes *per-point* features to produce calibrated, per-point
-uncertainty estimates over a multi-channel field (e.g. surface pressure +
+backbone which exposes *per-point* features to produce per-point predictive
+uncertainty over a multi-channel field (e.g. surface pressure +
 wall-shear-stress).
 
 This is the *field* member of a two-head family.  Both are variational GPs with
@@ -69,6 +69,38 @@ exposing whatever it already computes before its final projection::
 At inference, :meth:`FieldVariationalGPHead.predict` returns the mean plus the
 epistemic/total variance split in a single forward pass.
 
+What a working recipe needs
+---------------------------
+The head owns its objective, but that objective alone does not take a randomly
+initialised backbone to a useful field surrogate.  These are properties of the
+recipe rather than of the architecture, which is why they live in the training
+script; a caller that skips them should expect a collapsed variance or a
+diverged noise scale rather than a bad-but-working model:
+
+* **Inducing points seeded from real features.** The default random-normal
+  inducing points sit nowhere near the backbone's feature distribution.  Push a
+  few batches through the backbone and pass the features to
+  :meth:`FieldVariationalGPHead.set_inducing_points`.
+* **An auxiliary MSE on the posterior mean.** The ELBO can buy likelihood by
+  inflating the variance instead of improving the mean; anchoring the mean
+  removes that shortcut while the backbone is still learning the field.
+* **A ramp on the KL term (and optionally on the whole ELBO).** Start with the
+  data-fit term dominant so the mean is accurate before the KL pulls the
+  variational posterior toward the prior.  ``beta`` in
+  :meth:`FieldVariationalGPHead.forward_and_loss` is that weight.
+* **A noise floor plus gradient clipping, whenever the noise MLP is on.** The
+  heteroscedastic ELBO weights each point by :math:`1/\sigma^2(x)`, so one
+  point whose noise collapses dominates the step; *noise_std_range* bounds the
+  collapse and clipping absorbs the overcorrection that follows it.
+* **Optionally, a penalty computed in kernel space.** Auxiliary terms on the
+  GP-input geometry go through :meth:`transform_features`, whose output is fed
+  back with ``pretransformed=True`` so the transform runs once per step.
+
+The reference recipe under
+``examples/cfd/external_aerodynamics/transformer_models`` implements all of
+these: ``src/conf/geotransolver_surface_field_gp.yaml`` holds the settled
+values and the README's "Field Variational GP Head" section explains them.
+
 Key design choices
 ------------------
 * **Independent multitask GP** — Each of the ``num_tasks`` output channels has
@@ -82,8 +114,17 @@ Key design choices
 * **Optional DKL feature extractor** — A small pointwise MLP can be inserted
   between the backbone features and the GP kernel (Deep Kernel Learning),
   reducing a wide feature vector to a compact, well-conditioned kernel input.
-* **Matern-5/2 ARD kernel** — Smooth, twice-differentiable, with per-dimension
-  lengthscales (Automatic Relevance Determination).
+* **Matern ARD kernel, smoothness 5/2 by default** — The Matern order
+  :math:`\nu` sets how many times the sample paths are differentiable, so it
+  encodes how smooth the field is assumed to be: 1/2 gives the non-differentiable
+  Ornstein-Uhlenbeck limit, 5/2 gives twice-differentiable paths, and
+  :math:`\nu \to \infty` recovers the RBF kernel.  5/2 is the usual choice for
+  smooth physical fields — differentiable enough for a pressure or shear field,
+  short of the RBF limit whose sample paths are analytic and which tends to
+  over-smooth.  Set *matern_nu* to change it; GPyTorch implements the three
+  half-integer orders 1/2, 3/2 and 5/2.  ARD (Automatic Relevance Determination)
+  gives every kernel input dimension its own lengthscale, so unhelpful DKL
+  features can be switched off by growing theirs.
 * **Optional heteroscedastic noise** — The observation noise can be made a
   function of the features rather than one learned scalar per channel; see
   :meth:`FieldVariationalGPHead._hetero_neg_elbo`.
@@ -96,7 +137,7 @@ from __future__ import annotations
 
 import importlib
 import math
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -138,8 +179,8 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
 
     Parameters
     ----------
-    inducing_points : torch.Tensor
-        Initial inducing point locations of shape ``(num_tasks, M, D)``.
+    inducing_points : Float[torch.Tensor, "tasks inducing gp_dim"]
+        Initial inducing point locations.
     input_dim : int
         Dimensionality of each input (must match last dim of *inducing_points*).
     num_tasks : int
@@ -150,16 +191,19 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
         ``(concentration, rate)`` for a Gamma prior on lengthscales.
     outputscale_prior : tuple[float, float] | None
         ``(concentration, rate)`` for a Gamma prior on the output scale.
+    matern_nu : float
+        Matern smoothness order; one of ``0.5``, ``1.5``, ``2.5``.
     """
 
     def __init__(
         self,
-        inducing_points: torch.Tensor,
+        inducing_points: Float[torch.Tensor, "tasks inducing gp_dim"],
         input_dim: int = 16,
         num_tasks: int = 4,
         lengthscale_range: tuple[float, float] = (0.01, 10.0),
         lengthscale_prior: tuple[float, float] | None = None,
         outputscale_prior: tuple[float, float] | None = None,
+        matern_nu: float = 2.5,
     ) -> None:
         _require_gpytorch()
         batch_shape = torch.Size([num_tasks])
@@ -189,7 +233,7 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
             ls_prior_obj = gpytorch.priors.GammaPrior(*lengthscale_prior)
 
         base_kernel = gpytorch.kernels.MaternKernel(
-            nu=2.5,
+            nu=matern_nu,
             ard_num_dims=input_dim,
             batch_shape=batch_shape,
             lengthscale_constraint=ls_constraint,
@@ -206,7 +250,9 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
             outputscale_prior=os_prior_obj,
         )
 
-    def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
+    def forward(
+        self, x: Float[torch.Tensor, "points gp_dim"]
+    ) -> gpytorch.distributions.MultivariateNormal:
         mean = self.mean_module(x)
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)
@@ -215,52 +261,58 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
 class FieldVariationalGPPrediction(NamedTuple):
     """Structured output of :meth:`FieldVariationalGPHead.predict`.
 
+    Every field has shape ``(..., num_tasks)``: the leading dimensions of the
+    features passed to :meth:`FieldVariationalGPHead.predict`, followed by the
+    channel dimension.
+
     Attributes
     ----------
-    mean : torch.Tensor
-        Predictive mean, shape ``(..., num_tasks)``.
-    variance : torch.Tensor
+    mean : Float[torch.Tensor, "... tasks"]
+        Predictive mean.
+    variance : Float[torch.Tensor, "... tasks"]
         Total predictive variance (epistemic + input-dependent observation
-        noise), shape ``(..., num_tasks)``.
-    lower : torch.Tensor
-        Lower bound of the confidence interval, shape ``(..., num_tasks)``.
-    upper : torch.Tensor
-        Upper bound of the confidence interval, shape ``(..., num_tasks)``.
-    epistemic_variance : torch.Tensor
+        noise).
+    lower : Float[torch.Tensor, "... tasks"]
+        Lower bound of the confidence interval.
+    upper : Float[torch.Tensor, "... tasks"]
+        Upper bound of the confidence interval.
+    epistemic_variance : Float[torch.Tensor, "... tasks"]
         Latent GP function variance *only* (the reducible / model uncertainty,
-        excluding the constant likelihood noise floor), shape
-        ``(..., num_tasks)``.  This is the signal to use for active learning and
-        for "where is the model uncertain?" maps — it has far more spatial
-        contrast than the noise-dominated total ``variance``.
+        excluding the constant likelihood noise floor).  This is the signal to
+        use for active learning and for "where is the model uncertain?" maps —
+        it has far more spatial contrast than the noise-dominated total
+        ``variance``.
     """
 
-    mean: torch.Tensor
-    variance: torch.Tensor
-    lower: torch.Tensor
-    upper: torch.Tensor
-    epistemic_variance: torch.Tensor
+    mean: Float[torch.Tensor, "... tasks"]
+    variance: Float[torch.Tensor, "... tasks"]
+    lower: Float[torch.Tensor, "... tasks"]
+    upper: Float[torch.Tensor, "... tasks"]
+    epistemic_variance: Float[torch.Tensor, "... tasks"]
 
 
 class FieldVariationalGPHead(nn.Module):
     r"""Pointwise independent multitask variational GP head for field UQ.
 
     Attach this module to any backbone that produces per-point features to
-    obtain calibrated, per-point uncertainty estimates over a multi-channel
-    field.  The posterior mean is the field prediction; the posterior variance
-    is the per-point uncertainty.
+    obtain per-point predictive uncertainty over a multi-channel field.  The
+    posterior mean is the field prediction; the posterior variance is the
+    per-point uncertainty.  That variance is distance-aware by construction but
+    not calibrated by construction: whether its scale matches observed error
+    depends on the recipe and on the train/test shift, so validate it on
+    held-out geometries before reading it as an error bar.
 
     Inputs of shape ``(..., D)`` are accepted (e.g. ``(B, N, D)`` or
     ``(N, D)``); all leading dimensions are flattened into the point dimension,
     the GP is evaluated, and outputs are reshaped back to ``(..., num_tasks)``.
 
+    Every parameter after *input_dim* is keyword-only, since the head is
+    normally built from a config block rather than positionally.
+
     Parameters
     ----------
     input_dim : int
         Dimension of each per-point feature vector from the backbone.
-    num_tasks : int, optional
-        Number of output channels (independent GPs). Default is 4.
-    n_inducing : int, optional
-        Number of inducing points per task. Default is 256.
     n_train : int
         Total number of *training points* (across all geometries) — used for
         the ELBO normalisation constant so the data term and KL term are
@@ -268,10 +320,17 @@ class FieldVariationalGPHead(nn.Module):
         geometries: 10 geometries of ``N`` points each is ``10 * N``, not 10.
         If a geometry is subsampled during training, count the points actually
         fed to the head per pass, i.e. ``n_geometries * points_per_geometry``.
-    inducing_points : torch.Tensor | None, optional
+        Required: the constant sets the balance between the data-fit and KL
+        terms, and no default can stand in for the size of the caller's dataset.
+    num_tasks : int, optional
+        Number of output channels (independent GPs). Default is 4.
+    n_inducing : int, optional
+        Number of inducing points per task. Default is 256.
+    inducing_points : Float[torch.Tensor, "*tasks inducing gp_dim"] | None, optional
         Initial inducing locations, either ``(M, gp_dim)`` (shared init,
         broadcast across tasks) or ``(num_tasks, M, gp_dim)``.  If *None*,
-        random normal points are used. Default is ``None``.
+        random normal points are used, which is rarely what you want for
+        training — see :meth:`set_inducing_points`. Default is ``None``.
     lengthscale_range : tuple[float, float], optional
         Hard interval constraint ``[lo, hi]`` on per-dimension ARD
         lengthscales. Default is ``(0.01, 10.0)``.
@@ -290,6 +349,14 @@ class FieldVariationalGPHead(nn.Module):
            likelihood term by hand and so carries no prior term: the priors are
            then inert and only *lengthscale_range*, a hard constraint rather
            than a prior, still binds.
+    matern_nu : float, optional
+        Smoothness order :math:`\nu` of the Matern kernel: one of ``0.5``,
+        ``1.5`` or ``2.5``, the half-integer orders GPyTorch implements.  It
+        controls how many times the GP's sample paths are differentiable, so it
+        is an assumption about the field: ``2.5`` (default) gives
+        twice-differentiable paths, appropriate for a smooth surface field,
+        while ``0.5`` is the rough Ornstein-Uhlenbeck limit.  Default is
+        ``2.5``.
     mlp_hidden : list[int] | None, optional
         Hidden layer sizes for an optional pointwise DKL feature extractor MLP
         inserted before the GP kernel.  ``None`` feeds the features directly to
@@ -363,15 +430,17 @@ class FieldVariationalGPHead(nn.Module):
     def __init__(
         self,
         input_dim: int,
+        *,
+        n_train: int,
         num_tasks: int = 4,
         n_inducing: int = 256,
-        n_train: int | None = None,
-        inducing_points: torch.Tensor | None = None,
+        inducing_points: Float[torch.Tensor, "*tasks inducing gp_dim"] | None = None,
         lengthscale_range: tuple[float, float] = (0.01, 10.0),
         lengthscale_prior: tuple[float, float] | None = None,
         outputscale_prior: tuple[float, float] | None = None,
+        matern_nu: float = 2.5,
         mlp_hidden: list[int] | None = None,
-        feature_norm: str = "none",
+        feature_norm: Literal["none", "l2_radial"] = "none",
         use_double: bool = True,
         jitter: tuple[float, float] = (1e-3, 1e-4),
         confidence_z: float = 1.96,
@@ -380,9 +449,9 @@ class FieldVariationalGPHead(nn.Module):
     ) -> None:
         super().__init__()
         _require_gpytorch()
-        if n_train is None:
-            raise ValueError("n_train is required for the ELBO normalisation constant")
 
+        # Config-driven instantiation (hydra, YAML) delivers plain strings, which
+        # the Literal annotation cannot police at runtime.
         if feature_norm not in ("none", "l2_radial"):
             raise ValueError(
                 f"feature_norm must be 'none' or 'l2_radial', got {feature_norm!r}"
@@ -432,6 +501,7 @@ class FieldVariationalGPHead(nn.Module):
             lengthscale_range=lengthscale_range,
             lengthscale_prior=lengthscale_prior,
             outputscale_prior=outputscale_prior,
+            matern_nu=matern_nu,
         )
         likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
             num_tasks=num_tasks
@@ -489,11 +559,11 @@ class FieldVariationalGPHead(nn.Module):
 
     @staticmethod
     def _init_inducing(
-        inducing_points: torch.Tensor | None,
+        inducing_points: Float[torch.Tensor, "*tasks inducing gp_dim"] | None,
         n_inducing: int,
         gp_input_dim: int,
         num_tasks: int,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, "tasks inducing gp_dim"]:
         """Return inducing points of shape ``(num_tasks, M, gp_input_dim)``."""
         if inducing_points is None:
             return torch.randn(num_tasks, n_inducing, gp_input_dim)
@@ -518,15 +588,23 @@ class FieldVariationalGPHead(nn.Module):
         return self.noise_head is not None
 
     def _pointwise_noise_var(
-        self, gp_in: torch.Tensor
+        self, gp_in: Float[torch.Tensor, "points gp_dim"]
     ) -> Float[torch.Tensor, "points tasks"]:
         """Per-point, per-task observation-noise variance.
 
         ``sigma_t(x) = exp(log_base_noise_t + clamp(g_t(x), -3, 3))`` — a learned
         per-task base scale times a bounded multiplicative modulation from the
-        noise MLP.  The clamp keeps the modulation within ~20x either way so a
-        bad step cannot drive the noise to 0 (infinite log-likelihood) or blow
-        it up; the final clamp to ``noise_std_range`` is a hard safety net.
+        noise MLP.
+
+        The clamp bounds the *modulation*, not the noise: it limits how far one
+        point may sit from its channel's learned base scale, to about 20x either
+        way (``exp(3) = 20.1``).  The absolute floor is ``noise_std_range[0]``,
+        applied below, so the low end of the clamp does not need to be small —
+        its job is to stop a single step from driving a point's noise toward 0,
+        where the ``1/sigma^2(x)`` weighting in :meth:`_hetero_neg_elbo` would
+        let that point dominate the gradient.  Widening the range weakens that
+        guard; the symmetric +/-3 leaves the base scale free to move across
+        channels while keeping any one point within a factor of 20 of it.
         """
         log_mod = self.noise_head(gp_in).clamp(-3.0, 3.0)
         std = torch.exp(self.log_base_noise.to(log_mod.dtype) + log_mod)
@@ -536,10 +614,10 @@ class FieldVariationalGPHead(nn.Module):
     def _hetero_neg_elbo(
         self,
         dist: "gpytorch.distributions.MultitaskMultivariateNormal",
-        gp_target: torch.Tensor,
-        gp_in: torch.Tensor,
+        gp_target: Float[torch.Tensor, "points tasks"],
+        gp_in: Float[torch.Tensor, "points gp_dim"],
         beta: float,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, ""]:
         r"""Negative ELBO with diagonal, input-dependent Gaussian noise.
 
         The expected log-likelihood under a heteroscedastic Gaussian is the
@@ -603,7 +681,9 @@ class FieldVariationalGPHead(nn.Module):
         kl = kl / (self._num_data / max(float(beta), 1e-8))
         return -(log_lik - kl)
 
-    def _transform_features(self, features: torch.Tensor) -> torch.Tensor:
+    def _transform_features(
+        self, features: Float[torch.Tensor, "... dim"]
+    ) -> Float[torch.Tensor, "... gp_dim"]:
         """Run optional DKL extractor then the (scale-fixing) feature norm.
 
         The normalisation pins the GP-input feature scale so the kernel
@@ -626,33 +706,55 @@ class FieldVariationalGPHead(nn.Module):
             features = torch.cat([direction, mag_std], dim=-1)
         return features
 
-    def _apply_fe(self, features: torch.Tensor) -> torch.Tensor:
-        """Run feature transform (DKL + norm), then cast to GP precision."""
+    def _apply_fe(
+        self, features: Float[torch.Tensor, "... dim"]
+    ) -> Float[torch.Tensor, "... gp_dim"]:
+        """Run feature transform (DKL + norm), then cast to GP precision.
+
+        The cast is what keeps the Cholesky factorisation of ``K_uu`` viable:
+        with short lengthscales the inducing points are strongly correlated and
+        the matrix is ill-conditioned, which in float32 shows up as a Cholesky
+        failure or a negative predictive variance.  Only the GP internals run in
+        float64 — outputs are cast back in :meth:`forward_and_loss` and
+        :meth:`predict`, so the backbone keeps training in its own precision.
+        """
         features = self._transform_features(features)
         if self._use_double:
             return features.double()
         return features
 
-    def transform_features(self, features: torch.Tensor) -> torch.Tensor:
-        """Public wrapper for the DKL + feature-norm transform (GP-input space).
+    def transform_features(
+        self, features: Float[torch.Tensor, "... dim"]
+    ) -> Float[torch.Tensor, "... gp_dim"]:
+        """Return the features the kernel sees, in GP-input space.
 
-        Returns the features the kernel actually sees (same space as the
-        inducing points), without the double-precision cast, so callers can
-        compute auxiliary losses (e.g. a distance penalty) on the GP-input
-        geometry while keeping gradients flowing back into the backbone. Pass
-        the result to :meth:`forward_and_loss` with ``pretransformed=True`` to
-        avoid re-running the transform (and its BatchNorm) a second time.
+        Exposed for auxiliary losses that need kernel-space geometry — a
+        penalty on distances between points, for instance — which would
+        otherwise have no way to reach this space: the transform is applied
+        inside :meth:`forward_and_loss`, and re-deriving it in the caller would
+        run the DKL MLP twice per step and update the ``l2_radial`` BatchNorm's
+        running statistics twice.  Feed the result back through
+        :meth:`forward_and_loss` with ``pretransformed=True`` so the step
+        transforms once.
+
+        The output is in the same space as the inducing points and carries
+        gradient to the backbone, and unlike the internal path it is *not* cast
+        to the GP's working precision.
         """
         return self._transform_features(features)
 
     @staticmethod
-    def _flatten_points(features: torch.Tensor) -> tuple[torch.Tensor, torch.Size]:
+    def _flatten_points(
+        features: Float[torch.Tensor, "... dim"],
+    ) -> tuple[Float[torch.Tensor, "points dim"], torch.Size]:
         """Flatten all leading dims into a single point dimension."""
         lead = features.shape[:-1]
         return features.reshape(-1, features.shape[-1]), lead
 
     @torch.no_grad()
-    def set_inducing_points(self, points: torch.Tensor) -> None:
+    def set_inducing_points(
+        self, points: Float[torch.Tensor, "*tasks inducing dim"]
+    ) -> None:
         """Re-seed inducing locations from collected features.
 
         Accepts ``(M, D)`` (shared across tasks) or ``(num_tasks, M, D)`` in
@@ -713,7 +815,14 @@ class FieldVariationalGPHead(nn.Module):
         beta: float = 1.0,
         pretransformed: bool = False,
         return_variance: bool = False,
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> (
+        tuple[Float[torch.Tensor, "... tasks"], Float[torch.Tensor, ""]]
+        | tuple[
+            Float[torch.Tensor, "... tasks"],
+            Float[torch.Tensor, ""],
+            Float[torch.Tensor, "... tasks"],
+        ]
+    ):
         r"""Forward pass returning the predictive mean and negative ELBO.
 
         Parameters
@@ -736,7 +845,7 @@ class FieldVariationalGPHead(nn.Module):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        tuple of Float[torch.Tensor, "... tasks"] and Float[torch.Tensor, ""]
             ``(mean, neg_elbo)`` — predictive mean reshaped to ``target``'s
             shape and the negative ELBO (scalar), both in the caller's dtype. If
             ``return_variance`` is ``True``, a third element is the per-point
@@ -773,7 +882,7 @@ class FieldVariationalGPHead(nn.Module):
         features: Float[torch.Tensor, "... dim"],
         target: Float[torch.Tensor, "... tasks"],
         beta: float = 1.0,
-    ) -> torch.Tensor:
+    ) -> Float[torch.Tensor, ""]:
         """Compute the (beta-weighted) negative ELBO loss."""
         _, neg_elbo = self.forward_and_loss(features, target, beta=beta)
         return neg_elbo
@@ -782,7 +891,7 @@ class FieldVariationalGPHead(nn.Module):
     def predict(
         self, features: Float[torch.Tensor, "... dim"]
     ) -> FieldVariationalGPPrediction:
-        r"""Produce per-point predictions with calibrated uncertainty.
+        r"""Produce per-point predictions with their predictive uncertainty.
 
         Parameters
         ----------

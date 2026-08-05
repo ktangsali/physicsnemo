@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -264,9 +265,11 @@ class GeoTransolver(Module):
         accumulates global-parameter bounds and pooled geometry latents during
         training, and emits warnings on out-of-distribution inputs during
         inference. Default is ``None``.
-    attention_type : str, optional
-        attention_type is used to choose the attention type (GALE or GALE_FA).
-        Default is ``"GALE"``.
+    attention_type : {"GALE", "GALE_FA"}, optional
+        Attention implementation used inside each GALE block: ``"GALE"`` for the
+        reference version, ``"GALE_FA"`` for the flash-attention one.  Validated
+        in :class:`~physicsnemo.experimental.models.geotransolver.gale.GALE_block`,
+        which raises on any other value. Default is ``"GALE"``.
     state_mixing_mode : str, optional
         How to blend self-attention and cross-attention outputs in GALE layers.
         ``"weighted"`` uses a learnable sigmoid-gated weighted sum.
@@ -422,7 +425,7 @@ class GeoTransolver(Module):
         n_hidden_local: int = 32,
         structured_shape: tuple[int, ...] | None = None,
         guard_config: dict | None = None,
-        attention_type: str = "GALE",
+        attention_type: Literal["GALE", "GALE_FA"] = "GALE",
         concrete_dropout: bool = False,
         state_mixing_mode: str = "weighted",
     ) -> None:
