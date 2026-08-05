@@ -23,28 +23,41 @@ output_dir: "runs"
 checkpoint_dir: null
 run_id: "geotransolver/surface/field_gp"
 
-# --- Field GP head ---
+# RNG seed. Everything stochastic in this recipe draws from torch's global RNG:
+# the backbone's initialisation, the datapipe's point sampling, the inducing-point
+# draw, the per-step GP subsample and the distance penalty's point pairs. An
+# integer makes the run reproducible; null (the default, and what the results in
+# the README were produced with) leaves the generators entropy-seeded.
+seed: null
+
+# --- Field Gaussian-process (GP) head ---
 # The GP head replaces the readout: posterior mean = per-point field
 # prediction, posterior variance = per-point uncertainty. Instantiated with
 # hydra, so this block is the single source of truth for the head's structure
 # and every script (train / inference / plot) builds it identically -- which is
 # what lets an eval run load a training checkpoint. The two arguments not listed
 # here are supplied at runtime: `input_dim` (the backbone feature width, probed
-# with one forward pass) and `n_train` (the ELBO num_data normaliser).
+# with one forward pass) and `n_train`, the number of training points the
+# evidence lower bound (ELBO) is normalised by.
 gp_head:
   _target_: physicsnemo.experimental.uq.FieldVariationalGPHead
 
   num_tasks: 4                 # pressure + 3 wall-shear-stress components
   n_inducing: 1024             # inducing points per task (shared structure)
 
-  # DKL feature extractor: pointwise MLP between the (wide) backbone features
-  # and the GP kernel. Reduces dim for an efficient ARD kernel + good inducing
-  # coverage. null = feed backbone features straight to the GP.
+  # Deep kernel learning (DKL) feature extractor: a pointwise multi-layer
+  # perceptron (MLP) between the (wide) backbone features and the GP kernel,
+  # trained jointly with it. Narrowing the features keeps the kernel's
+  # per-dimension lengthscales affordable and the 1024 inducing points able to
+  # cover the space. null = feed backbone features straight to the GP.
   mlp_hidden: [128, 16]
 
-  # Lengthscale: [lower, upper] hard constraint on per-dimension ARD
-  # lengthscales. The 2.0 cap keeps the kernel from going near-global (which
-  # flattens the per-point variance into a single geometry-wide number).
+  # Lengthscale: [lower, upper] hard constraint on the kernel's per-dimension
+  # lengthscales -- one per DKL output dimension, which is what automatic
+  # relevance determination (ARD) means here: the kernel learns how far to smooth
+  # along each feature separately, and can switch a feature off by growing its
+  # lengthscale. The 2.0 cap keeps it from going near-global (which flattens the
+  # per-point variance into a single geometry-wide number).
   lengthscale_range: [0.01, 2.0]
   # Lengthscale prior: [concentration, rate] for Gamma. null = no prior.
   # Both priors below only enter the loss through GPyTorch's VariationalELBO,
@@ -59,11 +72,13 @@ gp_head:
   # feature scale so the lengthscale must do the smoothing, preventing the DKL
   # map from shrinking feature distances to defeat the lengthscale cap.
   # One of: none | l2_radial.
-  #   l2_radial -> keep the L2-normalised direction AND append the standardised
-  #                pre-norm magnitude as one extra ARD dim. The magnitude is
-  #                what carries the radial out-of-distribution cue; projecting
-  #                onto the unit sphere alone erases it (OOD/in-dist std ratio
-  #                -> ~1.0x).
+  #   l2_radial -> keep the direction of the feature vector (scaled to unit L2
+  #                norm) AND append its standardised pre-norm magnitude as one
+  #                extra ARD dimension. The magnitude is what carries the radial
+  #                out-of-distribution (OOD) cue: features for an unfamiliar
+  #                geometry sit further from the origin, and projecting onto the
+  #                unit sphere alone erases that (the OOD-to-in-distribution std
+  #                ratio falls to ~1.0x).
   feature_norm: l2_radial
 
   # Heteroscedastic observation noise: hidden sizes of an MLP mapping GP-input
@@ -84,17 +99,19 @@ gp_head:
 # Max global grad-norm for the GP head (0 = no clipping).
 head_grad_clip_norm: 10.0
 
-# --- KL / NLL annealing ---
-# Negative ELBO is the field loss; ramp the KL weight (beta) 0->1 over the
-# window so the data-fit term shapes the backbone + GP mean first.
+# --- Annealing the two halves of the ELBO ---
+# The negative ELBO is the field loss. It splits into a data-fit term (the
+# expected negative log likelihood, NLL) and a Kullback-Leibler (KL) divergence
+# pulling the variational posterior toward the prior. Ramp the KL weight (beta)
+# 0->1 over the window so the data-fit term shapes the backbone + GP mean first.
 beta_warmup_start: 0
 beta_warmup_end: 30
 # Constant multiplier on beta once the ramp completes (<1 loosens the KL pull
 # toward the prior, letting the posterior keep more per-point structure).
 gp_kl_weight: 0.5
 # Ramp the weight on the whole negative ELBO 0->1 over this window, so the
-# mean-MSE anchor leads the early epochs and the GP mean is accurate before the
-# likelihood term is free to flatten the variance.
+# auxiliary mean-squared-error (MSE) anchor below leads the early epochs and the
+# GP mean is accurate before the likelihood term is free to flatten the variance.
 nll_warmup_start: 0
 nll_warmup_end: 30
 

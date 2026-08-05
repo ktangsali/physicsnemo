@@ -24,12 +24,14 @@ posterior variance is the per-point uncertainty.
 
 Provides:
 
-* ``beta_ramp_weight`` — KL-annealing schedule for the variational ELBO.
 * ``compute_field_targets_from_batch`` — per-point field-target extraction.
+* ``probe_feature_dim`` — the backbone's per-point feature width, which the
+  head needs as its ``input_dim``.
 * ``collect_inducing_features`` — gather per-point backbone features to seed
   the GP inducing points.
-* Re-export of ``sync_non_ddp_gradients`` from :mod:`gp_utils`.
 
+The KL ramp and the non-DDP gradient sync are shared with the scalar-GP recipe
+and live in :mod:`gp_utils` (``gp_ramp_weight``, ``sync_non_ddp_gradients``).
 """
 
 from __future__ import annotations
@@ -38,12 +40,10 @@ import logging
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float
 from torch.utils.data import DataLoader
 
-from gp_utils import (  # noqa: F401 (sync_non_ddp_gradients is re-exported)
-    cast_precisions,
-    sync_non_ddp_gradients,
-)
+from gp_utils import cast_precisions
 
 # Number of surface field channels predicted by the field GP:
 #   index 0      -> pressure
@@ -52,42 +52,103 @@ NUM_SURFACE_TASKS = 4
 
 
 # ---------------------------------------------------------------------------
-# KL annealing schedule
-# ---------------------------------------------------------------------------
-
-
-def beta_ramp_weight(epoch: int, warmup_start: int, warmup_end: int) -> float:
-    """Linear KL-weight ramp: 0 before *warmup_start*, 0->1 over the window, 1 after.
-
-    During the early epochs the ELBO is dominated by its data-fit (expected
-    log-likelihood) term, which behaves like a regression loss and lets the
-    backbone + GP mean learn a sensible field before the KL regulariser pulls
-    the variational posterior toward the prior.
-    """
-    if warmup_end <= warmup_start:
-        return 1.0
-    if epoch < warmup_start:
-        return 0.0
-    if epoch >= warmup_end:
-        return 1.0
-    return (epoch - warmup_start) / (warmup_end - warmup_start)
-
-
-# ---------------------------------------------------------------------------
 # Per-point targets
 # ---------------------------------------------------------------------------
 
 
-def compute_field_targets_from_batch(batch: dict) -> torch.Tensor:
+def compute_field_targets_from_batch(
+    batch: dict,
+) -> Float[torch.Tensor, "batch points tasks"]:
     """Return the per-point (normalised) surface field targets.
 
-    Shape ``(B, N, num_tasks)`` — the same normalised space the GP is trained
-    in.  Uses ``fields`` (the subsampled stream the GP head also sees).
+    Parameters
+    ----------
+    batch : dict
+        A batch from the Transolver datapipe.  Only ``fields`` is read: the
+        point-subsampled target stream, which is the same set of points the GP
+        head sees, so targets and features stay aligned.  The datapipe emits it
+        as a one-element list in ``combined`` mode and as a tensor otherwise.
+
+    Returns
+    -------
+    Float[torch.Tensor, "batch points tasks"]
+        Targets in the normalised space the GP is trained in, with ``tasks``
+        ordered pressure first and then the three wall-shear-stress components.
     """
     fields = batch["fields"]
     if isinstance(fields, list):
         fields = fields[0]
     return fields
+
+
+# ---------------------------------------------------------------------------
+# Backbone feature width
+# ---------------------------------------------------------------------------
+
+
+@torch.no_grad()
+def probe_feature_dim(
+    model: nn.Module,
+    batch: dict,
+    precision: str,
+    max_points: int | None = None,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Return the backbone's per-point feature width from one forward pass.
+
+    The width is a property of the backbone's configuration, but reading it off
+    the config would mean re-deriving GeoTransolver's internals here; one
+    forward pass is authoritative instead.  Training and inference both need it
+    to build a head whose ``input_dim`` matches the checkpoint.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Backbone accepting ``return_point_features=True``.  Run in eval mode;
+        the previous mode is restored before returning.
+    batch : dict
+        Any batch from the datapipe, used only for its shapes and dtypes.
+    precision : str
+        Precision string understood by ``cast_precisions``.
+    max_points : int | None, optional
+        Truncate the point dimension to this many points.  The result does not
+        depend on the count, so a small value keeps the probe cheap on
+        full-mesh batches.  ``None`` (default) uses every point.
+    logger : logging.Logger | None, optional
+        If given, the probed width is logged.
+
+    Returns
+    -------
+    int
+        Size of the last dimension of the backbone's per-point features.
+    """
+    was_training = model.training
+    model.eval()
+    try:
+        embeddings = batch["embeddings"]
+        if max_points is not None:
+            embeddings = embeddings[:, : min(embeddings.shape[1], max_points)]
+        embeddings = cast_precisions(embeddings, precision)
+        features = cast_precisions(batch["fx"], precision)
+        geometry = (
+            cast_precisions(batch["geometry"], precision)
+            if "geometry" in batch
+            else None
+        )
+        _, point_features = model(
+            global_embedding=features,
+            local_embedding=embeddings,
+            geometry=geometry,
+            local_positions=embeddings[:, :, :3],
+            return_point_features=True,
+        )
+    finally:
+        if was_training:
+            model.train()
+    dim = int(point_features.shape[-1])
+    if logger is not None:
+        logger.info(f"Probed per-point backbone feature dim: {dim}")
+    return dim
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +164,41 @@ def collect_inducing_features(
     precision: str,
     device: torch.device,
     logger: logging.Logger | None = None,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, "inducing dim"]:
     """Collect ``n_inducing`` per-point backbone features to seed the GP.
 
+    The head's default inducing points are random normal draws, which sit
+    nowhere near the backbone's feature distribution; the first epochs would be
+    spent dragging them into it.  Seeding from real features instead starts the
+    variational approximation where the data is.
+
     Runs the backbone (eval mode) over batches, harvesting a random subset of
-    per-point features from each until ``n_inducing`` have been gathered.
-    Returns a ``(n_inducing, D)`` tensor on *device* (raw feature space; the
-    GP head applies its DKL extractor, if any, when these are installed).
+    per-point features from each until ``n_inducing`` have been gathered.  Which
+    points are drawn follows torch's global RNG, so it is reproducible exactly
+    when the run is seeded (``cfg.seed``); it does not need to agree across
+    ranks, because the caller broadcasts one rank's result to the others.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Backbone accepting ``return_point_features=True``.
+    dataloader : DataLoader
+        Source of batches; iterated only until enough points are collected.
+    n_inducing : int
+        Number of feature vectors to return.
+    precision : str
+        Precision string understood by ``cast_precisions``.
+    device : torch.device
+        Device for the returned tensor.
+    logger : logging.Logger | None, optional
+        If given, logs the collected count, width and feature-norm range.
+
+    Returns
+    -------
+    Float[torch.Tensor, "inducing dim"]
+        Features in the backbone's *raw* output space, not the kernel's:
+        :meth:`~physicsnemo.experimental.uq.FieldVariationalGPHead.set_inducing_points`
+        applies the DKL extractor and feature norm when it installs them.
     """
     model.eval()
     collected: list[torch.Tensor] = []
@@ -134,7 +223,7 @@ def collect_inducing_features(
         pf = point_features.reshape(-1, point_features.shape[-1])
         take = min(pf.shape[0], n_inducing - n_have)
         idx = torch.randperm(pf.shape[0], device=pf.device)[:take]
-        collected.append(pf[idx].detach().cpu())
+        collected.append(pf[idx].detach())
         n_have += take
         if n_have >= n_inducing:
             break

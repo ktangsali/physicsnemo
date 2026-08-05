@@ -36,10 +36,12 @@ The '+' prefix adds new config keys; '++' overrides existing ones.  Expects the
 same input directory layout as ``inference_on_vtk.py``.
 """
 
+from __future__ import annotations
+
 import collections
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import hydra
 import numpy as np
@@ -47,17 +49,37 @@ import omegaconf
 import pyvista as pv
 import torch
 import torchinfo
+from jaxtyping import Float
 from omegaconf import DictConfig
 
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.utils import load_checkpoint
 from physicsnemo.utils.logging import PythonLogger, RankZeroLoggingWrapper
 
-from train import cast_precisions, update_model_params_for_fp8, get_autocast_context
+from train import (
+    Precision,
+    cast_precisions,
+    get_autocast_context,
+    update_model_params_for_fp8,
+    validate_precision,
+)
+from field_gp_utils import probe_feature_dim
 
 # Reuse the VTK I/O + datapipe helpers from the deterministic VTK inference.
 from inference_on_vtk import build_data_dict, create_datapipe
 
+if TYPE_CHECKING:
+    # Annotation only: the head is built by hydra from cfg.gp_head, and importing
+    # it eagerly would trade its own "install gpytorch" message for an
+    # ImportError on the name.
+    from physicsnemo.experimental.uq import FieldVariationalGPHead
+
+# physicsnemo's ``.mdlus`` checkpoints store the model's instantiation arguments
+# alongside its weights, and those arrive from hydra as OmegaConf nodes rather
+# than plain containers. ``torch.load`` runs with ``weights_only=True``, which
+# refuses to unpickle any type not on its allowlist, so loading a trained
+# backbone fails on the config until these are registered. Every training and
+# inference script in this directory carries the same block.
 torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
 torch.serialization.add_safe_globals([omegaconf.base.ContainerMetadata])
 torch.serialization.add_safe_globals([Any])
@@ -73,15 +95,37 @@ torch.serialization.add_safe_globals([omegaconf.base.Metadata])
 def field_gp_predict_full_mesh(
     batch: dict,
     model: torch.nn.Module,
-    head,
+    head: FieldVariationalGPHead,
     chunk_size: int,
-    device: torch.device,
-    precision: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    precision: Precision,
+) -> tuple[Float[torch.Tensor, "points tasks"], Float[torch.Tensor, "points tasks"]]:
     """Run the backbone in chunks, GP-predict per chunk, stitch to full mesh.
 
-    Returns ``(mean, std)`` each of shape ``(N, num_tasks)`` in the GP's
-    normalised target space, ordered to match the input mesh cells.
+    A full boundary mesh does not fit in one forward pass, so the points are
+    shuffled, split into chunks, and the predictions scattered back into mesh
+    order.  The shuffle matches training, where the backbone's global attention
+    also sees a random subset of the mesh rather than a contiguous region; it
+    comes off torch's global RNG, so two runs over the same mesh agree only if
+    the process is seeded.
+
+    Parameters
+    ----------
+    batch : dict
+        One geometry from the datapipe, full mesh (no point subsampling).
+    model : torch.nn.Module
+        GeoTransolver backbone accepting ``return_point_features=True``.
+    head : FieldVariationalGPHead
+        Trained GP head, in eval mode.
+    chunk_size : int
+        Points per chunk.
+    precision : Precision
+        Precision for the backbone forward pass.
+
+    Returns
+    -------
+    tuple of Float[torch.Tensor, "points tasks"]
+        ``(mean, std)`` in the GP's normalised target space, on the CPU and
+        ordered to match the input mesh cells.
     """
     N = batch["embeddings"].shape[1]
     indices = torch.randperm(N, device=batch["fx"].device)
@@ -140,11 +184,11 @@ def _require_checkpoint_files(checkpoint_dir: str, epoch: int | None) -> None:
 
 
 def write_field_gp_predictions_to_vtk(
-    vtp_path: str,
-    output_path: str,
-    mean_norm: torch.Tensor,
-    std_norm: torch.Tensor,
-    surface_factors: dict,
+    vtp_path: str | Path,
+    output_path: str | Path,
+    mean_norm: Float[torch.Tensor, "points tasks"],
+    std_norm: Float[torch.Tensor, "points tasks"],
+    surface_factors: dict[str, torch.Tensor],
 ) -> None:
     """Write GP mean field + per-point std (UQ) to a VTP.
 
@@ -161,23 +205,30 @@ def write_field_gp_predictions_to_vtk(
     so the physical stds are not comparable across channels; divide each by its
     ``surface_factors["std"]`` entry to recover the dimensionless form when a
     cross-channel UQ map is what you want.
+
+    The unstandardizing is done on the tensors, but stays on the host: PyVista
+    holds cell data as NumPy arrays, so the results have to arrive on the CPU
+    whatever happens, and both operands are already there — the predictions were
+    moved off the device chunk by chunk to keep a full mesh's worth of points out
+    of GPU memory.  It is one affine pass over four columns, which costs nothing
+    next to reading and writing the mesh itself.
     """
+    vtp_path = Path(vtp_path)
+    if not vtp_path.is_file():
+        raise FileNotFoundError(f"No surface mesh to annotate at {vtp_path}")
     mesh = pv.read(vtp_path)
     output_mesh = mesh.copy()
 
-    mean_np = mean_norm.cpu().numpy()
-    std_np = std_norm.cpu().numpy()
-
-    field_mean = surface_factors["mean"].cpu().numpy().reshape(-1)
-    field_std = surface_factors["std"].cpu().numpy().reshape(-1)
+    field_mean = surface_factors["mean"].detach().cpu().reshape(-1)
+    field_std = surface_factors["std"].detach().cpu().reshape(-1)
 
     # Mean field: unstandardize (x * std + mean) back to physical units.
-    mean_unscaled = mean_np * field_std + field_mean
+    mean_unscaled = (mean_norm * field_std + field_mean).numpy()
     output_mesh.cell_data["PredictedPressure"] = mean_unscaled[:, 0]
     output_mesh.cell_data["PredictedWallShearStress"] = mean_unscaled[:, 1:4]
 
     # Std is a scale: maps through the affine unstandardize as std * field_std.
-    std_unscaled = std_np * field_std
+    std_unscaled = (std_norm * field_std).numpy()
     output_mesh.cell_data["StdPressure"] = std_unscaled[:, 0]
     output_mesh.cell_data["StdWallShearStress"] = std_unscaled[:, 1:4]
 
@@ -208,6 +259,11 @@ def inference_field_gp(cfg: DictConfig) -> None:
 
     input_dir = Path(vtk_cfg.input_dir)
     output_dir = Path(vtk_cfg.output_dir)
+    # Freestream conditions of the dataset being scored, used by build_data_dict
+    # to fill the global-parameter channels the backbone was trained with (they
+    # play no part in the VTK arrays, which stay in the trained units). The
+    # defaults are the DrivAerStar operating point: 1.2050 kg/m^3 at 15 C and
+    # 101.325 kPa, and a 30 m/s inlet. Override both for any other dataset.
     air_density = vtk_cfg.get("air_density", 1.2050)
     stream_velocity = vtk_cfg.get("stream_velocity", 30.0)
     run_indices = vtk_cfg.get("run_indices", None)
@@ -218,7 +274,7 @@ def inference_field_gp(cfg: DictConfig) -> None:
         raise ValueError("inference_field_gp currently supports data.mode=surface only")
 
     device = dist_manager.device
-    precision = getattr(cfg, "precision", "float32")
+    precision = validate_precision(cfg.precision)
 
     # ---- Backbone ----
     model = hydra.utils.instantiate(cfg.model, _convert_="partial")
@@ -227,7 +283,7 @@ def inference_field_gp(cfg: DictConfig) -> None:
     model.eval()
 
     # ---- Normalization factors ----
-    norm_dir = getattr(cfg.data, "normalization_dir", ".")
+    norm_dir = cfg.data.normalization_dir
     norm_file = str(Path(norm_dir) / "surface_fields_normalization.npz")
     norm_data = np.load(norm_file)
     surface_factors = {
@@ -237,7 +293,8 @@ def inference_field_gp(cfg: DictConfig) -> None:
 
     # ---- Datapipe (full mesh, manual chunking) ----
     datapipe = create_datapipe(cfg, data_mode, device, surface_factors, None)
-    chunk_size = getattr(cfg.data, "resolution", 51200) or 51200
+    # Chunk the full mesh at the same point count the head was trained on.
+    chunk_size = cfg.data.resolution
 
     # ---- Locate runs ----
     if run_indices is not None:
@@ -251,10 +308,11 @@ def inference_field_gp(cfg: DictConfig) -> None:
 
     # ---- Build the GP head once (probe feature dim on the first run) ----
     head = None
-    checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or (
+    # Optional overrides rather than recipe knobs: absent means "derive it".
+    checkpoint_dir = cfg.get("checkpoint_dir", None) or (
         f"{cfg.output_dir}/{cfg.run_id}/checkpoints_field_gp"
     )
-    checkpoint_epoch = getattr(cfg, "checkpoint_epoch", None)
+    checkpoint_epoch = cfg.get("checkpoint_epoch", None)
     _require_checkpoint_files(checkpoint_dir, checkpoint_epoch)
 
     for run_dir in this_device_runs:
@@ -274,7 +332,11 @@ def inference_field_gp(cfg: DictConfig) -> None:
             batch = datapipe(data_dict)
 
             if head is None:
-                feature_dim = _probe_feature_dim(model, batch, precision, device)
+                # A boundary mesh is far larger than one chunk, so probe on a
+                # slice of it rather than the whole thing.
+                feature_dim = probe_feature_dim(
+                    model, batch, precision, max_points=1024
+                )
                 # n_train only normalises the training ELBO, so any value works
                 # here; cfg.gp_head is what must match the checkpoint.
                 head = hydra.utils.instantiate(
@@ -306,7 +368,7 @@ def inference_field_gp(cfg: DictConfig) -> None:
                 head.likelihood.eval()
 
             mean_norm, std_norm = field_gp_predict_full_mesh(
-                batch, model, head, chunk_size, device, precision
+                batch, model, head, chunk_size, precision
             )
 
             run_output_dir = output_dir / run_dir.name
@@ -335,26 +397,6 @@ def inference_field_gp(cfg: DictConfig) -> None:
             continue
 
     logger.info("Field-GP inference complete!")
-
-
-@torch.no_grad()
-def _probe_feature_dim(model, batch, precision, device) -> int:
-    """Return the per-point backbone feature dim via a one-chunk forward pass."""
-    n = min(batch["embeddings"].shape[1], 1024)
-    features = cast_precisions(batch["fx"], precision)
-    local_emb = cast_precisions(batch["embeddings"][:, :n], precision)
-    geometry = (
-        cast_precisions(batch["geometry"], precision) if "geometry" in batch else None
-    )
-    with get_autocast_context(precision):
-        _, point_features = model(
-            global_embedding=features,
-            local_embedding=local_emb,
-            geometry=geometry,
-            local_positions=local_emb[:, :, :3],
-            return_point_features=True,
-        )
-    return int(point_features.shape[-1])
 
 
 @hydra.main(

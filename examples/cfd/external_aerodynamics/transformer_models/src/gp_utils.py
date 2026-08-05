@@ -312,7 +312,33 @@ def create_embedding_reduction(
 
 
 def gp_ramp_weight(epoch: int, warmup_start: int, warmup_end: int) -> float:
-    """Linear ramp: 0 before *warmup_start*, 0→1 over [start, end), 1 after."""
+    """Linear ramp: 0 before *warmup_start*, 0→1 over [start, end), 1 after.
+
+    Used for KL annealing, and for the ramp on the whole negative ELBO: early
+    on the objective is dominated by its data-fit term, which behaves like a
+    regression loss and lets the backbone and GP mean learn a sensible field
+    before the KL pulls the variational posterior toward the prior.
+
+    An empty or inverted window (``warmup_end <= warmup_start``) means the ramp
+    is disabled and returns 1.0 throughout, so a recipe can switch it off by
+    setting both ends equal.
+
+    Parameters
+    ----------
+    epoch : int
+        Current epoch.
+    warmup_start : int
+        First epoch of the ramp.
+    warmup_end : int
+        Epoch at which the weight reaches 1.0.
+
+    Returns
+    -------
+    float
+        Weight in ``[0, 1]``.
+    """
+    if warmup_end <= warmup_start:
+        return 1.0
     if epoch < warmup_start:
         return 0.0
     if epoch >= warmup_end:

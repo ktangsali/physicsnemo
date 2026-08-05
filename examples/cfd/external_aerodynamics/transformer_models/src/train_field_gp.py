@@ -35,6 +35,8 @@ and ``w_nll`` are both ramped from 0 over their warmup windows.
 See the "Field GP" section of the example README for the exact launch command.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import glob
@@ -42,7 +44,7 @@ import time
 import shutil
 import collections
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from contextlib import nullcontext
 
 import hydra
@@ -52,6 +54,7 @@ from omegaconf import DictConfig
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
+from jaxtyping import Float
 from torch.amp import GradScaler
 from torch.utils.tensorboard import SummaryWriter
 
@@ -69,21 +72,34 @@ from train import (
     get_autocast_context,
     cast_precisions,
     pad_input_for_fp8,
+    seed_everything,
     update_model_params_for_fp8,
 )
+from gp_utils import gp_ramp_weight, sync_non_ddp_gradients
 from field_gp_utils import (
-    beta_ramp_weight,
     collect_inducing_features,
     compute_field_targets_from_batch,
-    sync_non_ddp_gradients,
+    probe_feature_dim,
 )
 from metrics import metrics_fn
 from utils import tensorwise
 
 from physicsnemo.core.version_check import check_version_spec
 
+if TYPE_CHECKING:
+    # Annotation only: the head itself is built by hydra from cfg.gp_head, and
+    # importing it eagerly would trade its own "install gpytorch" message for an
+    # ImportError on the name.
+    from physicsnemo.experimental.uq import FieldVariationalGPHead
+
 TE_AVAILABLE = check_version_spec("transformer_engine", hard_fail=False)
 
+# physicsnemo's ``.mdlus`` checkpoints store the model's instantiation arguments
+# alongside its weights, and those arrive from hydra as OmegaConf nodes rather
+# than plain containers. ``torch.load`` runs with ``weights_only=True``, which
+# refuses to unpickle any type not on its allowlist, so resuming a run fails on
+# the config until these are registered. Every training and inference script in
+# this directory carries the same block.
 torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
 torch.serialization.add_safe_globals([omegaconf.base.ContainerMetadata])
 torch.serialization.add_safe_globals([Any])
@@ -189,11 +205,18 @@ def _atomic_save_checkpoint(ckpt_args: dict, epoch: int) -> None:
 
 
 def _maybe_subsample(
-    point_features: torch.Tensor,
-    target: torch.Tensor,
+    point_features: Float[torch.Tensor, "batch points dim"],
+    target: Float[torch.Tensor, "batch points tasks"],
     n_points: int | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Optionally subsample the point dimension to ``n_points`` for the GP step."""
+) -> tuple[
+    Float[torch.Tensor, "batch sub_points dim"],
+    Float[torch.Tensor, "batch sub_points tasks"],
+]:
+    """Optionally subsample the point dimension to ``n_points`` for the GP step.
+
+    Which points are kept follows torch's global RNG, so a seeded run
+    (``cfg.seed``) draws the same subsets.
+    """
     if n_points is None:
         return point_features, target
     n_total = point_features.shape[1]
@@ -204,11 +227,11 @@ def _maybe_subsample(
 
 
 def _dist_penalty(
-    gp_feats: torch.Tensor,
-    target: torch.Tensor,
+    gp_feats: Float[torch.Tensor, "batch points gp_dim"],
+    target: Float[torch.Tensor, "batch points tasks"],
     n_pairs: int,
     margin: float,
-) -> torch.Tensor:
+) -> Float[torch.Tensor, ""]:
     """Within-sample latent distance penalty (bi-Lipschitz-style, target-aware).
 
     For random point pairs inside each geometry, penalise pairs whose GP-input
@@ -230,10 +253,16 @@ def _dist_penalty(
     target : (B, P, T) tensor
         Per-point field targets.
     n_pairs : int
-        Random point pairs sampled per geometry.
+        Random point pairs sampled per geometry.  Drawn from torch's global RNG,
+        so a seeded run (``cfg.seed``) samples the same pairs.
     margin : float
         Multiplier on the (normalised) target distance the latent distance must
         meet or exceed before the hinge stops penalising.
+
+    Returns
+    -------
+    Float[torch.Tensor, ""]
+        Scalar penalty, averaged over pairs and then over geometries.
     """
     if gp_feats.dim() != 3:
         gp_feats = gp_feats.reshape(1, -1, gp_feats.shape[-1])
@@ -242,16 +271,67 @@ def _dist_penalty(
     if p < 2 or n_pairs < 1:
         return gp_feats.new_zeros(())
     target = target.to(gp_feats.dtype)
-    total = gp_feats.new_zeros(())
-    for k in range(b):
-        i = torch.randint(0, p, (n_pairs,), device=gp_feats.device)
-        j = torch.randint(0, p, (n_pairs,), device=gp_feats.device)
-        d_lat = (gp_feats[k, i] - gp_feats[k, j]).pow(2).sum(-1).clamp_min(1e-12).sqrt()
-        d_tgt = (target[k, i] - target[k, j]).pow(2).sum(-1).clamp_min(1e-12).sqrt()
-        d_lat = d_lat / (d_lat.mean().detach() + 1e-12)
-        d_tgt = d_tgt / (d_tgt.mean().detach() + 1e-12)
-        total = total + torch.relu(margin * d_tgt - d_lat).mean()
-    return total / max(b, 1)
+
+    # Pairs for every geometry at once: (b, n_pairs) index matrices gathered
+    # against a (b, 1) row index.
+    i = torch.randint(0, p, (b, n_pairs), device=gp_feats.device)
+    j = torch.randint(0, p, (b, n_pairs), device=gp_feats.device)
+    rows = torch.arange(b, device=gp_feats.device).unsqueeze(1)
+    lat_gap = gp_feats[rows, i] - gp_feats[rows, j]
+    tgt_gap = target[rows, i] - target[rows, j]
+    d_lat = lat_gap.pow(2).sum(-1).clamp_min(1e-12).sqrt()
+    d_tgt = tgt_gap.pow(2).sum(-1).clamp_min(1e-12).sqrt()
+    # Scale-free per geometry, so a geometry with a wide target range does not
+    # dominate the batch.
+    d_lat = d_lat / (d_lat.mean(dim=1, keepdim=True).detach() + 1e-12)
+    d_tgt = d_tgt / (d_tgt.mean(dim=1, keepdim=True).detach() + 1e-12)
+    return torch.relu(margin * d_tgt - d_lat).mean(dim=1).sum() / max(b, 1)
+
+
+#: Every knob the training loop reads off the config, checked once at startup.
+#: Reading them with ``getattr(cfg, name, default)`` instead would turn a typo in
+#: a YAML key or a command-line override into a silent fallback to the default,
+#: which is indistinguishable in the logs from having set the value.
+_REQUIRED_KNOBS = (
+    "beta_warmup_start",
+    "beta_warmup_end",
+    "gp_kl_weight",
+    "nll_warmup_start",
+    "nll_warmup_end",
+    "lambda_mean_mse",
+    "dist_penalty_weight",
+    "dist_penalty_pairs",
+    "dist_penalty_margin",
+    "head_grad_clip_norm",
+    "gp_points_per_step",
+    "points_per_geometry",
+    "gp_head",
+    "precision",
+    "data.mode",
+    "data.resolution",
+    "data.normalization_dir",
+    "training.num_epochs",
+    "training.save_interval",
+    "training.gradient_accumulation_steps",
+)
+
+_ABSENT = object()
+
+
+def _require_knobs(cfg: DictConfig) -> None:
+    """Fail with one message naming every knob this recipe needs and lacks."""
+    missing = [
+        key
+        for key in _REQUIRED_KNOBS
+        if omegaconf.OmegaConf.select(cfg, key, default=_ABSENT) is _ABSENT
+    ]
+    if missing:
+        raise ValueError(
+            f"Field-GP config is missing {missing}. Compose from "
+            "src/conf/geotransolver_surface_field_gp.yaml, which defines every "
+            "knob this recipe reads; an explicit null is fine where the knob is "
+            "optional."
+        )
 
 
 def main(cfg: DictConfig):
@@ -262,6 +342,18 @@ def main(cfg: DictConfig):
         PythonLogger(name="field_gp_training"),
         dist_manager,
     )
+    _require_knobs(cfg)
+
+    # Optional RNG seed. Everything stochastic in this recipe -- the weight
+    # initialisation, the datapipe's point subsampling, the inducing-point draw,
+    # the per-step GP subsample and the distance penalty's pairs -- comes off
+    # torch's global RNG, so this one value makes the run reproducible. Left
+    # unset (null) each run differs, which is the historical behaviour.
+    seed = cfg.get("seed", None)
+    if seed is not None:
+        seed = int(seed)
+        seed_everything(seed, dist_manager.rank)
+        logger.info(f"Seeded run: seed={seed} (+rank offset)")
 
     # ---- Field-GP config ----
     # cfg.gp_head is a hydra _target_ block; the eval scripts instantiate the
@@ -269,13 +361,13 @@ def main(cfg: DictConfig):
     n_inducing = cfg.gp_head.n_inducing
 
     # KL annealing window (epochs) and auxiliary mean-MSE weight
-    beta_warmup_start = getattr(cfg, "beta_warmup_start", 0)
-    beta_warmup_end = getattr(cfg, "beta_warmup_end", 20)
-    lambda_mean_mse = getattr(cfg, "lambda_mean_mse", 1.0)
+    beta_warmup_start = cfg.beta_warmup_start
+    beta_warmup_end = cfg.beta_warmup_end
+    lambda_mean_mse = cfg.lambda_mean_mse
     # Optional scale on the (fully-ramped) KL term. <1.0 keeps the variational
     # posterior more input-dependent (sharper / heteroscedastic) instead of
-    # collapsing toward the prior. Default 1.0 == standard ELBO.
-    kl_weight = float(getattr(cfg, "gp_kl_weight", 1.0))
+    # collapsing toward the prior. 1.0 == standard ELBO.
+    kl_weight = float(cfg.gp_kl_weight)
 
     # ---- NLL (ELBO) warmup + latent distance penalty ----
     # NLL warmup: ramp the weight on the *whole* negative ELBO 0->1 over
@@ -283,32 +375,32 @@ def main(cfg: DictConfig):
     # mean-MSE anchor (lambda_mean_mse) so the backbone + GP mean learn an
     # accurate, non-collapsed field before the likelihood term can flatten the
     # variance. Empty window (end<=start) => weight 1.0 always (disabled).
-    nll_warmup_start = int(getattr(cfg, "nll_warmup_start", 0))
-    nll_warmup_end = int(getattr(cfg, "nll_warmup_end", 0))
+    nll_warmup_start = int(cfg.nll_warmup_start)
+    nll_warmup_end = int(cfg.nll_warmup_end)
     # Distance penalty (within-sample, point-level): a one-sided hinge that
     # forces pairs of points with large target differences to also be far apart
     # in GP-input (kernel) space, so the kernel can express larger variance
     # where predictions differ. 0.0 => disabled.
-    dist_penalty_weight = float(getattr(cfg, "dist_penalty_weight", 0.0))
-    dist_penalty_pairs = int(getattr(cfg, "dist_penalty_pairs", 4096))
-    dist_penalty_margin = float(getattr(cfg, "dist_penalty_margin", 1.0))
+    dist_penalty_weight = float(cfg.dist_penalty_weight)
+    dist_penalty_pairs = int(cfg.dist_penalty_pairs)
+    dist_penalty_margin = float(cfg.dist_penalty_margin)
 
     # Max global grad-norm for the GP head (0 / unset = no clipping, which is
     # what every earlier run used). Catches the overcorrection that follows a
     # noise collapse; gp_head.noise_std_range prevents the collapse itself.
-    grad_clip_norm = float(getattr(cfg, "head_grad_clip_norm", 0.0) or 0.0)
+    grad_clip_norm = float(cfg.head_grad_clip_norm or 0.0)
 
     # Optional further subsampling of points used by the GP each step
-    gp_points_per_step = getattr(cfg, "gp_points_per_step", None)
+    gp_points_per_step = cfg.gp_points_per_step
     # Points per geometry used to size the ELBO num_data normaliser
-    points_per_geometry = getattr(cfg, "points_per_geometry", None) or (
-        getattr(cfg.data, "resolution", 51200) or 51200
-    )
+    points_per_geometry = cfg.points_per_geometry or cfg.data.resolution
 
-    accumulation_steps = getattr(cfg.training, "gradient_accumulation_steps", 1)
+    accumulation_steps = cfg.training.gradient_accumulation_steps
 
     # ---- Directories and writers ----
-    checkpoint_dir = getattr(cfg, "checkpoint_dir", None) or cfg.output_dir
+    # Optional overrides rather than recipe knobs: absent means "derive it", so
+    # these stay tolerant of a missing key.
+    checkpoint_dir = cfg.get("checkpoint_dir", None) or cfg.output_dir
     ckpt_path = f"{checkpoint_dir}/{cfg.run_id}/checkpoints_field_gp"
 
     if dist_manager.rank == 0:
@@ -355,7 +447,7 @@ def main(cfg: DictConfig):
     logger.info(f"GeoTransolver parameters: {num_geo_params:,}")
 
     # ---- Normalization factors (surface) ----
-    norm_dir = getattr(cfg.data, "normalization_dir", ".")
+    norm_dir = cfg.data.normalization_dir
     surface_factors = None
     if cfg.data.mode in ("surface", "combined"):
         nd = np.load(str(Path(norm_dir) / "surface_fields_normalization.npz"))
@@ -380,12 +472,15 @@ def main(cfg: DictConfig):
 
     num_replicas = dist_manager.world_size
     data_rank = dist_manager.rank
+    # DistributedSampler's own default seed is 0, so the shuffle order repeats
+    # across unseeded runs; passing the run seed varies it with the run.
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dl,
         num_replicas=num_replicas,
         rank=data_rank,
         shuffle=True,
         drop_last=True,
+        **({"seed": seed} if seed is not None else {}),
     )
     val_sampler = torch.utils.data.distributed.DistributedSampler(
         val_dl,
@@ -402,8 +497,8 @@ def main(cfg: DictConfig):
     # Probe the backbone feature dimension with one forward pass. Set indices
     # first since the per-epoch sampler hasn't assigned them yet.
     train_dl.dataset.set_indices(list(range(n_train)))
-    feature_dim = _probe_feature_dim(
-        model, train_dl, precision, dist_manager.device, logger
+    feature_dim = probe_feature_dim(
+        model, next(iter(train_dl)), precision, logger=logger
     )
     head = hydra.utils.instantiate(
         cfg.gp_head,
@@ -503,11 +598,11 @@ def main(cfg: DictConfig):
         val_dl.dataset.set_indices(val_indices)
 
         epoch_len = len(train_indices)
-        beta = kl_weight * beta_ramp_weight(epoch, beta_warmup_start, beta_warmup_end)
+        beta = kl_weight * gp_ramp_weight(epoch, beta_warmup_start, beta_warmup_end)
         # Ramp the whole negative ELBO 0->1 so mean-MSE (+ dist penalty) lead the
         # early epochs and the likelihood term only shapes variance once the mean
         # field is accurate. Empty window => 1.0 (standard joint ELBO).
-        w_nll = beta_ramp_weight(epoch, nll_warmup_start, nll_warmup_end)
+        w_nll = gp_ramp_weight(epoch, nll_warmup_start, nll_warmup_end)
 
         # Seed inducing points from real features before the first epoch.
         if not inducing_init_done:
@@ -591,7 +686,7 @@ def main(cfg: DictConfig):
                 + dist_penalty_weight * dist_pen
             )
 
-            head_grad_norm: float | None = None
+            head_grad_norm: torch.Tensor | None = None
             if i % accumulation_steps == 0:
                 optimizer.zero_grad()
             is_step_boundary = (i + 1) % accumulation_steps == 0 or (i + 1) == epoch_len
@@ -612,11 +707,11 @@ def main(cfg: DictConfig):
                         scaler.unscale_(optimizer)
                     # Returns the pre-clip norm, which is the diagnostic we
                     # actually want logged -- it shows how often (and by how
-                    # much) the threshold binds.
-                    head_grad_norm = float(
-                        torch.nn.utils.clip_grad_norm_(
-                            head.parameters(), grad_clip_norm
-                        )
+                    # much) the threshold binds. Kept as a tensor: reading it
+                    # out is a device sync, so that waits until the log line is
+                    # actually formatted.
+                    head_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        head.parameters(), grad_clip_norm
                     )
                 if scaler is not None:
                     scaler.step(optimizer)
@@ -638,7 +733,7 @@ def main(cfg: DictConfig):
             start_time = end_time
 
             gnorm_str = (
-                f"  HeadGradNorm: {head_grad_norm:.3f}"
+                f"  HeadGradNorm: {head_grad_norm.item():.3f}"
                 if head_grad_norm is not None
                 else ""
             )
@@ -704,7 +799,7 @@ def main(cfg: DictConfig):
 
         # Checkpoints are tagged ``epoch + 1`` (the numbering the inference and
         # evaluation tooling expects).
-        save_interval = getattr(cfg.training, "save_interval", 10)
+        save_interval = cfg.training.save_interval
         if dist_manager.rank == 0 and epoch % save_interval == 0:
             _atomic_save_checkpoint(ckpt_args, epoch=epoch + 1)
 
@@ -713,41 +808,18 @@ def main(cfg: DictConfig):
     logger.info("Training completed!")
 
 
-@torch.no_grad()
-def _probe_feature_dim(model, dataloader, precision, device, logger) -> int:
-    """Return the per-point backbone feature dimension via one forward pass."""
-    model.eval()
-    batch = next(iter(dataloader))
-    features = cast_precisions(batch["fx"], precision)
-    embeddings = cast_precisions(batch["embeddings"], precision)
-    geometry = (
-        cast_precisions(batch["geometry"], precision) if "geometry" in batch else None
-    )
-    local_positions = embeddings[:, :, :3]
-    _, point_features = model(
-        global_embedding=features,
-        local_embedding=embeddings,
-        geometry=geometry,
-        local_positions=local_positions,
-        return_point_features=True,
-    )
-    dim = int(point_features.shape[-1])
-    logger.info(f"Probed per-point backbone feature dim: {dim}")
-    return dim
-
-
 def _validate(
-    model,
-    head,
-    val_dl,
-    val_indices,
-    precision,
-    modes,
-    dist_manager,
-    logger,
-    val_writer,
-    epoch,
-):
+    model: torch.nn.Module,
+    head: FieldVariationalGPHead,
+    val_dl: Any,
+    val_indices: list[int],
+    precision: str,
+    modes: list[str],
+    dist_manager: DistributedManager,
+    logger: RankZeroLoggingWrapper,
+    val_writer: SummaryWriter | None,
+    epoch: int,
+) -> None:
     """Validate the GP mean field (metrics) and log mean predictive std."""
     model.eval()
     head.eval()
