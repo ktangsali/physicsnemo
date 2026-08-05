@@ -430,7 +430,7 @@ def reinitialize_inducing_points(
             return_embedding_states=True,
         )
         reduced = embedding_reduction(emb_states.flatten(1, 2))
-        init_embeddings.append(reduced.cpu())
+        init_embeddings.append(reduced)
 
     dataloader.dataset.set_indices(train_indices)
 

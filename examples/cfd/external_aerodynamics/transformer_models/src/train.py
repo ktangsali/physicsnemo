@@ -76,7 +76,12 @@ if TE_AVAILABLE:
 else:
     te, Format, DelayedScaling = None, None, None
 
-# This will go away when checkpointing is refined further below:
+# physicsnemo's ``.mdlus`` checkpoints store the model's instantiation arguments
+# alongside its weights so a model can be rebuilt from the file alone, and those
+# arguments arrive from hydra as OmegaConf nodes rather than plain containers.
+# ``torch.load`` runs with ``weights_only=True``, which refuses to unpickle any
+# type not on its allowlist, so resuming a run fails on the config until these are
+# registered. This will go away when checkpointing is refined further below:
 torch.serialization.add_safe_globals([omegaconf.listconfig.ListConfig])
 torch.serialization.add_safe_globals([omegaconf.base.ContainerMetadata])
 torch.serialization.add_safe_globals([Any])
