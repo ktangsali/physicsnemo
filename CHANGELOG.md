@@ -152,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass yields the field prediction, the total predictive variance and the
   epistemic-only variance — no ensembling or MC-Dropout. Backbone-agnostic (it
   consumes only a `(..., input_dim)` feature tensor), with an optional DKL MLP,
-  a Matérn-5/2 ARD kernel, float64 GP internals, an `l2_radial` feature
+  a Matérn ARD kernel (5/2 by default), float64 GP internals, an `l2_radial` feature
   normalisation that preserves the radial out-of-distribution cue, and an
   optional heteroscedastic observation-noise MLP. Includes a surface field-GP
   training recipe for GeoTransolver
@@ -329,6 +329,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is in fact singular: it propagates NaN caches instead, as its docstring now
   documents. The default `assume_invertible=None` still tests the determinant
   and is unaffected.
+- `physicsnemo.experimental.uq.VariationalGPHead` now takes `n_train` as a
+  required keyword-only argument, along with every argument after `input_dim`.
+  It was annotated optional while the constructor raised on `None`, so callers
+  that already pass it by keyword are unaffected. It also gains `matern_nu`,
+  which was previously hardcoded to 2.5 (still the default).
 
 ### Deprecated
 
