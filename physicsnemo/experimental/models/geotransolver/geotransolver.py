@@ -270,13 +270,11 @@ class GeoTransolver(Module):
         reference version, ``"GALE_FA"`` for the flash-attention one.  Validated
         in :class:`~physicsnemo.experimental.models.geotransolver.gale.GALE_block`,
         which raises on any other value. Default is ``"GALE"``.
-    state_mixing_mode : {"weighted", "concat_project"}, optional
+    state_mixing_mode : str, optional
         How to blend self-attention and cross-attention outputs in GALE layers.
         ``"weighted"`` uses a learnable sigmoid-gated weighted sum.
         ``"concat_project"`` concatenates the two along the head dimension and
-        projects back with a linear layer.  Validated in
-        :mod:`~physicsnemo.experimental.models.geotransolver.gale`, which raises
-        on any other value. Default is ``"weighted"``.
+        projects back with a linear layer. Default is ``"weighted"``.
 
     Forward
     -------
@@ -429,7 +427,7 @@ class GeoTransolver(Module):
         guard_config: dict | None = None,
         attention_type: Literal["GALE", "GALE_FA"] = "GALE",
         concrete_dropout: bool = False,
-        state_mixing_mode: Literal["weighted", "concat_project"] = "weighted",
+        state_mixing_mode: str = "weighted",
     ) -> None:
         super().__init__(meta=GeoTransolverMetaData())
         self.__name__ = "GeoTransolver"
