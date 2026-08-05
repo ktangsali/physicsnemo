@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Promotes GeoTransolver out of `experimental` to
+  `physicsnemo.models.geotransolver.GeoTransolver`, together with the FLARE
+  model (`physicsnemo.models.flare.FLARE`) and the reusable GALE and FLARE
+  attention layers (`physicsnemo.nn.GALE`, `physicsnemo.nn.GALEBlock`,
+  `physicsnemo.nn.FLARE`). The embedded OOD guard is decoupled from the model.
+  Wrap a GuardedGeoTransolver (or call
+  `attach_ood_guard`) to enable out-of-distribution guarding. The
+  model argument is removed.
 - Adds `zenith_azimuth_angles` and `zenith_azimuth_angles_from_timestamp` to
   `physicsnemo.utils.zenith_angle`, returning
   `(sin_zenith, cos_zenith, sin_azimuth, cos_azimuth)` alongside the existing
@@ -157,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional heteroscedastic observation-noise MLP. Includes a surface field-GP
   training recipe for GeoTransolver
   (`examples/cfd/external_aerodynamics/transformer_models/src/train_field_gp.py`).
+- Adds a `return_point_features` forward flag to
+  `physicsnemo.models.geotransolver.GeoTransolver`, which additionally returns
+  the per-point latents computed just before the output projection. These are
+  the features a pointwise head such as `FieldVariationalGPHead` consumes.
 - Adds `LatentNoveltyQueryStrategy` to the active-learning aero recipe,
   a third acquisition strategy that ranks unlabeled samples by their
   average kNN cosine distance in the encoder's learned geometry latent
