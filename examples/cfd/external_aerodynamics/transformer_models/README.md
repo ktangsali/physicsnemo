@@ -511,6 +511,33 @@ ELBO) ramped from 0 over the first 30 epochs.  The ordering matters: the
 mean-MSE anchor leads the early epochs so the backbone and GP mean become
 accurate *before* the likelihood term is free to shrink the variance.
 
+#### The auxiliary terms
+
+The terms around `neg_elbo` — the mean anchor, the two ramps, the latent distance
+penalty and the gradient clipping — belong to the training script rather than to
+the head, so they are configured here:
+
+| Config key | Default | What it controls |
+| --- | --- | --- |
+| `lambda_mean_mse` | `1.0` | Weight of a direct MSE on the GP posterior mean, which keeps the mean accurate while the ELBO is free to trade accuracy for variance. |
+| `nll_warmup_start` / `_end` | `0` / `30` | Epoch window over which `w_nll`, the weight on the whole negative ELBO, ramps 0 → 1, so the mean anchor leads the early epochs. |
+| `beta_warmup_start` / `_end` | `0` / `30` | Epoch window over which the KL weight ramps 0 → 1, so the data-fit term shapes the posterior before the prior pulls on it. |
+| `gp_kl_weight` | `0.5` | Constant multiplier on the KL weight once the ramp completes.  Below `1.0` the posterior keeps more per-point structure. |
+| `head_grad_clip_norm` | `10.0` | Max global grad-norm over the head's parameters (`0` disables).  The `1/σ²(x)` weighting of the heteroscedastic ELBO produces occasional very large steps when one point's noise dips. |
+| `dist_penalty_weight` / `_pairs` / `_margin` | `0.5` / `4096` / `1.0` | One-sided hinge pushing point pairs with distant targets apart in kernel space, so the kernel can assign them different variance.  Both distances are normalised by their batch mean, so only relative geometry is shaped.  `0.0` disables. |
+
+These are load-bearing rather than cosmetic.  Without the mean anchor and the
+ramps the ELBO can buy likelihood by inflating the variance before the mean field
+is accurate, and the run settles into a collapsed variance.
+
+Two further knobs are cost rather than stability decisions: `gp_points_per_step:
+12288` bounds the `O(points)` GP solve per step (`null` uses every point the
+dataloader provides), and `gp_head.n_inducing: 1024` sets how finely the posterior
+can resolve the feature space, at `O(M³)` per step.  Those inducing points are
+seeded from real backbone features once, before the first epoch, rather than left
+at their random-normal defaults — see the learning-rate discussion below and the
+porting notes.
+
 The head itself is a hydra `_target_` block under `gp_head`, so the config is the
 single source of truth for its structure and every script (train, inference,
 plotting) instantiates it identically.  Only `input_dim` and `n_train` are
@@ -636,7 +663,28 @@ mean, neg_elbo = head.forward_and_loss(feats, targets, beta=beta)
 loss = neg_elbo + lambda_mse * mse(mean, targets)
 ```
 
-Three practical notes when porting:
+The snippet runs, but it is not the full recipe.  The terms in
+[The auxiliary terms](#the-auxiliary-terms) live in the training script, so a new
+backbone needs its own copy of them.  Most carry over unchanged; two need
+retuning:
+
+- **The noise floor scales with your targets.**  `noise_std_range[0]` works by
+  sitting just below the σ band the noise head settles into, which depends
+  entirely on how the targets are normalised.  The `0.01` here suits
+  unit-variance standardised fields.  On a different target scale the same number
+  either binds at every point or stops guarding the `1/σ²(x)` weighting
+  altogether, so move it with the targets and check it against the σ range the
+  run actually logs.
+- **The warmup windows are in epochs, not fractions.**  `30` of `100` here; a
+  shorter or longer run needs the window moved to keep the same ordering, since a
+  ramp that ends after training does nothing but scale the loss down.
+
+The mean anchor, gradient clipping and the `0.5` KL weight are backbone-agnostic
+and can be carried over as they are.  The distance penalty is the one genuinely
+optional term (`dist_penalty_weight: 0.0` disables it) and it costs one extra
+`transform_features` call per step.
+
+Three further practical notes:
 
 - **Seed the inducing points** from real features once the backbone is warm
   (`head.set_inducing_points(...)`); random-normal inducing locations in a
