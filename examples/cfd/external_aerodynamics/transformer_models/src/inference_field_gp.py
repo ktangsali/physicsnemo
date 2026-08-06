@@ -19,7 +19,7 @@
 Reads boundary VTP files, runs the GeoTransolver backbone in chunks to extract
 per-point features, feeds them to the trained :class:`FieldVariationalGPHead`, and writes
 the GP posterior **mean** (the field prediction) *and* **standard deviation**
-(the per-point uncertainty) for all four surface channels back to a VTP.  Colour
+(the per-point uncertainty) for all four surface channels back to a VTP.  Color
 the resulting mesh by any ``*Std`` array to see which car regions are most
 uncertain — produced in a single forward pass.
 
@@ -124,7 +124,7 @@ def field_gp_predict_full_mesh(
     Returns
     -------
     tuple of Float[torch.Tensor, "points tasks"]
-        ``(mean, std)`` in the GP's normalised target space, on the CPU and
+        ``(mean, std)`` in the GP's normalized target space, on the CPU and
         ordered to match the input mesh cells.
     """
     N = batch["embeddings"].shape[1]
@@ -169,7 +169,7 @@ def _require_checkpoint_files(checkpoint_dir: str, epoch: int | None) -> None:
     """Raise unless both the backbone and head checkpoint files are present.
 
     ``load_checkpoint`` returns 0 instead of raising when it finds nothing, so
-    without this inference would run to completion on randomly initialised
+    without this inference would run to completion on randomly initialized
     weights and write plausible-looking VTK output.
     """
     tag = "*" if epoch is None else str(epoch)
@@ -201,7 +201,7 @@ def write_field_gp_predictions_to_vtk(
     Everything is written in physical units.  The targets are standardized
     *physical* fields — the DrivAerStar statistics are Pa-scale — so
     unstandardizing is the whole conversion and no dynamic-pressure factor
-    applies.  Note the four channels carry very different normalisation scales,
+    applies.  Note the four channels carry very different normalization scales,
     so the physical stds are not comparable across channels; divide each by its
     ``surface_factors["std"]`` entry to recover the dimensionless form when a
     cross-channel UQ map is what you want.
@@ -337,7 +337,7 @@ def inference_field_gp(cfg: DictConfig) -> None:
                 feature_dim = probe_feature_dim(
                     model, batch, precision, max_points=1024
                 )
-                # n_train only normalises the training ELBO, so any value works
+                # n_train only normalizes the training ELBO, so any value works
                 # here; cfg.gp_head is what must match the checkpoint.
                 head = hydra.utils.instantiate(
                     cfg.gp_head,
@@ -356,7 +356,7 @@ def inference_field_gp(cfg: DictConfig) -> None:
                     raise CheckpointError(
                         f"load_checkpoint restored nothing from {checkpoint_dir} "
                         f"(epoch={checkpoint_epoch}); the models are still randomly "
-                        "initialised."
+                        "initialized."
                     )
                 logger.info(
                     f"Loaded field-GP checkpoint (epoch {loaded_epoch}) from "

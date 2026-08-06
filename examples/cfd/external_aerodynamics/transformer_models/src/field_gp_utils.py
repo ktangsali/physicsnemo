@@ -59,7 +59,7 @@ NUM_SURFACE_TASKS = 4
 def compute_field_targets_from_batch(
     batch: dict,
 ) -> Float[torch.Tensor, "batch points tasks"]:
-    """Return the per-point (normalised) surface field targets.
+    """Return the per-point (normalized) surface field targets.
 
     Parameters
     ----------
@@ -72,7 +72,7 @@ def compute_field_targets_from_batch(
     Returns
     -------
     Float[torch.Tensor, "batch points tasks"]
-        Targets in the normalised space the GP is trained in, with ``tasks``
+        Targets in the normalized space the GP is trained in, with ``tasks``
         ordered pressure first and then the three wall-shear-stress components.
     """
     fields = batch["fields"]

@@ -103,7 +103,7 @@ def test_head_is_backbone_agnostic(device):
 
 
 def test_loss_trains_head_parameters(device):
-    """A few optimiser steps reduce the loss and update GP parameters."""
+    """A few optimizer steps reduce the loss and update GP parameters."""
     torch.manual_seed(0)
     head = make_head(device)
     feats = torch.randn(2, 64, INPUT_DIM, device=device)
@@ -127,13 +127,13 @@ def test_loss_trains_head_parameters(device):
 
 
 def test_l2_radial_adds_one_kernel_dimension(device):
-    """'l2_radial' appends the standardised feature magnitude as an ARD dim."""
+    """'l2_radial' appends the standardized feature magnitude as an ARD dim."""
     plain = make_head(device, feature_norm="none")
     radial = make_head(device, feature_norm="l2_radial")
 
     assert plain.gp_input_dim == 8
     assert radial.gp_input_dim == 9
-    # The magnitude is standardised by a non-affine BatchNorm, which contributes
+    # The magnitude is standardized by a non-affine BatchNorm, which contributes
     # running buffers (and therefore state_dict keys) the plain variant lacks.
     assert plain._radial_bn is None
     assert radial._radial_bn is not None
@@ -150,7 +150,7 @@ def test_invalid_feature_norm_is_rejected():
 
 
 def test_n_train_is_required():
-    """n_train sets the ELBO normaliser, so it cannot be defaulted silently."""
+    """n_train sets the ELBO normalizer, so it cannot be defaulted silently."""
     with pytest.raises(TypeError, match="n_train"):
         FieldVariationalGPHead(input_dim=INPUT_DIM)
 
@@ -212,7 +212,7 @@ def test_heteroscedastic_noise_is_input_dependent(device):
 
     hetero = make_head(device, noise_mlp_hidden=[8, 8])
     assert hetero.heteroscedastic is True
-    # Perturb the zero-initialised output layer so the modulation is not exactly 1x.
+    # Perturb the zero-initialized output layer so the modulation is not exactly 1x.
     with torch.no_grad():
         for param in hetero.noise_head[-1].parameters():
             param.add_(torch.randn_like(param) * 0.5)

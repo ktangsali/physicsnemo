@@ -72,7 +72,7 @@ epistemic/total variance split in a single forward pass.
 What a working recipe needs
 ---------------------------
 The head owns its objective, but that objective alone does not take a randomly
-initialised backbone to a useful field surrogate.  These are properties of the
+initialized backbone to a useful field surrogate.  These are properties of the
 recipe rather than of the architecture, which is why they live in the training
 script; a caller that skips them should expect a collapsed variance or a
 diverged noise scale rather than a bad-but-working model:
@@ -315,7 +315,7 @@ class FieldVariationalGPHead(nn.Module):
         Dimension of each per-point feature vector from the backbone.
     n_train : int
         Total number of *training points* (across all geometries) — used for
-        the ELBO normalisation constant so the data term and KL term are
+        the ELBO normalization constant so the data term and KL term are
         balanced when minibatching at the point level.  Count points, not
         geometries: 10 geometries of ``N`` points each is ``10 * N``, not 10.
         If a geometry is subsampled during training, count the points actually
@@ -362,9 +362,9 @@ class FieldVariationalGPHead(nn.Module):
         inserted before the GP kernel.  ``None`` feeds the features directly to
         the GP. Default is ``None``.
     feature_norm : {"none", "l2_radial"}, optional
-        Normalisation applied to the GP-input features.  ``"none"`` passes them
+        Normalization applied to the GP-input features.  ``"none"`` passes them
         through.  ``"l2_radial"`` splits each feature into its unit direction
-        plus its (batch-standardised) magnitude, appended as one extra ARD
+        plus its (batch-standardized) magnitude, appended as one extra ARD
         dimension — so ``gp_input_dim`` becomes ``mlp_hidden[-1] + 1``.  This
         pins the feature scale, preventing the DKL map from shrinking distances
         to circumvent the lengthscale constraint, while keeping the radial
@@ -476,11 +476,11 @@ class FieldVariationalGPHead(nn.Module):
             self.feature_extractor = None
             gp_input_dim = input_dim
 
-        # 'l2_radial' keeps the L2-normalised direction AND appends the pre-norm
+        # 'l2_radial' keeps the L2-normalized direction AND appends the pre-norm
         # feature magnitude as one extra ARD dimension.  Projecting onto the unit
         # sphere alone makes out-of-distribution geometries indistinguishable in
-        # norm, collapsing the OOD/in-distribution std ratio towards 1.0.  The
-        # magnitude is standardised by a (non-affine) BatchNorm tracking the
+        # norm, collapsing the OOD/in-distribution std ratio toward 1.0.  The
+        # magnitude is standardized by a (non-affine) BatchNorm tracking the
         # training distribution, so OOD magnitudes land in the tails -> larger
         # kernel distance -> higher posterior variance.
         if feature_norm == "l2_radial":
@@ -637,12 +637,12 @@ class FieldVariationalGPHead(nn.Module):
         by :math:`1/\sigma^2(x)`, so the noise head learns to down-weight
         genuinely noisy regions instead of forcing the mean to fit them.
 
-        Mirrors ``gpytorch.mlls.VariationalELBO``'s normalisation exactly — the
+        Mirrors ``gpytorch.mlls.VariationalELBO``'s normalization exactly — the
         expected log-likelihood is summed over points and tasks then divided by
         the number of points, and the KL is divided by ``num_data / beta`` — so
         the loss is on the same scale as the homoscedastic path and the existing
         learning rates and beta/NLL warmup schedules carry over unchanged.  That
-        normalisation is the stochastic variational bound of Hensman, Fusi &
+        normalization is the stochastic variational bound of Hensman, Fusi &
         Lawrence (*Gaussian Processes for Big Data*, UAI 2013); ``num_data`` is
         its :math:`N`.
 
@@ -686,18 +686,18 @@ class FieldVariationalGPHead(nn.Module):
     ) -> Float[torch.Tensor, "... gp_dim"]:
         """Run optional DKL extractor then the (scale-fixing) feature norm.
 
-        The normalisation pins the GP-input feature scale so the kernel
+        The normalization pins the GP-input feature scale so the kernel
         lengthscale must do the smoothing work; without it the DKL map can
         shrink feature distances to defeat a lengthscale constraint.
-        ``l2_radial`` keeps the L2-normalised direction but appends the
-        (standardised) pre-norm magnitude as an extra dimension, retaining the
+        ``l2_radial`` keeps the L2-normalized direction but appends the
+        (standardized) pre-norm magnitude as an extra dimension, retaining the
         radial out-of-distribution cue that a pure unit-sphere projection
         discards.
         """
         if self.feature_extractor is not None:
             features = self.feature_extractor(features)
         if self._feature_norm == "l2_radial":
-            # Split into direction (unit sphere) + standardised magnitude.
+            # Split into direction (unit sphere) + standardized magnitude.
             magnitude = features.norm(dim=-1, keepdim=True)
             direction = features / magnitude.clamp_min(1e-12)
             # BatchNorm1d expects (N, C); flatten all leading dims into N.
@@ -711,7 +711,7 @@ class FieldVariationalGPHead(nn.Module):
     ) -> Float[torch.Tensor, "... gp_dim"]:
         """Run feature transform (DKL + norm), then cast to GP precision.
 
-        The cast is what keeps the Cholesky factorisation of ``K_uu`` viable:
+        The cast is what keeps the Cholesky factorization of ``K_uu`` viable:
         with short lengthscales the inducing points are strongly correlated and
         the matrix is ill-conditioned, which in float32 shows up as a Cholesky
         failure or a negative predictive variance.  Only the GP internals run in
@@ -760,13 +760,13 @@ class FieldVariationalGPHead(nn.Module):
         Accepts ``(M, D)`` (shared across tasks) or ``(num_tasks, M, D)`` in
         the *raw feature* space (the DKL extractor, if any, is applied here).
         The variational mean is zeroed and the variational covariance reset to
-        a small identity so GP-side optimisation restarts cleanly.
+        a small identity so GP-side optimization restarts cleanly.
         """
         base = self.gp_layer.variational_strategy.base_variational_strategy
         device = base.inducing_points.device
 
         # Apply the same DKL + feature-norm transform used at inference so the
-        # inducing points live in the same (normalised) GP-input space.
+        # inducing points live in the same (normalized) GP-input space.
         if self.feature_extractor is not None:
             fe_device = next(self.feature_extractor.parameters()).device
             points = points.to(fe_device)

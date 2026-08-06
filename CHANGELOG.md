@@ -161,7 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epistemic-only variance — no ensembling or MC-Dropout. Backbone-agnostic (it
   consumes only a `(..., input_dim)` feature tensor), with an optional DKL MLP,
   a Matérn ARD kernel (5/2 by default), float64 GP internals, an `l2_radial` feature
-  normalisation that preserves the radial out-of-distribution cue, and an
+  normalization that preserves the radial out-of-distribution cue, and an
   optional heteroscedastic observation-noise MLP. Includes a surface field-GP
   training recipe for GeoTransolver
   (`examples/cfd/external_aerodynamics/transformer_models/src/train_field_gp.py`).

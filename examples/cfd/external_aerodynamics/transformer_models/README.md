@@ -349,8 +349,8 @@ The model was trained exclusively on **DrivAerStar Fastback** geometries (class 
 
 | Choice | Rationale |
 |--------|-----------|
-| **Float64 GP internals** | Short lengthscales on L2-normalised embeddings make K_uu ill-conditioned in float32.  Float64 eliminates Cholesky failures at the source. |
-| **L2-normalised embeddings** | Constrains pairwise distances to [0, 2], making GP lengthscale priors more interpretable and stable. |
+| **Float64 GP internals** | Short lengthscales on L2-normalized embeddings make K_uu ill-conditioned in float32.  Float64 eliminates Cholesky failures at the source. |
+| **L2-normalized embeddings** | Constrains pairwise distances to [0, 2], making GP lengthscale priors more interpretable and stable. |
 | **Spectral norm on embedding layers** | Preserves distances in the embedding space (SNGP-style), preventing the encoder from collapsing different inputs to the same point. |
 | **Matérn-5/2 ARD kernel** | Smooth, twice-differentiable, with per-dimension lengthscales that learn which embedding dimensions matter. |
 | **Gamma priors on lengthscale & outputscale** | Prevents the GP from collapsing to trivial solutions (infinite lengthscale → constant predictions, zero outputscale → zero variance). |
@@ -484,7 +484,7 @@ floor on `sigma` the noise collapsed mid-training.
 **Why a network rather than a second GP.** Cost at this scale.  The alternative —
 a second variational process on the log-noise, as in Liu et al. (2018b) — needs its
 own inducing set, Cholesky factor and KL term, roughly doubling the head's
-variational state and adding a second `O(M^3)` factorisation per step, where the
+variational state and adding a second `O(M^3)` factorization per step, where the
 noise MLP adds two `[64, 64]` layers.
 
 ### Training
@@ -524,7 +524,7 @@ the head, so they are configured here:
 | `beta_warmup_start` / `_end` | `0` / `30` | Epoch window over which the KL weight ramps 0 → 1, so the data-fit term shapes the posterior before the prior pulls on it. |
 | `gp_kl_weight` | `0.5` | Constant multiplier on the KL weight once the ramp completes.  Below `1.0` the posterior keeps more per-point structure. |
 | `head_grad_clip_norm` | `10.0` | Max global grad-norm over the head's parameters (`0` disables).  The `1/σ²(x)` weighting of the heteroscedastic ELBO produces occasional very large steps when one point's noise dips. |
-| `dist_penalty_weight` / `_pairs` / `_margin` | `0.5` / `4096` / `1.0` | One-sided hinge pushing point pairs with distant targets apart in kernel space, so the kernel can assign them different variance.  Both distances are normalised by their batch mean, so only relative geometry is shaped.  `0.0` disables. |
+| `dist_penalty_weight` / `_pairs` / `_margin` | `0.5` / `4096` / `1.0` | One-sided hinge pushing point pairs with distant targets apart in kernel space, so the kernel can assign them different variance.  Both distances are normalized by their batch mean, so only relative geometry is shaped.  `0.0` disables. |
 
 These are load-bearing rather than cosmetic.  Without the mean anchor and the
 ramps the ELBO can buy likelihood by inflating the variance before the mean field
@@ -546,7 +546,7 @@ load-bearing and worth understanding before changing them:
 
 - **`gp_head.feature_norm: l2_radial`** — fixes the GP-input feature scale so the
   kernel lengthscale (not the DKL map) does the smoothing, while appending the
-  standardised feature magnitude as an extra ARD dimension.  Normalising onto
+  standardized feature magnitude as an extra ARD dimension.  Normalizing onto
   the unit sphere *without* that magnitude erases the radial OOD cue and drives
   the OOD/in-distribution std ratio to ~1.0x.
 - **`gp_head.noise_mlp_hidden: [64, 64]`** — makes the observation noise
@@ -555,7 +555,7 @@ load-bearing and worth understanding before changing them:
   no benefit from the (dominant) noise share of the variance.
 - **`gp_head.noise_std_range: [0.01, 10.0]`** — the heteroscedastic ELBO weights
   each point by `1/σ²(x)`, and the `0.01` floor caps that weight at `1e4` on
-  unit-scale normalised fields, so no single point can dominate the gradient.  It
+  unit-scale normalized fields, so no single point can dominate the gradient.  It
   sits just below the σ band the trained noise head occupies, which bounds the
   weight without reshaping the noise field being learned.  The floor also applies
   at inference, since `predict()` evaluates `σ(x)` through the same clamp.
@@ -590,7 +590,7 @@ the same family as the likelihood noise, while `noise_head` produces the
 input-dependent modulation around it and is ordinary MLP weights.
 
 The 10x suits what those parameters are.  They are few, low-dimensional and
-parameterise a distribution directly, so they tolerate large steps — and they are
+parameterize a distribution directly, so they tolerate large steps — and they are
 chasing a moving target, since the features beneath them shift with every
 backbone step.  Inducing points are seeded from real backbone features once,
 before the first epoch, and the variational parameters are what keep the
@@ -653,7 +653,7 @@ from physicsnemo.experimental.uq import FieldVariationalGPHead
 head = FieldVariationalGPHead(
     input_dim=feat_dim,          # backbone feature width
     num_tasks=4,                 # output channels
-    n_train=n_points_per_epoch,  # ELBO normaliser
+    n_train=n_points_per_epoch,  # ELBO normalizer
     mlp_hidden=[128, 16],
     feature_norm="l2_radial",
 )
@@ -670,8 +670,8 @@ retuning:
 
 - **The noise floor scales with your targets.**  `noise_std_range[0]` works by
   sitting just below the σ band the noise head settles into, which depends
-  entirely on how the targets are normalised.  The `0.01` here suits
-  unit-variance standardised fields.  On a different target scale the same number
+  entirely on how the targets are normalized.  The `0.01` here suits
+  unit-variance standardized fields.  On a different target scale the same number
   either binds at every point or stops guarding the `1/σ²(x)` weighting
   altogether, so move it with the targets and check it against the σ range the
   run actually logs.
@@ -691,7 +691,7 @@ Three further practical notes:
   feature space the backbone has never visited start the GP badly conditioned.
 - **`n_train`** is the total number of training *points* per epoch (geometries x
   points per geometry), not the number of geometries.  It only sets the ELBO's
-  KL normalisation, but getting it wrong rescales the KL term.
+  KL normalization, but getting it wrong rescales the KL term.
 - **Prefer config over code** for anything structural.  Inside this example the
   head is never constructed with literals as shown above; it comes from the
   `gp_head` block via `hydra.utils.instantiate`, which is what keeps training and
@@ -704,7 +704,7 @@ Three further practical notes:
 *Sparse variational GP — the inducing points and the ELBO:*
 
 - **Variational Learning of Inducing Variables in Sparse Gaussian Processes:** [Titsias, AISTATS 2009](https://proceedings.mlr.press/v5/titsias09a.html) — the inducing-point variational bound
-- **Gaussian Processes for Big Data:** [Hensman, Fusi & Lawrence, UAI 2013](https://arxiv.org/abs/1309.6835) — the minibatch `(1/N) * sum E_q[log p] - KL` form. `_hetero_neg_elbo` mirrors this normalisation deliberately so it matches GPyTorch's `VariationalELBO`, and `n_train` is the `N` here
+- **Gaussian Processes for Big Data:** [Hensman, Fusi & Lawrence, UAI 2013](https://arxiv.org/abs/1309.6835) — the minibatch `(1/N) * sum E_q[log p] - KL` form. `_hetero_neg_elbo` mirrors this normalization deliberately so it matches GPyTorch's `VariationalELBO`, and `n_train` is the `N` here
 
 *GP on neural-network features:*
 

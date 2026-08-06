@@ -24,7 +24,7 @@ Trains both models jointly with three loss terms:
 
 The head and consistency losses activate after a configurable warmup period
 with a linear ramp (default: epochs 50–60).  For the GP head, inducing points
-are re-initialised at the warmup start from the now-meaningful embeddings.
+are re-initialized at the warmup start from the now-meaningful embeddings.
 
 The ``head_type`` config key selects the drag head:
   * ``gp``  — :class:`~physicsnemo.experimental.uq.VariationalGPHead`

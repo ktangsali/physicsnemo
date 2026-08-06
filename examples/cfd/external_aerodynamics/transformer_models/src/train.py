@@ -160,9 +160,9 @@ def seed_everything(seed: int, rank: int) -> None:
     """Seed the RNGs this recipe draws from, offsetting each rank.
 
     Two things depend on the torch global RNG and are therefore controlled here:
-    the model's weight initialisation, and the datapipe's point/geometry
+    the model's weight initialization, and the datapipe's point/geometry
     subsampling (``weighted_multinomial`` is called without an explicit
-    generator). Only rank 0's initialisation actually survives -- DDP broadcasts
+    generator). Only rank 0's initialization actually survives -- DDP broadcasts
     module state at construction -- so the *run's* weights are a function of
     ``seed`` alone, while the ``+ rank`` offset keeps each rank drawing a
     different point subset, as it does today with unseeded RNGs.
@@ -201,7 +201,7 @@ def get_autocast_context(precision: str) -> nullcontext:
 
 
 #: Precision settings the recipes understand.  Worth checking against, because
-#: ``cast_precisions`` treats anything it does not recognise as a no-op: a
+#: ``cast_precisions`` treats anything it does not recognize as a no-op: a
 #: mistyped precision would otherwise run silently in float32.
 PRECISIONS = ("float32", "float16", "bfloat16", "float8")
 Precision = Literal["float32", "float16", "bfloat16", "float8"]
@@ -697,8 +697,8 @@ def main(cfg: DictConfig):
     # Set up logging
     logger = RankZeroLoggingWrapper(PythonLogger(name="training"), dist_manager)
 
-    # Optional RNG seed (null = unseeded, the historical behaviour). Set before
-    # the model is built so the seed determines the initialisation. Deep-ensemble
+    # Optional RNG seed (null = unseeded, the historical behavior). Set before
+    # the model is built so the seed determines the initialization. Deep-ensemble
     # members differ only in this value.
     seed = getattr(cfg, "seed", None)
     if seed is not None:

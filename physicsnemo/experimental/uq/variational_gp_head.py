@@ -29,12 +29,12 @@ same variational-GP design but keeps the point dimension.
 
 Key design choices
 ------------------
-* **Float64 GP internals (default)** — Short lengthscales on L2-normalised
+* **Float64 GP internals (default)** — Short lengthscales on L2-normalized
   embeddings make the inducing-point covariance matrix K_uu ill-conditioned
   in float32.  By default, GP computations (kernel, variational strategy,
   likelihood) run in float64; inputs are upcast on entry and outputs are
   downcast on exit so gradients flow through the encoder seamlessly.
-  This behaviour is controlled by the *use_double* flag.
+  This behavior is controlled by the *use_double* flag.
 * **Optional DKL feature extractor** — A small MLP can be inserted between
   the encoder embedding and the GP kernel (Deep Kernel Learning).  The MLP
   runs in the caller's precision for speed.
@@ -186,7 +186,7 @@ class VariationalGPHead(nn.Module):
     input_dim : int, optional
         Dimension of the input embedding vector. Default is 32.
     n_train : int
-        Total number of training examples, the ELBO's normalisation constant.
+        Total number of training examples, the ELBO's normalization constant.
         Required, and keyword-only along with everything after it.
     n_inducing : int, optional
         Number of inducing points for the variational approximation.

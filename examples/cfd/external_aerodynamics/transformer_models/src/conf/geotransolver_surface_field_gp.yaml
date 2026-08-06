@@ -24,7 +24,7 @@ checkpoint_dir: null
 run_id: "geotransolver/surface/field_gp"
 
 # RNG seed. Everything stochastic in this recipe draws from torch's global RNG:
-# the backbone's initialisation, the datapipe's point sampling, the inducing-point
+# the backbone's initialization, the datapipe's point sampling, the inducing-point
 # draw, the per-step GP subsample and the distance penalty's point pairs. An
 # integer makes the run reproducible; null (the default, and what the results in
 # the README were produced with) leaves the generators entropy-seeded.
@@ -38,7 +38,7 @@ seed: null
 # what lets an eval run load a training checkpoint. The two arguments not listed
 # here are supplied at runtime: `input_dim` (the backbone feature width, probed
 # with one forward pass) and `n_train`, the number of training points the
-# evidence lower bound (ELBO) is normalised by.
+# evidence lower bound (ELBO) is normalized by.
 gp_head:
   _target_: physicsnemo.experimental.uq.FieldVariationalGPHead
 
@@ -68,12 +68,12 @@ gp_head:
   # Outputscale prior: [concentration, rate] for Gamma. null = no prior.
   outputscale_prior: [2.0, 0.5]
 
-  # Feature normalisation applied to the GP-input (DKL) features. Fixes the
+  # Feature normalization applied to the GP-input (DKL) features. Fixes the
   # feature scale so the lengthscale must do the smoothing, preventing the DKL
   # map from shrinking feature distances to defeat the lengthscale cap.
   # One of: none | l2_radial.
   #   l2_radial -> keep the direction of the feature vector (scaled to unit L2
-  #                norm) AND append its standardised pre-norm magnitude as one
+  #                norm) AND append its standardized pre-norm magnitude as one
   #                extra ARD dimension. The magnitude is what carries the radial
   #                out-of-distribution (OOD) cue: features for an unfamiliar
   #                geometry sit further from the origin, and projecting onto the
@@ -89,7 +89,7 @@ gp_head:
   noise_mlp_hidden: [64, 64]
   # Hard clamp [lo, hi] on the per-point noise std. The lower bound is load
   # bearing: the heteroscedastic ELBO weights each point by 1/sigma^2(x), and a
-  # 0.01 floor caps that weight at 1e4 on unit-scale normalised fields, so no
+  # 0.01 floor caps that weight at 1e4 on unit-scale normalized fields, so no
   # single point can dominate the gradient. It sits just below the sigma band the
   # trained noise head occupies, which bounds the weight without reshaping the
   # noise field being learned. The clamp also applies at inference, since
@@ -124,12 +124,12 @@ lambda_mean_mse: 1.0
 # variance where predictions differ. 0.0 disables.
 dist_penalty_weight: 0.5
 dist_penalty_pairs: 4096       # random point pairs sampled per geometry
-dist_penalty_margin: 1.0       # multiplier on the normalised target distance
+dist_penalty_margin: 1.0       # multiplier on the normalized target distance
 
 # Further point subsampling for the GP step (null = use all points the
 # dataloader provides at data.resolution). Bounds the O(points) GP solve.
 gp_points_per_step: 12288
-# Points per geometry used to size the ELBO num_data normaliser.
+# Points per geometry used to size the ELBO num_data normalizer.
 # Defaults to data.resolution when null.
 points_per_geometry: null
 
@@ -162,7 +162,7 @@ data:
   geometry_sampling: 200_000
   broadcast_global_features: false
   # DrivAerStar surface fields are stored in raw physical units (Pa), so they
-  # need their own normalisation stats. The stats in `src/` are nondimensional
+  # need their own normalization stats. The stats in `src/` are nondimensional
   # (pressure-coefficient form) and belong to the DrivAer AWS runs -- pointing
   # this at `src/` would silently mis-scale every field by ~700x.
   normalization_dir: "src/normalization/drivaerstar/"

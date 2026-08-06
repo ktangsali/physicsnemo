@@ -22,7 +22,7 @@ This module provides:
 * Drag-target extraction from dataloader batches.
 * An MLP drag-prediction head (``DragMLP``) used as a GP-free baseline.
 * Embedding-reduction factory (``create_embedding_reduction``).
-* GP warmup helpers, inducing-point re-initialisation, and gradient syncing.
+* GP warmup helpers, inducing-point re-initialization, and gradient syncing.
 * Spectral-norm utilities for SNGP-style distance preservation.
 * Checkpoint loading helpers.
 
@@ -123,7 +123,7 @@ def compute_drag_target_from_batch(
 ) -> torch.Tensor:
     """Extract a GP-scaled drag target from a dataloader batch.
 
-    Unnormalises predicted surface fields, integrates pressure and shear to
+    Unnormalizes predicted surface fields, integrates pressure and shear to
     obtain the drag coefficient Cd, then returns ``Cd / drag_scale`` as a
     ``(1,)`` tensor suitable for GP training.
     """
@@ -376,7 +376,7 @@ def reinitialize_inducing_points(
     seeds them from a forward pass over the current data so the GP
     posterior covers the current embedding distribution. The variational
     mean is zeroed and the variational covariance is reset to a small
-    identity, restarting GP-side optimisation cleanly while leaving the
+    identity, restarting GP-side optimization cleanly while leaving the
     encoder unchanged.
 
     Parameters
@@ -443,7 +443,7 @@ def reinitialize_inducing_points(
     vd.variational_mean.data.zero_()
     vd.chol_variational_covar.data.copy_(torch.eye(n_inducing, device=device) * 0.01)
     logger.info(
-        f"Re-initialised {n_inducing} inducing points from current embeddings "
+        f"Re-initialized {n_inducing} inducing points from current embeddings "
         f"(norm range [{init_embeddings_t.norm(dim=1).min():.4f}, "
         f"{init_embeddings_t.norm(dim=1).max():.4f}])"
     )

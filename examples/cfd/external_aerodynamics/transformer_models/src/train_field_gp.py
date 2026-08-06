@@ -27,7 +27,7 @@ The total loss is::
     w_nll * neg_elbo + lambda_mean_mse * mse + dist_penalty_weight * dist_pen
 
 where ``neg_elbo`` is the negative multitask variational ELBO on the
-(normalised) per-point fields with KL annealing (``beta``), ``mse`` is an
+(normalized) per-point fields with KL annealing (``beta``), ``mse`` is an
 auxiliary anchor on the GP mean that leads the early epochs, and ``dist_pen`` is
 the within-sample latent distance penalty (see :func:`_dist_penalty`).  ``beta``
 and ``w_nll`` are both ramped from 0 over their warmup windows.
@@ -234,7 +234,7 @@ def _dist_penalty(
 ) -> Float[torch.Tensor, ""]:
     """Within-sample latent distance penalty (bi-Lipschitz-style, target-aware).
 
-    For random point pairs inside each geometry, penalise pairs whose GP-input
+    For random point pairs inside each geometry, penalize pairs whose GP-input
     (kernel-space) distance is *smaller* than their target-space distance. This
     forces the encoder to keep points with different target fields far apart in
     the space the kernel measures, so the GP can assign larger variance where
@@ -256,8 +256,8 @@ def _dist_penalty(
         Random point pairs sampled per geometry.  Drawn from torch's global RNG,
         so a seeded run (``cfg.seed``) samples the same pairs.
     margin : float
-        Multiplier on the (normalised) target distance the latent distance must
-        meet or exceed before the hinge stops penalising.
+        Multiplier on the (normalized) target distance the latent distance must
+        meet or exceed before the hinge stops penalizing.
 
     Returns
     -------
@@ -345,10 +345,10 @@ def main(cfg: DictConfig):
     _require_knobs(cfg)
 
     # Optional RNG seed. Everything stochastic in this recipe -- the weight
-    # initialisation, the datapipe's point subsampling, the inducing-point draw,
+    # initialization, the datapipe's point subsampling, the inducing-point draw,
     # the per-step GP subsample and the distance penalty's pairs -- comes off
     # torch's global RNG, so this one value makes the run reproducible. Left
-    # unset (null) each run differs, which is the historical behaviour.
+    # unset (null) each run differs, which is the historical behavior.
     seed = cfg.get("seed", None)
     if seed is not None:
         seed = int(seed)
@@ -392,7 +392,7 @@ def main(cfg: DictConfig):
 
     # Optional further subsampling of points used by the GP each step
     gp_points_per_step = cfg.gp_points_per_step
-    # Points per geometry used to size the ELBO num_data normaliser
+    # Points per geometry used to size the ELBO num_data normalizer
     points_per_geometry = cfg.points_per_geometry or cfg.data.resolution
 
     accumulation_steps = cfg.training.gradient_accumulation_steps
@@ -492,7 +492,7 @@ def main(cfg: DictConfig):
 
     # ---- Field-GP head ----
     n_train = len(train_dl)
-    # ELBO normaliser: total number of training points seen across the dataset.
+    # ELBO normalizer: total number of training points seen across the dataset.
     n_train_points = max(n_train * points_per_geometry, 1)
     # Probe the backbone feature dimension with one forward pass. Set indices
     # first since the per-epoch sampler hasn't assigned them yet.
@@ -508,7 +508,7 @@ def main(cfg: DictConfig):
     )
     head.to(dist_manager.device)
     # The head is not DDP-wrapped, so nothing would otherwise give the ranks a
-    # common starting point: each builds its own randomly initialised DKL and
+    # common starting point: each builds its own randomly initialized DKL and
     # noise MLPs, and torch seeds itself per process. Averaging gradients later
     # shares the update but not the parameters, so those initial offsets would
     # survive the whole run and only rank 0's copy would be checkpointed. This
@@ -833,7 +833,7 @@ def _validate(
     std_sum = np.zeros(head.num_tasks, dtype=np.float64)
     n_seen = 0
 
-    # Calibration / likelihood accumulators (normalised target space), summed
+    # Calibration / likelihood accumulators (normalized target space), summed
     # over every point & channel, then all-reduced so every rank agrees on the
     # early-stopping decision (avoids a distributed deadlock on the stop break).
     device = dist_manager.device
@@ -872,7 +872,7 @@ def _validate(
             mean = pred.mean.to(targets.dtype)
             std = pred.variance.clamp_min(0).sqrt()
 
-            # Per-channel mean std (in normalised space).
+            # Per-channel mean std (in normalized space).
             std_sum += (
                 std.reshape(-1, head.num_tasks).mean(dim=0).double().cpu().numpy()
             )
@@ -901,7 +901,7 @@ def _validate(
 
             # NLPD / z-RMS / 95%-coverage on the TOTAL predictive variance
             # (epistemic + observation-noise floor) — the proper scoring rule we
-            # early-stop on. Computed in the same normalised space the GP trains
+            # early-stop on. Computed in the same normalized space the GP trains
             # in, summed over all points & channels.
             err64 = (mean - targets).double()
             std64 = std.double()
