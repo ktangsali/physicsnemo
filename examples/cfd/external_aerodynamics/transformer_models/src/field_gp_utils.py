@@ -164,7 +164,7 @@ def collect_inducing_features(
     precision: str,
     device: torch.device,
     logger: logging.Logger | None = None,
-) -> Float[torch.Tensor, "inducing dim"]:
+) -> Float[torch.Tensor, "n_inducing input_dim"]:
     """Collect ``n_inducing`` per-point backbone features to seed the GP.
 
     The head's default inducing points are random normal draws, which sit
@@ -195,7 +195,7 @@ def collect_inducing_features(
 
     Returns
     -------
-    Float[torch.Tensor, "inducing dim"]
+    Float[torch.Tensor, "n_inducing input_dim"]
         Features in the backbone's *raw* output space, not the kernel's:
         :meth:`~physicsnemo.experimental.uq.FieldVariationalGPHead.set_inducing_points`
         applies the DKL extractor and feature norm when it installs them.

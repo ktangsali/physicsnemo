@@ -179,7 +179,7 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
 
     Parameters
     ----------
-    inducing_points : Float[torch.Tensor, "tasks inducing gp_dim"]
+    inducing_points : Float[torch.Tensor, "tasks n_inducing gp_dim"]
         Initial inducing point locations.
     input_dim : int
         Dimensionality of each input (must match last dim of *inducing_points*).
@@ -197,7 +197,7 @@ class _MultitaskVariationalGPLayer(_ApproximateGP):
 
     def __init__(
         self,
-        inducing_points: Float[torch.Tensor, "tasks inducing gp_dim"],
+        inducing_points: Float[torch.Tensor, "tasks n_inducing gp_dim"],
         input_dim: int = 16,
         num_tasks: int = 4,
         lengthscale_range: tuple[float, float] = (0.01, 10.0),
@@ -326,7 +326,7 @@ class FieldVariationalGPHead(nn.Module):
         Number of output channels (independent GPs). Default is 4.
     n_inducing : int, optional
         Number of inducing points per task. Default is 256.
-    inducing_points : Float[torch.Tensor, "*tasks inducing gp_dim"] | None, optional
+    inducing_points : Float[torch.Tensor, "*tasks n_inducing gp_dim"] | None, optional
         Initial inducing locations, either ``(M, gp_dim)`` (shared init,
         broadcast across tasks) or ``(num_tasks, M, gp_dim)``.  If *None*,
         random normal points are used, which is rarely what you want for
@@ -434,7 +434,7 @@ class FieldVariationalGPHead(nn.Module):
         n_train: int,
         num_tasks: int = 4,
         n_inducing: int = 256,
-        inducing_points: Float[torch.Tensor, "*tasks inducing gp_dim"] | None = None,
+        inducing_points: Float[torch.Tensor, "*tasks n_inducing gp_dim"] | None = None,
         lengthscale_range: tuple[float, float] = (0.01, 10.0),
         lengthscale_prior: tuple[float, float] | None = None,
         outputscale_prior: tuple[float, float] | None = None,
@@ -559,11 +559,11 @@ class FieldVariationalGPHead(nn.Module):
 
     @staticmethod
     def _init_inducing(
-        inducing_points: Float[torch.Tensor, "*tasks inducing gp_dim"] | None,
+        inducing_points: Float[torch.Tensor, "*tasks n_inducing gp_dim"] | None,
         n_inducing: int,
         gp_input_dim: int,
         num_tasks: int,
-    ) -> Float[torch.Tensor, "tasks inducing gp_dim"]:
+    ) -> Float[torch.Tensor, "tasks n_inducing gp_dim"]:
         """Return inducing points of shape ``(num_tasks, M, gp_input_dim)``."""
         if inducing_points is None:
             return torch.randn(num_tasks, n_inducing, gp_input_dim)
@@ -753,7 +753,7 @@ class FieldVariationalGPHead(nn.Module):
 
     @torch.no_grad()
     def set_inducing_points(
-        self, points: Float[torch.Tensor, "*tasks inducing dim"]
+        self, points: Float[torch.Tensor, "*tasks n_inducing input_dim"]
     ) -> None:
         """Re-seed inducing locations from collected features.
 

@@ -26,8 +26,9 @@ run_id: "geotransolver/surface/field_gp"
 # RNG seed. Everything stochastic in this recipe draws from torch's global RNG:
 # the backbone's initialization, the datapipe's point sampling, the inducing-point
 # draw, the per-step GP subsample and the distance penalty's point pairs. An
-# integer makes the run reproducible; null (the default, and what the results in
-# the README were produced with) leaves the generators entropy-seeded.
+# integer makes the run repeatable; null (the default, and what produced the
+# README results) leaves the run unseeded, so torch keeps the nondeterministic
+# seed it picks at startup and every run draws differently.
 seed: null
 
 # --- Field Gaussian-process (GP) head ---
