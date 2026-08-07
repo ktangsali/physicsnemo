@@ -572,6 +572,7 @@ class GeoTransolver(Module):
         | None = None,
         geometry: Float[torch.Tensor, "batch tokens geometry_dim"] | None = None,
         time: torch.Tensor | None = None,
+        *,
         return_embedding_states: bool = False,
         return_point_features: bool = False,
     ) -> (
@@ -600,11 +601,11 @@ class GeoTransolver(Module):
             Geometry features of shape :math:`(B, N, C_{geo})`. Default is ``None``.
         time : torch.Tensor | None, optional
             Time embedding (not yet implemented). Default is ``None``.
-        return_embedding_states : bool, optional
+        return_embedding_states : bool, optional, keyword-only
             If ``True``, return ``(output, embedding_states)`` instead of just
             ``output``.  The ``embedding_states`` tensor contains geometry/global
             context of shape :math:`(B, H, S, D_c)`.  Default is ``False``.
-        return_point_features : bool, optional
+        return_point_features : bool, optional, keyword-only
             If ``True``, also return the per-point features computed just before
             the output projection (``ln_mlp_out``), of shape
             :math:`(B, N, D_{eff})` where
@@ -616,11 +617,16 @@ class GeoTransolver(Module):
         Returns
         -------
         Float[torch.Tensor, "batch tokens out_dim"] | tuple[Float[torch.Tensor, "batch tokens out_dim"], Float[torch.Tensor, "batch heads slices context_dim"]]
-            When ``return_embedding_states=False`` (default): output tensor of
-            shape :math:`(B, N, C_{out})`.
+            With neither flag set (default): output tensor of shape
+            :math:`(B, N, C_{out})`.
 
-            When ``return_embedding_states=True``: a 2-tuple
-            ``(output, embedding_states)``.
+            With one flag set: a 2-tuple, ``(output, embedding_states)`` or
+            ``(output, point_features)``.
+
+            With both set: the 3-tuple
+            ``(output, embedding_states, point_features)``.  The two flags are
+            keyword-only, since they share a return signature and reading a
+            bare ``True`` at the call site would not say which was meant.
 
         Raises
         ------
