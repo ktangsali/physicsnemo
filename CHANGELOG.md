@@ -60,6 +60,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adds differentiable mesh morphing: Torch-backed dense ``displace_points`` /
   ``Mesh.displace`` and Torch/NVIDIA Warp compact sparse-control
   ``morph_points`` / ``Mesh.morph`` / ``DomainMesh.morph``.
+- Adds differentiable Sobolev mesh deformation through
+  `sobolev_deform_points` and `Mesh.sobolev_deform`. A matrix-free,
+  uniform-mass P1 Helmholtz solve smooths dense per-vertex displacements and
+  their adjoints, with optional fixed-point constraints. Torch and CUDA Warp
+  backends provide explicit implicit-adjoint differentiation.
 - Adds thin-plate-spline radial-basis deformation through
   `radial_basis_function_deform_points`,
   `Mesh.radial_basis_function_deform`, and
@@ -499,6 +504,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependencies
 
+- Pins TensorDict to `tensordict-nightly[zarr]` to consume the latest
+  nightly TensorDict APIs with Zarr support and several other bugfixes.
 - Removes `pyacvd` from the `mesh-extras` optional dependencies. Remeshing now
   uses NVIDIA Warp.
 - Updates the minimum supported `warp-lang` version to 1.14.0.
