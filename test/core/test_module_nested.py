@@ -111,6 +111,9 @@ class TorchModel(torch.nn.Module):
 
 
 def make_model():
+    for model_class in (M, M1):
+        if model_class.__name__ not in registry.list_models():
+            registry.register(model_class)
     Mt = physicsnemo.core.Module.from_torch(
         TorchModel, meta=TorchModelMetaData(), register=True
     )

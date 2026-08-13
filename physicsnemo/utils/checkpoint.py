@@ -544,7 +544,9 @@ def _is_mdlus_archive(path: str) -> bool:
 
 
 def _extract_mdlus_state_dict(
-    file_name: str, device: str | torch.device = "cpu"
+    file_name: str,
+    device: str | torch.device = "cpu",
+    allow_unsafe_pickle: bool = False,
 ) -> dict[str, Any]:
     """
     Reads only the state_dict from a .mdlus file without instantiating the full model.
@@ -557,13 +559,17 @@ def _extract_mdlus_state_dict(
         with tarfile.open(cached, "r") as tar:
             f = tar.extractfile("model.pt")
             return torch.load(
-                io.BytesIO(f.read()), map_location=device, weights_only=False
+                io.BytesIO(f.read()),
+                map_location=device,
+                weights_only=not allow_unsafe_pickle,
             )
     else:
         with zipfile.ZipFile(cached, "r") as archive:
             model_bytes = archive.read("model.pt")
         return torch.load(
-            io.BytesIO(model_bytes), map_location=device, weights_only=False
+            io.BytesIO(model_bytes),
+            map_location=device,
+            weights_only=not allow_unsafe_pickle,
         )
 
 
@@ -647,10 +653,7 @@ def _get_checkpoint_filename(
         ]
 
         if len(file_names) > 0:
-            # If checkpoint from a null index save exists load that
-            # This is the most likely line to error since it will fail with
-            # invalid checkpoint names
-
+            # Ignore glob matches that do not follow the indexed naming scheme.
             file_idx = []
 
             for fname in file_names:
@@ -661,12 +664,15 @@ def _get_checkpoint_filename(
                 match = re.match(pattern, file_stem)
                 if match:
                     file_idx.append(int(match.group(1)))
-            file_idx.sort()
-            # If we are saving index by 1 to get the next free file name
-            if saving:
-                checkpoint_filename = checkpoint_filename + f".{file_idx[-1] + 1}"
+            if file_idx:
+                file_idx.sort()
+                # If we are saving index by 1 to get the next free file name
+                if saving:
+                    checkpoint_filename = checkpoint_filename + f".{file_idx[-1] + 1}"
+                else:
+                    checkpoint_filename = checkpoint_filename + f".{file_idx[-1]}"
             else:
-                checkpoint_filename = checkpoint_filename + f".{file_idx[-1]}"
+                checkpoint_filename += ".0"
             checkpoint_filename += file_extension
         else:
             checkpoint_filename += ".0" + file_extension
@@ -957,6 +963,7 @@ def load_checkpoint(
     metadata_dict: dict[str, Any] | None = None,
     device: str | torch.device = "cpu",
     optimizer_model: torch.nn.Module | None = None,
+    allow_unsafe_pickle: bool = False,
 ) -> int:
     r"""Load a training checkpoint saved by :func:`save_checkpoint`.
 
@@ -998,6 +1005,10 @@ def load_checkpoint(
         Required by the DCP ``set_optimizer_state_dict`` helper when
         distributed mode is active.  When ``None``, the first model in
         ``models`` is used.  Ignored when *not* in distributed mode.
+    allow_unsafe_pickle : bool, optional
+        Disable PyTorch's restricted weights-only unpickler. This may execute
+        arbitrary code and must only be used for trusted legacy checkpoints,
+        by default ``False``.
 
     Returns
     -------
@@ -1078,6 +1089,7 @@ def load_checkpoint(
             device=device,
             optimizer_model=optimizer_model,
             is_rank0=is_rank0,
+            allow_unsafe_pickle=allow_unsafe_pickle,
         )
 
     # ------------------------------------------------------------------
@@ -1108,11 +1120,15 @@ def load_checkpoint(
             continue
 
         if isinstance(inner, physicsnemo.core.Module):
-            inner.load(file_name)
+            inner.load(file_name, allow_unsafe_pickle=allow_unsafe_pickle)
         else:
             file_to_load = _cache_if_needed(file_name)
             missing_keys, unexpected_keys = model.load_state_dict(
-                torch.load(file_to_load, map_location=device, weights_only=False)
+                torch.load(
+                    file_to_load,
+                    map_location=device,
+                    weights_only=not allow_unsafe_pickle,
+                )
             )
             if missing_keys:
                 checkpoint_logging.warning(
@@ -1136,7 +1152,11 @@ def load_checkpoint(
         return 0
 
     file_to_load = _cache_if_needed(checkpoint_filename)
-    checkpoint_dict = torch.load(file_to_load, map_location=device, weights_only=False)
+    checkpoint_dict = torch.load(
+        file_to_load,
+        map_location=device,
+        weights_only=not allow_unsafe_pickle,
+    )
     checkpoint_logging.success(
         f"Loaded checkpoint file {checkpoint_filename} to device {device}"
     )
@@ -1171,6 +1191,7 @@ def load_model_weights(
     model: torch.nn.Module,
     weights_path: str,
     device: str | torch.device = "cpu",
+    allow_unsafe_pickle: bool = False,
 ) -> None:
     r"""Load model weights from a single checkpoint file.
 
@@ -1194,6 +1215,10 @@ def load_model_weights(
     device : str | torch.device, optional
         Device for :func:`torch.load` ``map_location``.  By default
         ``"cpu"``.
+    allow_unsafe_pickle : bool, optional
+        Disable PyTorch's restricted weights-only unpickler. This may execute
+        arbitrary code and must only be used for trusted legacy checkpoints,
+        by default ``False``.
     """
     model = _unwrap_ddp_compile(model, loading=True)
     is_mdlus = _is_mdlus_archive(weights_path)
@@ -1201,13 +1226,19 @@ def load_model_weights(
     if not _is_distributed_model(model):
         inner = _unwrap_fsdp(model)
         if is_mdlus and isinstance(inner, physicsnemo.core.Module):
-            inner.load(weights_path)
+            inner.load(weights_path, allow_unsafe_pickle=allow_unsafe_pickle)
         else:
             cached = _cache_if_needed(weights_path)
             if is_mdlus:
-                sd = _extract_mdlus_state_dict(weights_path, device)
+                sd = _extract_mdlus_state_dict(
+                    weights_path, device, allow_unsafe_pickle=allow_unsafe_pickle
+                )
             else:
-                sd = torch.load(cached, map_location=device, weights_only=False)
+                sd = torch.load(
+                    cached,
+                    map_location=device,
+                    weights_only=not allow_unsafe_pickle,
+                )
             inner.load_state_dict(sd)
         checkpoint_logging.success(f"Loaded model weights from {weights_path}")
         return
@@ -1219,10 +1250,16 @@ def load_model_weights(
     state_dict: dict[str, Any] = {}
     if is_rank0:
         if is_mdlus:
-            state_dict = _extract_mdlus_state_dict(weights_path, device)
+            state_dict = _extract_mdlus_state_dict(
+                weights_path, device, allow_unsafe_pickle=allow_unsafe_pickle
+            )
         else:
             cached = _cache_if_needed(weights_path)
-            state_dict = torch.load(cached, map_location=device, weights_only=False)
+            state_dict = torch.load(
+                cached,
+                map_location=device,
+                weights_only=not allow_unsafe_pickle,
+            )
 
     dtensor_plc = _get_dtensor_param_placements(model)
     if _needs_dcp_broadcast_bypass(model, dtensor_plc):
@@ -1255,6 +1292,7 @@ def _load_checkpoint_distributed(
     device: str | torch.device,
     optimizer_model: torch.nn.Module | None,
     is_rank0: bool,
+    allow_unsafe_pickle: bool,
 ) -> int:
     """
     Distributed load: rank 0 reads files, DCP broadcasts to all ranks.
@@ -1295,14 +1333,16 @@ def _load_checkpoint_distributed(
                 model_file_info[name] = file_name
                 if isinstance(inner, physicsnemo.core.Module):
                     model_state_dicts[name] = _extract_mdlus_state_dict(
-                        file_name, device
+                        file_name,
+                        device,
+                        allow_unsafe_pickle=allow_unsafe_pickle,
                     )
                 else:
                     file_to_load = _cache_if_needed(file_name)
                     model_state_dicts[name] = torch.load(
                         file_to_load,
                         map_location=device,
-                        weights_only=False,
+                        weights_only=not allow_unsafe_pickle,
                     )
             else:
                 model_file_info[name] = None
@@ -1394,7 +1434,9 @@ def _load_checkpoint_distributed(
     if is_rank0:
         file_to_load = _cache_if_needed(checkpoint_filename)
         checkpoint_dict = torch.load(
-            file_to_load, map_location=device, weights_only=False
+            file_to_load,
+            map_location=device,
+            weights_only=not allow_unsafe_pickle,
         )
         checkpoint_logging.success(
             f"Loaded checkpoint file {checkpoint_filename} to device {device}"

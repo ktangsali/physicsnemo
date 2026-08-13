@@ -41,6 +41,7 @@ from physicsnemo.core.version_check import get_physicsnemo_pkg_info
 
 # Used for saving checkpoints of nested modules
 _BASE_CKPT_PREFIX = "__physicsnemo.Module__"
+_MAX_CHECKPOINT_NESTING_DEPTH = 64
 
 
 def _load_state_dict_with_logging(
@@ -328,13 +329,21 @@ class Module(torch.nn.Module):
             args[key] = value
 
     @classmethod
-    def _get_class_from_args(cls, arg_dict: Dict[str, Any]) -> type:
+    def _get_class_from_args(
+        cls,
+        arg_dict: Dict[str, Any],
+        allow_unsafe_imports: bool = False,
+    ) -> type["Module"]:
         """Get the class from a dictionary of arguments.
 
         Parameters
         ----------
         arg_dict : Dict[str, Any]
             Dictionary of arguments containing '__name__' and '__module__' keys.
+        allow_unsafe_imports : bool, optional
+            Allow importing an unregistered class outside the ``physicsnemo``
+            package named by ``arg_dict``. This should only be enabled for
+            trusted input, by default ``False``.
 
         Returns
         -------
@@ -343,9 +352,24 @@ class Module(torch.nn.Module):
 
         Raises
         ------
-        AttributeError
-            If the class cannot be found.
+        ValueError
+            If the requested class is not registered and unsafe imports are
+            disabled.
+        TypeError
+            If the resolved object is not a ``physicsnemo.Module`` subclass.
         """
+
+        if not isinstance(arg_dict, dict):
+            raise ValueError("Model arguments must be a dictionary")
+        if not isinstance(arg_dict.get("__name__"), str) or not arg_dict["__name__"]:
+            raise ValueError("Model argument '__name__' must be a non-empty string")
+        if (
+            not isinstance(arg_dict.get("__module__"), str)
+            or not arg_dict["__module__"]
+        ):
+            raise ValueError("Model argument '__module__' must be a non-empty string")
+        if not isinstance(arg_dict.get("__args__"), dict):
+            raise ValueError("Model argument '__args__' must be a dictionary")
 
         _cls_name = arg_dict["__name__"]
         registry = ModelRegistry()
@@ -355,33 +379,56 @@ class Module(torch.nn.Module):
         elif _cls_name in registry.list_models():  # Built in registry
             _cls = registry.factory(_cls_name)
         else:
-            try:
-                # Check if module is using modulus import and change it to physicsnemo instead
-                if arg_dict["__module__"].split(".")[0] == "modulus":
-                    warnings.warn(
-                        "Using modulus import in model checkpoint. This is deprecated and will be removed in future versions. Please use physicsnemo instead."
-                    )
-                    arg_module = (
-                        "physicsnemo" + arg_dict["__module__"][len("modulus") :]
-                    )
-                else:
-                    arg_module = arg_dict["__module__"]
+            # Check if module is using modulus import and change it to physicsnemo instead
+            if arg_dict["__module__"].split(".")[0] == "modulus":
+                warnings.warn(
+                    "Using modulus import in model checkpoint. This is deprecated and will be removed in future versions. Please use physicsnemo instead."
+                )
+                arg_module = "physicsnemo" + arg_dict["__module__"][len("modulus") :]
+            else:
+                arg_module = arg_dict["__module__"]
 
-                # Otherwise, try to import the class
-                _mod = importlib.import_module(arg_module)
-                _cls = getattr(_mod, arg_dict["__name__"])
-            except (AttributeError, ModuleNotFoundError):
-                # Cross fingers and hope for the best (maybe the class name changed)
-                _cls = cls
+            # PhysicsNeMo's own modules are a trusted allowlist. Imports outside
+            # this namespace require an explicit opt-in because importing and
+            # constructing attacker-selected classes can execute code.
+            is_physicsnemo_module = (
+                arg_module == "physicsnemo" or arg_module.startswith("physicsnemo.")
+            )
+            if is_physicsnemo_module or allow_unsafe_imports:
+                try:
+                    _mod = importlib.import_module(arg_module)
+                    _cls = getattr(_mod, _cls_name)
+                except (AttributeError, ModuleNotFoundError) as exc:
+                    raise ValueError(
+                        f"Could not resolve checkpoint model class '{_cls_name}' "
+                        f"from module '{arg_module}'"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"Checkpoint model class '{_cls_name}' is neither registered "
+                    "nor part of the physicsnemo package. Register the class with "
+                    "ModelRegistry or, for trusted checkpoints only, pass "
+                    "allow_unsafe_imports=True."
+                )
 
         # This works with both importlib.metadata.EntryPoint and importlib_metadata.EntryPoint
         if isinstance(_cls, _ENTRYPOINT_TYPES):
             _cls = _cls.load()
 
+        if not inspect.isclass(_cls) or not issubclass(_cls, Module):
+            raise TypeError(
+                f"Checkpoint model '{_cls_name}' must resolve to a "
+                "physicsnemo.Module subclass"
+            )
+
         return _cls
 
     @classmethod
-    def instantiate(cls, arg_dict: Dict[str, Any]) -> "Module":
+    def instantiate(
+        cls,
+        arg_dict: Dict[str, Any],
+        allow_unsafe_imports: bool = False,
+    ) -> "Module":
         """
         Instantiate a model from a dictionary of arguments. This method is
         reserved for advanced and internal use cases. For most use cases, it
@@ -396,6 +443,10 @@ class Module(torch.nn.Module):
             are used to import the class and the last is used to instantiate
             the class. The '__args__' key should be a dictionary of arguments
             to pass to the class's __init__ function.
+        allow_unsafe_imports : bool, optional
+            Allow importing an unregistered ``Module`` subclass outside the
+            ``physicsnemo`` package named in ``arg_dict``. Only use with trusted
+            input, by default ``False``.
 
         Returns
         -------
@@ -420,7 +471,9 @@ class Module(torch.nn.Module):
         >>> output.shape
         torch.Size([100, 5])
         """
-        _cls = cls._get_class_from_args(arg_dict)
+        _cls = cls._get_class_from_args(
+            arg_dict, allow_unsafe_imports=allow_unsafe_imports
+        )
         return _cls(**arg_dict["__args__"])
 
     def debug(self):
@@ -684,6 +737,7 @@ class Module(torch.nn.Module):
         file_name: Path | str,
         map_location: Union[None, str, torch.device] = None,
         strict: bool = True,
+        allow_unsafe_pickle: bool = False,
     ) -> None:
         """
         Utility method for loading the model weights from a '.mdlus'
@@ -700,6 +754,9 @@ class Module(torch.nn.Module):
             Map location for loading the model weights, ``None`` will use the model's device.
         strict: bool, optional, default=True
             Whether to strictly enforce that the keys in ``state_dict`` match.
+        allow_unsafe_pickle : bool, optional, default=False
+            Disable PyTorch's restricted weights-only unpickler. This may execute
+            arbitrary code and must only be used for trusted legacy checkpoints.
 
         Raises
         ------
@@ -759,7 +816,11 @@ class Module(torch.nn.Module):
                 model_bytes = archive.read("model.pt")
 
             # Load state dict after closing archive
-            model_dict = torch.load(io.BytesIO(model_bytes), map_location=device)
+            model_dict = torch.load(
+                io.BytesIO(model_bytes),
+                map_location=device,
+                weights_only=not allow_unsafe_pickle,
+            )
 
             # Load state_dict into the model
             _load_state_dict_with_logging(self, model_dict, strict=strict)
@@ -785,7 +846,9 @@ class Module(torch.nn.Module):
 
                 # Load the model weights
                 model_dict = torch.load(
-                    local_path.joinpath("model.pt"), map_location=device
+                    local_path.joinpath("model.pt"),
+                    map_location=device,
+                    weights_only=not allow_unsafe_pickle,
                 )
 
             # Load state dict into the model
@@ -797,6 +860,8 @@ class Module(torch.nn.Module):
         file_name: Path | str,
         override_args: Optional[Dict[str, Any]] = None,
         strict: bool = True,
+        allow_unsafe_imports: bool = False,
+        allow_unsafe_pickle: bool = False,
     ) -> "Module":
         """
         Utility class method for instantiating and loading a ``Module``
@@ -826,6 +891,15 @@ class Module(torch.nn.Module):
             you fully understand the implications of the override.
         strict : bool, optional
             Whether to strictly enforce that the keys in state_dict match, by default True
+        allow_unsafe_imports : bool, optional
+            Allow importing unregistered ``Module`` subclasses outside the
+            ``physicsnemo`` package named by the checkpoint. This may execute
+            arbitrary code and must only be used with trusted checkpoints, by
+            default ``False``.
+        allow_unsafe_pickle : bool, optional
+            Disable PyTorch's restricted weights-only unpickler. This may execute
+            arbitrary code and must only be used for trusted legacy checkpoints,
+            by default ``False``.
 
         Returns
         -------
@@ -895,6 +969,8 @@ class Module(torch.nn.Module):
             override_args: Dict[str, Any],
             strict: bool,
             mod_prefix: str = "",
+            active_mod_prefixes: set[str] | None = None,
+            depth: int = 0,
         ):
             """Recursively deserialize and instantiate nested physicsnemo.Module instances.
 
@@ -923,6 +999,10 @@ class Module(torch.nn.Module):
             mod_prefix : str, optional
                 Current module's prefix in the nested hierarchy, by default "". Root module
                 uses empty string; nested modules use format ``_BASE_CKPT_PREFIX.arg_name``.
+            active_mod_prefixes : set[str] | None, optional
+                Prefixes in the active recursion path, used to reject cycles.
+            depth : int, optional
+                Current nesting depth, used to bound recursive reconstruction.
 
             Returns
             -------
@@ -936,6 +1016,19 @@ class Module(torch.nn.Module):
             ValueError
                 If argument names or prefixes don't match the expected format
             """
+
+            if depth > _MAX_CHECKPOINT_NESTING_DEPTH:
+                raise IOError(
+                    "Checkpoint module nesting exceeds the supported maximum "
+                    f"depth of {_MAX_CHECKPOINT_NESTING_DEPTH}"
+                )
+
+            active_mod_prefixes = active_mod_prefixes or set()
+            if mod_prefix and mod_prefix in active_mod_prefixes:
+                raise IOError(
+                    f"Checkpoint contains a cyclic module reference at '{mod_prefix}'"
+                )
+            active_mod_prefixes = active_mod_prefixes | {mod_prefix}
 
             # Pointer to args (for submodules)
             if mod_prefix == "":
@@ -962,9 +1055,16 @@ class Module(torch.nn.Module):
                 f"{mod_prefix}{'.' if mod_prefix else ''}mdlus_file_version",
                 cls_in.__model_checkpoint_version__,
             )
+            if not isinstance(version, str):
+                raise IOError(
+                    "Invalid checkpoint version type: expected a string, got "
+                    f"{type(version).__name__}"
+                )
 
             # Get the class from args
-            _cls = cls_in._get_class_from_args(args_ptr)
+            _cls = cls_in._get_class_from_args(
+                args_ptr, allow_unsafe_imports=allow_unsafe_imports
+            )
 
             # Check if the checkpoint version is compatible with the current version
             # If not, apply backward compatibility mapping if method exists
@@ -1000,13 +1100,23 @@ class Module(torch.nn.Module):
                             )
                         # Instantiate the submodule
                         next_mod_prefix = arg_value
+                        if next_mod_prefix not in args:
+                            raise IOError(
+                                "Checkpoint references missing nested module "
+                                f"'{next_mod_prefix}'"
+                            )
                         args_ptr["__args__"][arg_name] = _from_checkpoint_process(
-                            Module._get_class_from_args(args[next_mod_prefix]),
+                            Module._get_class_from_args(
+                                args[next_mod_prefix],
+                                allow_unsafe_imports=allow_unsafe_imports,
+                            ),
                             args,
                             metadata,
                             override_args,
                             strict,
                             mod_prefix=next_mod_prefix,
+                            active_mod_prefixes=active_mod_prefixes,
+                            depth=depth + 1,
                         )
                         # Cleanup args and metadata by removing the items
                         # related to the submodule
@@ -1025,7 +1135,9 @@ class Module(torch.nn.Module):
                 _cls._override_args(args_ptr["__args__"], override_args_ptr)
 
             # Instantiate the module
-            model = cls_in.instantiate(args_ptr)
+            model = _cls.instantiate(
+                args_ptr, allow_unsafe_imports=allow_unsafe_imports
+            )
             return model
 
         file_name = str(file_name)
@@ -1054,6 +1166,11 @@ class Module(torch.nn.Module):
                 with archive.open("metadata.json") as f:
                     metadata = json.loads(f.read().decode("utf-8"))
 
+                if not isinstance(args, dict) or not isinstance(metadata, dict):
+                    raise IOError(
+                        "Checkpoint args.json and metadata.json must contain JSON objects"
+                    )
+
                 model = _from_checkpoint_process(
                     cls,
                     args,
@@ -1066,7 +1183,11 @@ class Module(torch.nn.Module):
                 model_bytes = archive.read("model.pt")
 
             # Load state dict after closing archive
-            model_dict = torch.load(io.BytesIO(model_bytes), map_location=model.device)
+            model_dict = torch.load(
+                io.BytesIO(model_bytes),
+                map_location=model.device,
+                weights_only=not allow_unsafe_pickle,
+            )
 
             # Load state_dict into the model
             _load_state_dict_with_logging(model, model_dict, strict=strict)
@@ -1098,6 +1219,11 @@ class Module(torch.nn.Module):
                 with open(local_path.joinpath("metadata.json"), "r") as f:
                     metadata = json.load(f)
 
+                if not isinstance(args, dict) or not isinstance(metadata, dict):
+                    raise IOError(
+                        "Checkpoint args.json and metadata.json must contain JSON objects"
+                    )
+
                 model = _from_checkpoint_process(
                     cls,
                     args,
@@ -1108,7 +1234,9 @@ class Module(torch.nn.Module):
 
                 # Load the model weights
                 model_dict = torch.load(
-                    local_path.joinpath("model.pt"), map_location=model.device
+                    local_path.joinpath("model.pt"),
+                    map_location=model.device,
+                    weights_only=not allow_unsafe_pickle,
                 )
 
             # Load state_dict into the model
@@ -1279,6 +1407,8 @@ class Module(torch.nn.Module):
 
         # Define an internal class as before
         class PhysicsNeMoModel(Module):
+            """Adapt a PyTorch module class to the PhysicsNeMo ``Module`` API."""
+
             def __init__(self, *args, **kwargs):
                 super().__init__(meta=meta)
                 self.inner_model = torch_model_class(*args, **kwargs)

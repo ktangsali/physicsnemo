@@ -16,6 +16,7 @@
 # ruff: noqa: F401
 
 import os
+import pickle
 import shutil
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,19 @@ import torch.nn as nn
 from physicsnemo.distributed import DistributedManager
 from physicsnemo.models.mlp import FullyConnected
 from test.conftest import requires_module
+
+_unsafe_pickle_loaded = False
+
+
+def _unsafe_pickle_marker():
+    global _unsafe_pickle_loaded
+    _unsafe_pickle_loaded = True
+    return {}
+
+
+class _UnsafePicklePayload:
+    def __reduce__(self):
+        return (_unsafe_pickle_marker, ())
 
 
 @pytest.fixture(params=["./checkpoints", "msc://checkpoint-test/checkpoints"])
@@ -179,6 +193,19 @@ def test_get_checkpoint_dir():
     )
 
 
+@pytest.mark.parametrize("saving", [False, True])
+def test_get_checkpoint_filename_ignores_malformed_matches(tmp_path, saving):
+    from physicsnemo.utils.checkpoint import _get_checkpoint_filename
+
+    if not DistributedManager.is_initialized():
+        DistributedManager.initialize()
+
+    (tmp_path / "checkpoint.0.abc.mdlus").touch()
+    checkpoint = _get_checkpoint_filename(str(tmp_path), saving=saving)
+
+    assert Path(checkpoint).name == "checkpoint.0.0.mdlus"
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
 @pytest.mark.parametrize("model_type", ["physicsnemo", "pytorch"])
 def test_load_model_weights(
@@ -231,6 +258,43 @@ def test_load_model_weights(
     with torch.no_grad():
         loaded_output = model2(x)
     assert torch.allclose(ref_output, loaded_output, rtol=rtol, atol=atol)
+
+
+def test_load_model_weights_uses_restricted_unpickler_by_default(tmp_path):
+    from physicsnemo.utils import load_model_weights
+
+    global _unsafe_pickle_loaded
+    _unsafe_pickle_loaded = False
+    weights_file = tmp_path / "unsafe.pt"
+    torch.save(_UnsafePicklePayload(), weights_file)
+    model = nn.Linear(2, 2)
+
+    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
+        load_model_weights(model, str(weights_file))
+    assert not _unsafe_pickle_loaded
+
+    with pytest.raises(RuntimeError, match="Missing key"):
+        load_model_weights(
+            model,
+            str(weights_file),
+            allow_unsafe_pickle=True,
+        )
+    assert _unsafe_pickle_loaded
+
+
+def test_load_checkpoint_uses_restricted_unpickler_by_default(tmp_path):
+    from physicsnemo.utils import load_checkpoint
+
+    global _unsafe_pickle_loaded
+    _unsafe_pickle_loaded = False
+    torch.save(_UnsafePicklePayload(), tmp_path / "checkpoint.0.0.pt")
+
+    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
+        load_checkpoint(tmp_path)
+    assert not _unsafe_pickle_loaded
+
+    assert load_checkpoint(tmp_path, allow_unsafe_pickle=True) == 0
+    assert _unsafe_pickle_loaded
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])

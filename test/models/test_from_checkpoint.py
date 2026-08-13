@@ -15,7 +15,10 @@
 # limitations under the License.
 
 import io
+import json
+import pickle
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -75,6 +78,37 @@ class MockModelWithOverride(physicsnemo.core.Module):
         self.x = x
 
 
+class NestedMockModel(physicsnemo.core.Module):
+    """Model used to exercise malformed nested checkpoint metadata."""
+
+    def __init__(self, child):
+        super().__init__()
+        self.child = child
+
+
+_unsafe_pickle_loaded = False
+
+
+def _unsafe_pickle_marker():
+    global _unsafe_pickle_loaded
+    _unsafe_pickle_loaded = True
+    return {}
+
+
+class _UnsafePicklePayload:
+    def __reduce__(self):
+        return (_unsafe_pickle_marker, ())
+
+
+def _write_checkpoint(path, args, metadata, model_payload=None):
+    model_buffer = io.BytesIO()
+    torch.save({} if model_payload is None else model_payload, model_buffer)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("args.json", json.dumps(args))
+        archive.writestr("metadata.json", json.dumps(metadata))
+        archive.writestr("model.pt", model_buffer.getvalue())
+
+
 @pytest.mark.parametrize("LoadModel", [MockModel, NewMockModel])
 def test_from_checkpoint_custom(device, LoadModel):
     """Test checkpointing custom physicsnemo module"""
@@ -85,7 +119,10 @@ def test_from_checkpoint_custom(device, LoadModel):
     mock_model.save("checkpoint.mdlus")
 
     # Load from checkpoint using class
-    LoadModel.from_checkpoint("checkpoint.mdlus")
+    LoadModel.from_checkpoint(
+        "checkpoint.mdlus",
+        allow_unsafe_imports=LoadModel is not MockModel,
+    )
     # Delete checkpoint file (it should exist!)
     Path("checkpoint.mdlus").unlink(missing_ok=False)
 
@@ -97,12 +134,16 @@ def test_from_checkpoint_override(device):
     # Model with no overrides, loading without overrides
     mock_model = MockModelNoOverride(1, 2, 3).to(device)
     mock_model.save("checkpoint.mdlus")
-    mock_model = MockModelWithOverride.from_checkpoint("checkpoint.mdlus")
+    mock_model = MockModelWithOverride.from_checkpoint(
+        "checkpoint.mdlus", allow_unsafe_imports=True
+    )
 
     # Model with no overrides, loading with overrides (should fail)
     with pytest.raises(ValueError):
         mock_model = MockModelWithOverride.from_checkpoint(
-            "checkpoint.mdlus", override_args={"value2": 20}
+            "checkpoint.mdlus",
+            override_args={"value2": 20},
+            allow_unsafe_imports=True,
         )
 
     Path("checkpoint.mdlus").unlink(missing_ok=False)
@@ -133,6 +174,99 @@ def test_from_checkpoint_override(device):
         )
 
     Path("checkpoint.mdlus").unlink(missing_ok=False)
+
+
+@pytest.mark.parametrize("invalid_version", [[1, 2, 3], {"major": 1}])
+def test_from_checkpoint_rejects_non_string_version(tmp_path, invalid_version):
+    checkpoint = tmp_path / "invalid-version.mdlus"
+    args = {
+        "__name__": "MockModel",
+        "__module__": __name__,
+        "__args__": {"layer_size": 16},
+    }
+    _write_checkpoint(
+        checkpoint,
+        args,
+        {"mdlus_file_version": invalid_version},
+    )
+
+    with pytest.raises(IOError, match="Invalid checkpoint version type"):
+        MockModel.from_checkpoint(checkpoint)
+
+
+def test_from_checkpoint_rejects_cyclic_nested_modules(tmp_path):
+    checkpoint = tmp_path / "cyclic-modules.mdlus"
+    nested_prefix = "__physicsnemo.Module__.child"
+    nested_args = {
+        "__name__": "NestedMockModel",
+        "__module__": __name__,
+        "__args__": {"child": nested_prefix},
+    }
+    args = {
+        "__name__": "NestedMockModel",
+        "__module__": __name__,
+        "__args__": {"child": nested_prefix},
+        nested_prefix: nested_args,
+    }
+    ModelRegistry().register(NestedMockModel)
+    _write_checkpoint(checkpoint, args, {})
+
+    with pytest.raises(IOError, match="cyclic module reference"):
+        NestedMockModel.from_checkpoint(checkpoint)
+
+
+def test_instantiate_rejects_unregistered_import(monkeypatch):
+    def unexpected_import(_module_name):
+        pytest.fail("untrusted module was imported")
+
+    monkeypatch.setattr(
+        "physicsnemo.core.module.importlib.import_module", unexpected_import
+    )
+    args = {
+        "__name__": "run",
+        "__module__": "subprocess",
+        "__args__": {"args": ["true"]},
+    }
+
+    with pytest.raises(ValueError, match="neither registered"):
+        physicsnemo.core.Module.instantiate(args)
+
+
+def test_module_load_uses_restricted_unpickler_by_default(tmp_path):
+    global _unsafe_pickle_loaded
+    _unsafe_pickle_loaded = False
+    checkpoint = tmp_path / "unsafe-pickle.mdlus"
+    args = {
+        "__name__": "MockModel",
+        "__module__": __name__,
+        "__args__": {"layer_size": 16},
+    }
+    _write_checkpoint(
+        checkpoint,
+        args,
+        {"mdlus_file_version": "0.1.0"},
+        model_payload=_UnsafePicklePayload(),
+    )
+
+    model = MockModel()
+    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
+        model.load(checkpoint, strict=False)
+    assert not _unsafe_pickle_loaded
+
+    model.load(checkpoint, strict=False, allow_unsafe_pickle=True)
+    assert _unsafe_pickle_loaded
+
+    _unsafe_pickle_loaded = False
+    with pytest.raises(pickle.UnpicklingError, match="Weights only load failed"):
+        MockModel.from_checkpoint(checkpoint, strict=False)
+    assert not _unsafe_pickle_loaded
+
+    MockModel.from_checkpoint(
+        checkpoint,
+        strict=False,
+        allow_unsafe_pickle=True,
+    )
+    assert _unsafe_pickle_loaded
 
 
 def test_checkpoint_archive_members_stay_within_destination(tmp_path):
