@@ -228,7 +228,7 @@ class WandBLogger(ExperimentLogger):
         if (wandb_id := kwargs.pop("id", None)) is None:
             wandb_id_file = os.path.join(kwargs["dir"], "wandb_id.txt")
             if not os.path.exists(wandb_id_file):
-                wandb_id = wandb.util.generate_id()
+                wandb_id = wandb.sdk.lib.runid.generate_id()
                 with open(wandb_id_file, "w", encoding="utf-8") as f:
                     f.write(wandb_id)
                 logger.info(f"Starting new wandb run: {wandb_id}")
