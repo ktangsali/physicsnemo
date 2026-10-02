@@ -21,7 +21,7 @@ It holds the Gaussian-process heads below; other UQ methods are expected to join
 them as the area develops.
 
 For methodology and scientific results on UQ for geometry-conditioned neural
-surrogates, see `Predictive Uncertainty for Neural CAE Surrogates
+surrogates, refer to `Predictive Uncertainty for Neural CAE Surrogates
 <https://arxiv.org/abs/2609.25430>`_. The study evaluates
 GP-based uncertainty, concrete MC-dropout, and deep ensembles across external
 aerodynamics and crash dynamics.
