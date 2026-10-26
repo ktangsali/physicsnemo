@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Groups experimental scalar and field GP heads under `experimental.uq.gp`.
 - Adds `GeoTransolver.forward_with_geometry_features` for predictions and detached
   geometry tokens in one pass, preserving the existing `forward` API.
 - Strata depthwise conditioning convolutions automatically size vmap chunks
@@ -315,6 +316,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The `physicsnemo.experimental.uq.variational_gp_head` and
+  `physicsnemo.experimental.uq.field_variational_gp_head` modules. Import the
+  heads from `physicsnemo.experimental.uq` as before, or from
+  `physicsnemo.experimental.uq.gp`.
 - `physicsnemo.experimental.models.globe.utilities`, whose TensorDict helpers
   GLOBE no longer uses.
 - `physicsnemo.mesh.fields`: `RankSpecDict`, `flatten_rank_spec`,
