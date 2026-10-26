@@ -17,8 +17,8 @@
 """Uncertainty quantification modules (experimental).
 
 This subpackage collects UQ building blocks that attach to existing backbones.
-The ``gp`` subpackage provides Gaussian-process heads; other UQ methods are
-expected to join them as the area develops.
+The ``gp`` subpackage provides Gaussian-process heads; ``ood`` provides reusable
+out-of-distribution scorers and optional geometry descriptors.
 
 For methodology and scientific results on UQ for geometry-conditioned neural
 surrogates, refer to `Predictive Uncertainty for Neural CAE Surrogates
