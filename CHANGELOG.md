@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Adds opt-in tensor-aware streaming `Mean`/`Variance`, with detached state,
+  state combination, and ShardTensor reductions over declared observation axes.
+  Existing metric constructors retain their behavior. Includes examples for
+  GP mixtures, Concrete Dropout, observables, and conformal calibration.
 - Groups experimental scalar and field GP heads under `experimental.uq.gp`.
 - Adds `GeoTransolver.forward_with_geometry_features` for predictions and detached
   geometry tokens in one pass, preserving the existing `forward` API.
